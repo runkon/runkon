@@ -1,0 +1,17 @@
+[package]
+name = "runkon-flow"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Portable workflow execution engine — DSL, traits, and in-memory reference implementations"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+ulid = "1"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+dirs = "6"
+tempfile = "3"
