@@ -34,6 +34,7 @@ pub const ENGINE_INJECTED_KEYS: &[&str] = &[
 ];
 
 /// Domain-identity context for a single workflow execution.
+#[derive(Clone)]
 pub struct WorktreeContext {
     pub worktree_id: Option<String>,
     pub working_dir: String,

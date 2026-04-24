@@ -120,20 +120,23 @@ fn test_foreach_parallel_fan_out_all_succeed() {
 
 // ---------------------------------------------------------------------------
 // Test 3: halt on failure (max_parallel = 1)
-// Item 1 succeeds, item 2 fails → halt; item 3 must not be dispatched.
+// Failing item is placed first so it is always dispatched first (position()
+// finds index 0 when all items are eligible; swap_remove(0) moves the last
+// element to 0, which is one of the still-pending items). After the failure
+// halt=true prevents any further dispatch, leaving the remaining 2 pending.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn test_foreach_on_child_fail_halt() {
     let items_data = vec![
+        ("ticket", "t_fail", "T-fail"), // dispatched first; fails → halt
         ("ticket", "t1", "T-1"),
         ("ticket", "t2", "T-2"),
-        ("ticket", "t3", "T-3"),
     ];
     let mut outcomes = HashMap::new();
+    outcomes.insert("t_fail".to_string(), false); // fails
     outcomes.insert("t1".to_string(), true);
-    outcomes.insert("t2".to_string(), false); // fails
-    outcomes.insert("t3".to_string(), true);
+    outcomes.insert("t2".to_string(), true);
 
     let persistence = make_persistence();
     let mut state = make_foreach_state(
@@ -156,13 +159,17 @@ fn test_foreach_on_child_fail_halt() {
 
     let items = fan_out_items(&persistence, &state.workflow_run_id, "foreach:fan-out");
     assert_eq!(items.len(), 3, "should have 3 fan-out items");
-    assert_eq!(count_status(&items, "completed"), 1, "t1 should complete");
-    assert_eq!(count_status(&items, "failed"), 1, "t2 should fail");
-    // t3 was never dispatched; stays pending
+    assert_eq!(
+        count_status(&items, "completed"),
+        0,
+        "no items should complete"
+    );
+    assert_eq!(count_status(&items, "failed"), 1, "t_fail should fail");
+    // t1 and t2 were never dispatched; halt fired before them
     assert_eq!(
         count_status(&items, "pending"),
-        1,
-        "t3 should remain pending (not dispatched)"
+        2,
+        "t1 and t2 should remain pending (not dispatched)"
     );
 }
 

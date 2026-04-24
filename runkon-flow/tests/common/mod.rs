@@ -322,6 +322,22 @@ pub fn named_executors(
 // foreach test helpers
 // ---------------------------------------------------------------------------
 
+fn mock_workflow_result(item_id: &str, wf_name: &str, succeeded: bool) -> WorkflowResult {
+    WorkflowResult {
+        workflow_run_id: format!("mock-run-{}", item_id),
+        worktree_id: None,
+        workflow_name: wf_name.to_string(),
+        all_succeeded: succeeded,
+        total_cost: 0.0,
+        total_turns: 0,
+        total_duration_ms: 0,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_input_tokens: 0,
+        total_cache_creation_input_tokens: 0,
+    }
+}
+
 /// Mock child workflow runner.
 ///
 /// Reads `params.inputs["item.id"]` to determine success from the pre-configured
@@ -355,19 +371,7 @@ impl ChildWorkflowRunner for MockChildRunner {
         let item_id = params.inputs.get("item.id").cloned().unwrap_or_default();
         self.call_log.lock().unwrap().push(item_id.clone());
         let succeeded = self.outcomes.get(&item_id).copied().unwrap_or(true);
-        Ok(WorkflowResult {
-            workflow_run_id: format!("mock-run-{}", item_id),
-            worktree_id: None,
-            workflow_name: child_def.name.clone(),
-            all_succeeded: succeeded,
-            total_cost: 0.0,
-            total_turns: 0,
-            total_duration_ms: 0,
-            total_input_tokens: 0,
-            total_output_tokens: 0,
-            total_cache_read_input_tokens: 0,
-            total_cache_creation_input_tokens: 0,
-        })
+        Ok(mock_workflow_result(&item_id, &child_def.name, succeeded))
     }
 
     fn resume_child(
@@ -461,28 +465,24 @@ pub fn ordered_foreach_node(
     on_child_fail: OnChildFail,
 ) -> ForEachNode {
     ForEachNode {
-        name: name.to_string(),
-        over: provider.to_string(),
-        scope: None,
-        filter: HashMap::new(),
         ordered: true,
-        on_cycle: OnCycle::Fail,
-        max_parallel,
-        workflow: workflow.to_string(),
-        inputs: HashMap::new(),
-        on_child_fail,
+        ..foreach_node(name, provider, workflow, max_parallel, on_child_fail)
     }
 }
 
 /// Build an `ExecutionState` wired with a `MockChildRunner` and an item provider.
 ///
 /// Sets `fail_fast = false` so tests can inspect state after step failures.
-pub fn make_foreach_state<P: ItemProvider + 'static>(
+fn make_foreach_state_inner<R, P>(
     wf_name: &str,
     persistence: Arc<InMemoryWorkflowPersistence>,
-    child_runner: MockChildRunner,
+    child_runner: R,
     provider: P,
-) -> ExecutionState {
+) -> ExecutionState
+where
+    R: ChildWorkflowRunner + 'static,
+    P: ItemProvider + 'static,
+{
     let mut state = make_state(wf_name, Arc::clone(&persistence), HashMap::new());
     state.child_runner = Some(Arc::new(child_runner));
     state.exec_config.fail_fast = false;
@@ -494,6 +494,15 @@ pub fn make_foreach_state<P: ItemProvider + 'static>(
     state
 }
 
+pub fn make_foreach_state<P: ItemProvider + 'static>(
+    wf_name: &str,
+    persistence: Arc<InMemoryWorkflowPersistence>,
+    child_runner: MockChildRunner,
+    provider: P,
+) -> ExecutionState {
+    make_foreach_state_inner(wf_name, persistence, child_runner, provider)
+}
+
 /// Like `make_foreach_state` but uses a `CancellingMockRunner` and a caller-supplied
 /// `CancellationToken` so tests can trigger cancellation mid-dispatch.
 pub fn make_foreach_state_cancellable(
@@ -503,15 +512,8 @@ pub fn make_foreach_state_cancellable(
     provider: MockItemProvider,
     cancellation: CancellationToken,
 ) -> ExecutionState {
-    let mut state = make_state(wf_name, Arc::clone(&persistence), HashMap::new());
-    state.child_runner = Some(Arc::new(child_runner));
-    state.exec_config.fail_fast = false;
+    let mut state = make_foreach_state_inner(wf_name, persistence, child_runner, provider);
     state.cancellation = cancellation;
-
-    let mut registry = ItemProviderRegistry::new();
-    registry.register(provider);
-    state.registry = Arc::new(registry);
-
     state
 }
 
@@ -653,19 +655,7 @@ impl ChildWorkflowRunner for CancellingMockRunner {
             self.token.cancel(CancellationReason::UserRequested(None));
         }
         let succeeded = self.outcomes.get(&item_id).copied().unwrap_or(true);
-        Ok(WorkflowResult {
-            workflow_run_id: format!("mock-run-{}", item_id),
-            worktree_id: None,
-            workflow_name: child_def.name.clone(),
-            all_succeeded: succeeded,
-            total_cost: 0.0,
-            total_turns: 0,
-            total_duration_ms: 0,
-            total_input_tokens: 0,
-            total_output_tokens: 0,
-            total_cache_read_input_tokens: 0,
-            total_cache_creation_input_tokens: 0,
-        })
+        Ok(mock_workflow_result(&item_id, &child_def.name, succeeded))
     }
 
     fn resume_child(

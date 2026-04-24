@@ -1484,10 +1484,8 @@ mod tests {
     #[test]
     fn parallel_fail_fast_skips_remaining_branches() {
         use crate::dsl::{ParallelNode, WorkflowNode};
-        use crate::engine::{ExecutionState, WorktreeContext};
         use crate::persistence_memory::InMemoryWorkflowPersistence;
         use crate::traits::persistence::NewRun;
-        use crate::types::WorkflowExecConfig;
 
         // Build engine with both alpha and failing executors.
         let engine = FlowEngineBuilder::new()
@@ -1540,53 +1538,10 @@ mod tests {
             "failing".to_string(),
             Box::new(FailingExecutor) as Box<dyn crate::traits::action_executor::ActionExecutor>,
         );
-        let mut state = ExecutionState {
-            persistence: Arc::clone(&persistence),
-            action_registry: Arc::new(ActionRegistry::new(m, None)),
-            script_env_provider: Arc::new(
-                crate::traits::script_env_provider::NoOpScriptEnvProvider,
-            ),
-            workflow_run_id: run.id.clone(),
-            workflow_name: "wf".to_string(),
-            worktree_ctx: WorktreeContext {
-                worktree_id: None,
-                working_dir: String::new(),
-                repo_path: String::new(),
-                ticket_id: None,
-                repo_id: None,
-                extra_plugin_dirs: vec![],
-            },
-            model: None,
-            exec_config: WorkflowExecConfig::default(),
-            inputs: HashMap::new(),
-            parent_run_id: String::new(),
-            depth: 0,
-            target_label: None,
-            step_results: HashMap::new(),
-            contexts: vec![],
-            position: 0,
-            all_succeeded: true,
-            total_cost: 0.0,
-            total_turns: 0,
-            total_duration_ms: 0,
-            total_input_tokens: 0,
-            total_output_tokens: 0,
-            total_cache_read_input_tokens: 0,
-            total_cache_creation_input_tokens: 0,
-            last_gate_feedback: None,
-            block_output: None,
-            block_with: vec![],
-            resume_ctx: None,
-            default_bot_name: None,
-            triggered_by_hook: false,
-            schema_resolver: None,
-            child_runner: None,
-            last_heartbeat_at: ExecutionState::new_heartbeat(),
-            registry: Arc::new(crate::traits::item_provider::ItemProviderRegistry::new()),
-            event_sinks: Arc::from(vec![]),
-            cancellation: crate::cancellation::CancellationToken::new(),
-            current_execution_id: Arc::new(std::sync::Mutex::new(None)),
-        };
+        let mut state = make_bare_state("wf");
+        state.persistence = Arc::clone(&persistence);
+        state.action_registry = Arc::new(ActionRegistry::new(m, None));
+        state.workflow_run_id = run.id.clone();
 
         engine.run(&def, &mut state).ok(); // may fail due to min_success
 
@@ -1608,10 +1563,8 @@ mod tests {
     #[test]
     fn step_timeout_marks_timed_out() {
         use crate::dsl::{CallNode, WorkflowNode};
-        use crate::engine::{ExecutionState, WorktreeContext};
         use crate::persistence_memory::InMemoryWorkflowPersistence;
         use crate::traits::persistence::NewRun;
-        use crate::types::WorkflowExecConfig;
 
         // Executor that sleeps longer than the DSL timeout.
         struct SlowExecutor;
@@ -1669,53 +1622,10 @@ mod tests {
             "slow".to_string(),
             Box::new(SlowExecutor) as Box<dyn crate::traits::action_executor::ActionExecutor>,
         );
-        let mut state = ExecutionState {
-            persistence: Arc::clone(&persistence),
-            action_registry: Arc::new(ActionRegistry::new(m, None)),
-            script_env_provider: Arc::new(
-                crate::traits::script_env_provider::NoOpScriptEnvProvider,
-            ),
-            workflow_run_id: run.id.clone(),
-            workflow_name: "wf".to_string(),
-            worktree_ctx: WorktreeContext {
-                worktree_id: None,
-                working_dir: String::new(),
-                repo_path: String::new(),
-                ticket_id: None,
-                repo_id: None,
-                extra_plugin_dirs: vec![],
-            },
-            model: None,
-            exec_config: WorkflowExecConfig::default(),
-            inputs: HashMap::new(),
-            parent_run_id: String::new(),
-            depth: 0,
-            target_label: None,
-            step_results: HashMap::new(),
-            contexts: vec![],
-            position: 0,
-            all_succeeded: true,
-            total_cost: 0.0,
-            total_turns: 0,
-            total_duration_ms: 0,
-            total_input_tokens: 0,
-            total_output_tokens: 0,
-            total_cache_read_input_tokens: 0,
-            total_cache_creation_input_tokens: 0,
-            last_gate_feedback: None,
-            block_output: None,
-            block_with: vec![],
-            resume_ctx: None,
-            default_bot_name: None,
-            triggered_by_hook: false,
-            schema_resolver: None,
-            child_runner: None,
-            last_heartbeat_at: ExecutionState::new_heartbeat(),
-            registry: Arc::new(crate::traits::item_provider::ItemProviderRegistry::new()),
-            event_sinks: Arc::from(vec![]),
-            cancellation: crate::cancellation::CancellationToken::new(),
-            current_execution_id: Arc::new(std::sync::Mutex::new(None)),
-        };
+        let mut state = make_bare_state("wf");
+        state.persistence = Arc::clone(&persistence);
+        state.action_registry = Arc::new(ActionRegistry::new(m, None));
+        state.workflow_run_id = run.id.clone();
 
         engine.run(&def, &mut state).ok();
 

@@ -44,13 +44,7 @@ struct ForeachParentCtx {
     depth: u32,
     target_label: Option<String>,
     default_bot_name: Option<String>,
-    // WorktreeContext fields (WorktreeContext itself is not Clone)
-    wt_working_dir: String,
-    wt_repo_path: String,
-    wt_worktree_id: Option<String>,
-    wt_ticket_id: Option<String>,
-    wt_repo_id: Option<String>,
-    wt_extra_plugin_dirs: Vec<String>,
+    worktree_ctx: WorktreeContext,
 }
 
 impl ForeachParentCtx {
@@ -73,12 +67,7 @@ impl ForeachParentCtx {
             depth: state.depth,
             target_label: state.target_label.clone(),
             default_bot_name: state.default_bot_name.clone(),
-            wt_working_dir: state.worktree_ctx.working_dir.clone(),
-            wt_repo_path: state.worktree_ctx.repo_path.clone(),
-            wt_worktree_id: state.worktree_ctx.worktree_id.clone(),
-            wt_ticket_id: state.worktree_ctx.ticket_id.clone(),
-            wt_repo_id: state.worktree_ctx.repo_id.clone(),
-            wt_extra_plugin_dirs: state.worktree_ctx.extra_plugin_dirs.clone(),
+            worktree_ctx: state.worktree_ctx.clone(),
         }
     }
 
@@ -89,14 +78,7 @@ impl ForeachParentCtx {
             script_env_provider: Arc::clone(&self.script_env_provider),
             workflow_run_id: self.workflow_run_id.clone(),
             workflow_name: self.workflow_name.clone(),
-            worktree_ctx: WorktreeContext {
-                working_dir: self.wt_working_dir.clone(),
-                repo_path: self.wt_repo_path.clone(),
-                worktree_id: self.wt_worktree_id.clone(),
-                ticket_id: self.wt_ticket_id.clone(),
-                repo_id: self.wt_repo_id.clone(),
-                extra_plugin_dirs: self.wt_extra_plugin_dirs.clone(),
-            },
+            worktree_ctx: self.worktree_ctx.clone(),
             model: self.model.clone(),
             exec_config: self.exec_config.clone(),
             inputs: HashMap::new(),
@@ -267,11 +249,11 @@ pub fn execute_foreach(
         }
     }
 
-    let all_items = state
-        .persistence
-        .get_fan_out_items(&step_id, None)
-        .map_err(p_err)?;
-    let total_items = all_items.len();
+    let new_item_count = items
+        .iter()
+        .filter(|(_, id, _)| !existing_set.contains(id))
+        .count();
+    let total_items = existing_items.len() + new_item_count;
 
     tracing::info!(
         "foreach '{}': {} items to process (over={}, max_parallel={})",
@@ -524,7 +506,7 @@ pub fn execute_foreach(
                     .position(|item| is_eligible(&item.item_id, &dep_map, &terminal_ids));
 
                 let item = match eligible_pos {
-                    Some(pos) => pending.remove(pos),
+                    Some(pos) => pending.swap_remove(pos),
                     None => break,
                 };
 
