@@ -409,11 +409,9 @@ mod tests {
             worktree_ctx: WorktreeContext {
                 worktree_id: None,
                 working_dir: String::new(),
-                worktree_slug: String::new(),
                 repo_path: String::new(),
                 ticket_id: None,
                 repo_id: None,
-                conductor_bin_dir: None,
                 extra_plugin_dirs: vec![],
             },
             model: None,

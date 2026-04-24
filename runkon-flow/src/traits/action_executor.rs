@@ -96,12 +96,29 @@ impl ActionRegistry {
         Self { named, fallback }
     }
 
+    /// Construct a registry for external consumers such as integration-test harnesses.
+    ///
+    /// Production code should use [`FlowEngineBuilder::action`] to register executors.
+    pub fn from_executors(
+        named: HashMap<String, Box<dyn ActionExecutor>>,
+        fallback: Option<Box<dyn ActionExecutor>>,
+    ) -> Self {
+        Self { named, fallback }
+    }
+
     /// Returns `true` if the named executor is registered OR a fallback is configured.
     ///
     /// Mirrors the fallback semantics of `dispatch()`: a harness that registers only
     /// a fallback executor passes all action name checks.
     pub fn has_action(&self, name: &str) -> bool {
         self.named.contains_key(name) || self.fallback.is_some()
+    }
+
+    fn find_executor(&self, name: &str) -> Option<&dyn ActionExecutor> {
+        self.named
+            .get(name)
+            .map(|e| e.as_ref())
+            .or(self.fallback.as_deref())
     }
 
     /// Find the executor for `name` and run it.
@@ -111,12 +128,7 @@ impl ActionRegistry {
         ectx: &ExecutionContext,
         params: &ActionParams,
     ) -> Result<ActionOutput, EngineError> {
-        let executor = self
-            .named
-            .get(name)
-            .map(|e| e.as_ref())
-            .or(self.fallback.as_deref());
-        match executor {
+        match self.find_executor(name) {
             Some(e) => e.execute(ectx, params),
             None => Err(EngineError::Workflow(format!(
                 "no registered ActionExecutor for '{}' and no fallback configured",
@@ -128,12 +140,7 @@ impl ActionRegistry {
     /// Call `cancel()` on the executor for `name`, if registered.
     /// Used by `FlowEngine::cancel_run()` to fire-and-forget executor-level cancellation.
     pub fn cancel(&self, name: &str, execution_id: &str) -> Result<(), EngineError> {
-        let executor = self
-            .named
-            .get(name)
-            .map(|e| e.as_ref())
-            .or(self.fallback.as_deref());
-        match executor {
+        match self.find_executor(name) {
             Some(e) => e.cancel(execution_id),
             None => Ok(()),
         }

@@ -28,11 +28,6 @@ pub trait RunContext {
         None
     }
 
-    /// Worktree slug (empty string for repo-level runs).
-    fn worktree_slug(&self) -> &str {
-        ""
-    }
-
     /// Ticket ID linked to this run, if any.
     fn ticket_id(&self) -> Option<&str> {
         None

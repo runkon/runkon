@@ -1,6 +1,5 @@
 pub mod cancellation;
 pub mod cancellation_reason;
-pub mod channel_event_sink;
 pub mod constants;
 pub mod dsl;
 pub mod engine;
@@ -22,7 +21,6 @@ pub mod workflow_resolver_memory;
 
 pub use cancellation::CancellationToken;
 pub use cancellation_reason::CancellationReason;
-pub use channel_event_sink::ChannelEventSink;
 pub use dsl::ValidationError;
 pub use events::{EngineEvent, EngineEventData, EventSink};
 pub use flow_engine::{EngineBundle, FlowEngine, FlowEngineBuilder};

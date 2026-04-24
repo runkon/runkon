@@ -269,11 +269,9 @@ mod tests {
             worktree_ctx: WorktreeContext {
                 worktree_id: None,
                 working_dir: "/tmp".to_string(),
-                worktree_slug: "test".to_string(),
                 repo_path: "/tmp".to_string(),
                 ticket_id: None,
                 repo_id: None,
-                conductor_bin_dir: None,
                 extra_plugin_dirs: vec![],
             },
             model: None,

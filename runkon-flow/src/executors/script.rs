@@ -109,9 +109,6 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
             fn worktree_id(&self) -> Option<&str> {
                 None
             }
-            fn worktree_slug(&self) -> &str {
-                ""
-            }
             fn ticket_id(&self) -> Option<&str> {
                 None
             }

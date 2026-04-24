@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use chrono::Utc;
@@ -19,6 +20,9 @@ struct InMemoryStore {
     fan_out_items: HashMap<String, FanOutItemRow>,
     /// Secondary index: (step_run_id, item_id) → fan_out_item id for O(1) idempotency check.
     fan_out_index: HashMap<(String, String), String>,
+    /// Insertion-order list of fan_out_item ids; used to return items in stable order
+    /// (mirrors real SQLite behaviour where rows sort by rowid = insertion order).
+    fan_out_order: Vec<String>,
 }
 
 /// In-memory implementation of `WorkflowPersistence` for test isolation.
@@ -27,6 +31,8 @@ struct InMemoryStore {
 /// is dropped. No SQLite or filesystem access is required.
 pub struct InMemoryWorkflowPersistence {
     store: Mutex<InMemoryStore>,
+    /// When `true`, `get_fan_out_items` returns a `Persistence` error.
+    fail_get_fan_out_items: AtomicBool,
 }
 
 impl InMemoryWorkflowPersistence {
@@ -37,7 +43,9 @@ impl InMemoryWorkflowPersistence {
                 steps: HashMap::new(),
                 fan_out_items: HashMap::new(),
                 fan_out_index: HashMap::new(),
+                fan_out_order: Vec::new(),
             }),
+            fail_get_fan_out_items: AtomicBool::new(false),
         }
     }
 }
@@ -45,6 +53,15 @@ impl InMemoryWorkflowPersistence {
 impl Default for InMemoryWorkflowPersistence {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl InMemoryWorkflowPersistence {
+    /// Inject a failure into `get_fan_out_items`. When `fail` is `true`, the next
+    /// call to `get_fan_out_items` returns `EngineError::Persistence`.
+    pub fn set_fail_get_fan_out_items(&self, fail: bool) {
+        self.fail_get_fan_out_items
+            .store(fail, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -257,6 +274,7 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
         }
         let id = ulid::Ulid::new().to_string();
         store.fan_out_index.insert(index_key, id.clone());
+        store.fan_out_order.push(id.clone());
         store.fan_out_items.insert(
             id.clone(),
             FanOutItemRow {
@@ -304,10 +322,18 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
         step_run_id: &str,
         status_filter: Option<FanOutItemStatus>,
     ) -> Result<Vec<FanOutItemRow>, EngineError> {
+        if self.fail_get_fan_out_items.load(Ordering::Relaxed) {
+            return Err(EngineError::Persistence(
+                "injected get_fan_out_items failure".into(),
+            ));
+        }
         let store = self.store.lock().map_err(|_| lock_err())?;
-        let mut items: Vec<FanOutItemRow> = store
-            .fan_out_items
-            .values()
+        // Iterate in insertion order (mirrors SQLite rowid order) so callers get a
+        // stable, deterministic sequence regardless of ULID timestamp collisions.
+        let items: Vec<FanOutItemRow> = store
+            .fan_out_order
+            .iter()
+            .filter_map(|id| store.fan_out_items.get(id))
             .filter(|i| {
                 i.step_run_id == step_run_id
                     && status_filter
@@ -316,7 +342,6 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
             })
             .cloned()
             .collect();
-        items.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(items)
     }
 

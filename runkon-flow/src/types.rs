@@ -229,10 +229,3 @@ pub struct FanOutItemRow {
     pub dispatched_at: Option<String>,
     pub completed_at: Option<String>,
 }
-
-/// Resolve the directory containing the current executable.
-pub fn resolve_conductor_bin_dir() -> Option<std::path::PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-}

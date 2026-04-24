@@ -66,27 +66,13 @@ impl WorkflowDef {
                             return Some(v);
                         }
                     }
-                    WorkflowNode::If(n) => {
-                        if let Some(v) = search(&n.body, name) {
-                            return Some(v);
+                    _ => {
+                        if let Some(body) = node.body() {
+                            if let Some(v) = search(body, name) {
+                                return Some(v);
+                            }
                         }
                     }
-                    WorkflowNode::Unless(n) => {
-                        if let Some(v) = search(&n.body, name) {
-                            return Some(v);
-                        }
-                    }
-                    WorkflowNode::Do(n) => {
-                        if let Some(v) = search(&n.body, name) {
-                            return Some(v);
-                        }
-                    }
-                    WorkflowNode::Always(n) => {
-                        if let Some(v) = search(&n.body, name) {
-                            return Some(v);
-                        }
-                    }
-                    _ => {}
                 }
             }
             None
@@ -216,6 +202,21 @@ pub enum WorkflowNode {
     Always(AlwaysNode),
     Script(ScriptNode),
     ForEach(ForEachNode),
+}
+
+impl WorkflowNode {
+    /// Returns the child body slice for block-node variants, or `None` for leaf nodes.
+    pub fn body(&self) -> Option<&[WorkflowNode]> {
+        match self {
+            WorkflowNode::If(n) => Some(&n.body),
+            WorkflowNode::Unless(n) => Some(&n.body),
+            WorkflowNode::While(n) => Some(&n.body),
+            WorkflowNode::DoWhile(n) => Some(&n.body),
+            WorkflowNode::Do(n) => Some(&n.body),
+            WorkflowNode::Always(n) => Some(&n.body),
+            _ => None,
+        }
+    }
 }
 
 /// A foreach step node — fans out a child workflow over a collection of items.
@@ -634,16 +635,12 @@ pub(crate) fn count_nodes(nodes: &[WorkflowNode]) -> usize {
     for node in nodes {
         count += 1;
         match node {
-            WorkflowNode::Call(_) | WorkflowNode::CallWorkflow(_) | WorkflowNode::Script(_) => {}
-            WorkflowNode::If(n) => count += count_nodes(&n.body),
-            WorkflowNode::Unless(n) => count += count_nodes(&n.body),
-            WorkflowNode::While(n) => count += count_nodes(&n.body),
-            WorkflowNode::DoWhile(n) => count += count_nodes(&n.body),
-            WorkflowNode::Do(n) => count += count_nodes(&n.body),
             WorkflowNode::Parallel(n) => count += n.calls.len(),
-            WorkflowNode::Gate(_) => {}
-            WorkflowNode::Always(n) => count += count_nodes(&n.body),
-            WorkflowNode::ForEach(_) => {}
+            _ => {
+                if let Some(body) = node.body() {
+                    count += count_nodes(body);
+                }
+            }
         }
     }
     count
@@ -670,15 +667,12 @@ pub fn collect_agent_names(nodes: &[WorkflowNode]) -> Vec<AgentRef> {
                     refs.push(a.clone());
                 }
             }
-            WorkflowNode::If(n) => refs.extend(collect_agent_names(&n.body)),
-            WorkflowNode::Unless(n) => refs.extend(collect_agent_names(&n.body)),
-            WorkflowNode::While(n) => refs.extend(collect_agent_names(&n.body)),
-            WorkflowNode::DoWhile(n) => refs.extend(collect_agent_names(&n.body)),
-            WorkflowNode::Do(n) => refs.extend(collect_agent_names(&n.body)),
             WorkflowNode::Parallel(n) => refs.extend(n.calls.iter().cloned()),
-            WorkflowNode::Gate(_) => {}
-            WorkflowNode::Always(n) => refs.extend(collect_agent_names(&n.body)),
-            WorkflowNode::ForEach(_) => {}
+            _ => {
+                if let Some(body) = node.body() {
+                    refs.extend(collect_agent_names(body));
+                }
+            }
         }
     }
     refs
@@ -696,17 +690,15 @@ pub(crate) fn collect_snippet_refs(nodes: &[WorkflowNode]) -> Vec<String> {
                     refs.extend(extra.iter().cloned());
                 }
             }
-            WorkflowNode::If(n) => refs.extend(collect_snippet_refs(&n.body)),
-            WorkflowNode::Unless(n) => refs.extend(collect_snippet_refs(&n.body)),
-            WorkflowNode::While(n) => refs.extend(collect_snippet_refs(&n.body)),
-            WorkflowNode::DoWhile(n) => refs.extend(collect_snippet_refs(&n.body)),
             WorkflowNode::Do(n) => {
                 refs.extend(n.with.iter().cloned());
                 refs.extend(collect_snippet_refs(&n.body));
             }
-            WorkflowNode::Always(n) => refs.extend(collect_snippet_refs(&n.body)),
-            WorkflowNode::CallWorkflow(_) | WorkflowNode::Gate(_) | WorkflowNode::Script(_) => {}
-            WorkflowNode::ForEach(_) => {}
+            _ => {
+                if let Some(body) = node.body() {
+                    refs.extend(collect_snippet_refs(body));
+                }
+            }
         }
     }
     refs
@@ -755,13 +747,11 @@ pub(crate) fn collect_schema_refs(nodes: &[WorkflowNode]) -> Vec<String> {
                 }
                 refs.extend(n.call_outputs.values().cloned());
             }
-            WorkflowNode::If(n) => refs.extend(collect_schema_refs(&n.body)),
-            WorkflowNode::Unless(n) => refs.extend(collect_schema_refs(&n.body)),
-            WorkflowNode::While(n) => refs.extend(collect_schema_refs(&n.body)),
-            WorkflowNode::DoWhile(n) => refs.extend(collect_schema_refs(&n.body)),
-            WorkflowNode::Always(n) => refs.extend(collect_schema_refs(&n.body)),
-            WorkflowNode::CallWorkflow(_) | WorkflowNode::Gate(_) | WorkflowNode::Script(_) => {}
-            WorkflowNode::ForEach(_) => {}
+            _ => {
+                if let Some(body) = node.body() {
+                    refs.extend(collect_schema_refs(body));
+                }
+            }
         }
     }
     refs
@@ -787,19 +777,16 @@ pub(crate) fn collect_bot_names(nodes: &[WorkflowNode]) -> Vec<String> {
                     names.push(b.clone());
                 }
             }
-            WorkflowNode::If(n) => names.extend(collect_bot_names(&n.body)),
-            WorkflowNode::Unless(n) => names.extend(collect_bot_names(&n.body)),
-            WorkflowNode::While(n) => names.extend(collect_bot_names(&n.body)),
-            WorkflowNode::DoWhile(n) => names.extend(collect_bot_names(&n.body)),
-            WorkflowNode::Do(n) => names.extend(collect_bot_names(&n.body)),
-            WorkflowNode::Parallel(_) => {}
             WorkflowNode::Script(n) => {
                 if let Some(ref b) = n.bot_name {
                     names.push(b.clone());
                 }
             }
-            WorkflowNode::Always(n) => names.extend(collect_bot_names(&n.body)),
-            WorkflowNode::ForEach(_) => {}
+            _ => {
+                if let Some(body) = node.body() {
+                    names.extend(collect_bot_names(body));
+                }
+            }
         }
     }
     names
@@ -811,17 +798,11 @@ pub(crate) fn collect_plugin_dirs(nodes: &[WorkflowNode]) -> Vec<String> {
     for node in nodes {
         match node {
             WorkflowNode::Call(n) => dirs.extend(n.plugin_dirs.iter().cloned()),
-            WorkflowNode::If(n) => dirs.extend(collect_plugin_dirs(&n.body)),
-            WorkflowNode::Unless(n) => dirs.extend(collect_plugin_dirs(&n.body)),
-            WorkflowNode::While(n) => dirs.extend(collect_plugin_dirs(&n.body)),
-            WorkflowNode::DoWhile(n) => dirs.extend(collect_plugin_dirs(&n.body)),
-            WorkflowNode::Do(n) => dirs.extend(collect_plugin_dirs(&n.body)),
-            WorkflowNode::Always(n) => dirs.extend(collect_plugin_dirs(&n.body)),
-            WorkflowNode::CallWorkflow(_)
-            | WorkflowNode::Gate(_)
-            | WorkflowNode::Parallel(_)
-            | WorkflowNode::Script(_)
-            | WorkflowNode::ForEach(_) => {}
+            _ => {
+                if let Some(body) = node.body() {
+                    dirs.extend(collect_plugin_dirs(body));
+                }
+            }
         }
     }
     dirs
