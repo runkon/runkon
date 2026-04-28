@@ -15,6 +15,23 @@ use super::types::{
 // Parser helpers
 // ---------------------------------------------------------------------------
 
+/// Reject an agent path that contains parent-directory components (`..`).
+///
+/// Enforced at parse time so any future code path that constructs an
+/// `AgentRef::Path` via the parser cannot bypass `script_utils::resolve_script_path`'s
+/// containment check.
+fn validate_agent_path(s: &str) -> std::result::Result<(), String> {
+    if Path::new(s)
+        .components()
+        .any(|c| c == std::path::Component::ParentDir)
+    {
+        return Err(format!(
+            "agent path contains parent-directory traversal (..): {s}"
+        ));
+    }
+    Ok(())
+}
+
 /// A value from a key-value pair in the DSL, remembering whether it was quoted.
 #[derive(Debug, Clone)]
 enum KvValue {
@@ -49,11 +66,14 @@ impl KvValue {
         }
     }
 
-    fn into_agent_ref(self) -> AgentRef {
+    fn into_agent_ref(self) -> std::result::Result<AgentRef, String> {
         match self {
-            Self::Bare(s) => AgentRef::Name(s),
-            Self::Quoted(s) if s.contains('/') => AgentRef::Path(s),
-            Self::Quoted(s) => AgentRef::Name(s),
+            Self::Bare(s) => Ok(AgentRef::Name(s)),
+            Self::Quoted(s) if s.contains('/') => {
+                validate_agent_path(&s)?;
+                Ok(AgentRef::Path(s))
+            }
+            Self::Quoted(s) => Ok(AgentRef::Name(s)),
             Self::Array(_) => unreachable!("BUG: into_agent_ref() called on KvValue::Array"),
             Self::Map(_) => unreachable!("BUG: into_agent_ref() called on KvValue::Map"),
         }
@@ -169,7 +189,10 @@ impl Parser {
             Token::Required => Ok(AgentRef::Name("required".to_string())),
             Token::Default => Ok(AgentRef::Name("default".to_string())),
             Token::Description => Ok(AgentRef::Name("description".to_string())),
-            Token::StringLit(s) => Ok(AgentRef::Path(s)),
+            Token::StringLit(s) => {
+                validate_agent_path(&s)?;
+                Ok(AgentRef::Path(s))
+            }
             other => Err(format!(
                 "Expected agent name (identifier) or path (quoted string), got {other:?}"
             )),
@@ -359,13 +382,11 @@ impl Parser {
             .transpose()
             .map_err(|e| format!("{err_prefix}invalid retries: {e}"))?
             .unwrap_or(0);
-        let on_fail = kvs.remove("on_fail").map(|v| {
-            if v.as_str() == "continue" {
-                OnFail::Continue
-            } else {
-                OnFail::Agent(v.into_agent_ref())
-            }
-        });
+        let on_fail = match kvs.remove("on_fail") {
+            None => None,
+            Some(v) if v.as_str() == "continue" => Some(OnFail::Continue),
+            Some(v) => Some(OnFail::Agent(v.into_agent_ref()?)),
+        };
         let bot_name = kvs.remove("as").map(|v| v.into_string());
         Ok((retries, on_fail, bot_name))
     }
@@ -1398,5 +1419,55 @@ workflow wf {
         let src = "workflow wf {}";
         let def = parse_workflow_str(src, "my/path/wf.wf").unwrap();
         assert_eq!(def.source_path, "my/path/wf.wf");
+    }
+
+    #[test]
+    fn parse_rejects_dotdot_in_quoted_agent_path() {
+        let src = r#"
+workflow wf {
+    call "../../etc/passwd"
+}
+"#;
+        let err = parse_workflow_str(src, "t.wf").expect_err("must reject ..");
+        assert!(
+            err.contains("parent-directory traversal"),
+            "expected traversal error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_dotdot_in_on_fail_agent_path() {
+        let src = r#"
+workflow wf {
+    call planner {
+        on_fail = "../oops/handler.md"
+    }
+}
+"#;
+        let err = parse_workflow_str(src, "t.wf").expect_err("must reject ..");
+        assert!(
+            err.contains("parent-directory traversal"),
+            "expected traversal error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_accepts_safe_agent_path_with_slash() {
+        // Quoted strings containing `/` but no `..` should still produce
+        // AgentRef::Path successfully — the validation must only reject
+        // traversal, not legitimate relative paths.
+        let src = r#"
+workflow wf {
+    call ".claude/agents/plan.md"
+}
+"#;
+        let def = parse_workflow_str(src, "t.wf").expect("safe path must parse");
+        match &def.body[0] {
+            WorkflowNode::Call(c) => assert_eq!(
+                c.agent,
+                AgentRef::Path(".claude/agents/plan.md".to_string())
+            ),
+            other => panic!("expected Call, got {other:?}"),
+        }
     }
 }

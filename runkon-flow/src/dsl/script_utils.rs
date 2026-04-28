@@ -10,17 +10,14 @@ fn path_is_within_dir(dir: &Path, file: &Path) -> bool {
 }
 
 /// Returns the ordered list of `(search_root, candidate_path)` pairs for a
-/// script name.
+/// script name. The caller must pass a relative `run`; absolute paths are
+/// rejected up-front by [`resolve_script_path`].
 pub(crate) fn script_search_paths(
     run: &str,
     working_dir: &str,
     repo_path: &str,
     skills_dir: Option<&std::path::Path>,
 ) -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
-    let p = std::path::Path::new(run);
-    if p.is_absolute() {
-        return vec![(p.to_path_buf(), p.to_path_buf())];
-    }
     let wd = std::path::Path::new(working_dir);
     let rp = std::path::Path::new(repo_path);
     let mut pairs = vec![
@@ -36,20 +33,25 @@ pub(crate) fn script_search_paths(
 }
 
 /// Resolve a script name to an existing path using the standard search order.
+///
+/// Absolute paths are rejected unconditionally: a workflow `run:` value that
+/// resolves outside the standard search roots (working dir, repo, `.conductor/scripts`,
+/// skills dir) cannot be executed, even if it exists on disk. This blocks a
+/// hostile `.wf` file from invoking arbitrary system binaries via
+/// `run: /etc/shadow` or similar.
 pub fn resolve_script_path(
     run: &str,
     working_dir: &str,
     repo_path: &str,
     skills_dir: Option<&std::path::Path>,
 ) -> Option<std::path::PathBuf> {
+    if std::path::Path::new(run).is_absolute() {
+        return None;
+    }
     let pairs = script_search_paths(run, working_dir, repo_path, skills_dir);
-    let is_absolute = std::path::Path::new(run).is_absolute();
 
     for (root, candidate) in &pairs {
         if candidate.exists() {
-            if is_absolute {
-                return Some(candidate.clone());
-            }
             if run.contains("..") {
                 continue;
             }
@@ -79,9 +81,10 @@ pub fn make_script_resolver(
 ) -> impl Fn(&str) -> Result<std::path::PathBuf, String> {
     move |run| {
         resolve_script_path(run, &working_dir, &repo_path, skills_dir.as_deref()).ok_or_else(|| {
-            let p = std::path::Path::new(run);
-            if p.is_absolute() {
-                run.to_string()
+            if std::path::Path::new(run).is_absolute() {
+                format!(
+                    "absolute paths are not allowed in `run:` (got '{run}'); use a path relative to the working dir, repo, .conductor/scripts, or skills dir"
+                )
             } else {
                 let pairs =
                     script_search_paths(run, &working_dir, &repo_path, skills_dir.as_deref());
@@ -93,5 +96,38 @@ pub fn make_script_resolver(
                 searched.join(", ")
             }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_script_path_rejects_absolute_path_even_if_it_exists() {
+        // /bin/sh exists on every Unix system the test runs on; it must still be
+        // rejected because it lies outside the standard script search roots.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wd = tmp.path().to_str().unwrap();
+        assert_eq!(resolve_script_path("/bin/sh", wd, wd, None), None);
+    }
+
+    #[test]
+    fn resolve_script_path_rejects_traversal_back_into_search_root() {
+        // A relative path that lexically escapes the search root via `..`
+        // must be rejected (existing behavior; covered here to lock it in).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wd = tmp.path().to_str().unwrap();
+        assert_eq!(resolve_script_path("../foo.sh", wd, wd, None), None);
+    }
+
+    #[test]
+    fn make_script_resolver_returns_explicit_error_for_absolute_path() {
+        let resolver = make_script_resolver("/tmp".into(), "/tmp".into(), None);
+        let err = resolver("/etc/shadow").expect_err("absolute path must error");
+        assert!(
+            err.contains("absolute paths are not allowed"),
+            "error should explain why absolute paths fail; got: {err}"
+        );
     }
 }
