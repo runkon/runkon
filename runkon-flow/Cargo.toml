@@ -8,6 +8,8 @@ description = "Portable workflow execution engine — DSL, traits, and in-memory
 
 [features]
 test-utils = []
+utoipa = ["dep:utoipa"]
+rusqlite = ["dep:rusqlite"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -18,6 +20,10 @@ chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 dirs = "6"
 tempfile = "3"
+threadpool = "1"
+wait-timeout = "0.2"
+utoipa = { version = "5", optional = true }
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 
 [[test]]
 name = "basic_flow"

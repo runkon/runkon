@@ -117,18 +117,36 @@ impl Parser {
             Err(format!("Expected {expected:?}, got {tok:?}"))
         }
     }
+}
 
+fn keyword_token_to_ident(tok: Token) -> std::result::Result<String, Token> {
+    match tok {
+        Token::Required => Ok("required".to_string()),
+        Token::Default => Ok("default".to_string()),
+        Token::Description => Ok("description".to_string()),
+        Token::Boolean => Ok("boolean".to_string()),
+        Token::Call => Ok("call".to_string()),
+        Token::If => Ok("if".to_string()),
+        Token::Unless => Ok("unless".to_string()),
+        Token::While => Ok("while".to_string()),
+        Token::Parallel => Ok("parallel".to_string()),
+        Token::Gate => Ok("gate".to_string()),
+        Token::Always => Ok("always".to_string()),
+        Token::Script => Ok("script".to_string()),
+        Token::ForEach => Ok("foreach".to_string()),
+        Token::Workflow => Ok("workflow".to_string()),
+        Token::Inputs => Ok("inputs".to_string()),
+        other => Err(other),
+    }
+}
+
+impl Parser {
     fn expect_ident(&mut self) -> std::result::Result<String, String> {
         match self.advance() {
             Token::Ident(s) => Ok(s),
-            Token::Required => Ok("required".to_string()),
-            Token::Default => Ok("default".to_string()),
-            Token::Description => Ok("description".to_string()),
-            Token::Boolean => Ok("boolean".to_string()),
-            Token::If => Ok("if".to_string()),
-            Token::Workflow => Ok("workflow".to_string()),
-            Token::Inputs => Ok("inputs".to_string()),
-            other => Err(format!("Expected identifier, got {other:?}")),
+            tok => {
+                keyword_token_to_ident(tok).map_err(|t| format!("Expected identifier, got {t:?}"))
+            }
         }
     }
 
@@ -145,19 +163,6 @@ impl Parser {
                     Ok(KvValue::Bare(s))
                 }
             }
-            Token::Required => Ok(KvValue::Bare("required".to_string())),
-            Token::Default => Ok(KvValue::Bare("default".to_string())),
-            Token::Description => Ok(KvValue::Bare("description".to_string())),
-            Token::Boolean => Ok(KvValue::Bare("boolean".to_string())),
-            Token::Call => Ok(KvValue::Bare("call".to_string())),
-            Token::If => Ok(KvValue::Bare("if".to_string())),
-            Token::Unless => Ok(KvValue::Bare("unless".to_string())),
-            Token::While => Ok(KvValue::Bare("while".to_string())),
-            Token::Parallel => Ok(KvValue::Bare("parallel".to_string())),
-            Token::Gate => Ok(KvValue::Bare("gate".to_string())),
-            Token::Always => Ok(KvValue::Bare("always".to_string())),
-            Token::Script => Ok(KvValue::Bare("script".to_string())),
-            Token::ForEach => Ok(KvValue::Bare("foreach".to_string())),
             Token::LBrace => {
                 let kvs = self.parse_kvs()?;
                 self.expect(&Token::RBrace)?;
@@ -177,9 +182,9 @@ impl Parser {
                 self.expect(&Token::RBracket)?;
                 Ok(KvValue::Array(items))
             }
-            other => Err(format!(
-                "Expected value (string, int, ident, or array), got {other:?}"
-            )),
+            tok => keyword_token_to_ident(tok)
+                .map(KvValue::Bare)
+                .map_err(|t| format!("Expected value (string, int, ident, or array), got {t:?}")),
         }
     }
 
@@ -649,6 +654,7 @@ impl Parser {
         let mut call_outputs: HashMap<String, String> = HashMap::new();
         let mut call_with: HashMap<String, Vec<String>> = HashMap::new();
         let mut call_if: HashMap<String, (String, String)> = HashMap::new();
+        let mut call_retries: HashMap<String, u32> = HashMap::new();
         while self.peek() == &Token::Call {
             self.advance();
             let agent = self.expect_agent_ref()?;
@@ -668,7 +674,17 @@ impl Parser {
                     let (step_name, marker_name) = s.split_once('.').ok_or_else(|| {
                         format!("if value `{s}` must be in the form `step.marker` (no dot found)")
                     })?;
-                    call_if.insert(idx, (step_name.to_string(), marker_name.to_string()));
+                    call_if.insert(
+                        idx.clone(),
+                        (step_name.to_string(), marker_name.to_string()),
+                    );
+                }
+                if let Some(v) = call_kvs.get("retries") {
+                    let r = v
+                        .as_str()
+                        .parse::<u32>()
+                        .map_err(|e| format!("parallel call {idx}: invalid retries: {e}"))?;
+                    call_retries.insert(idx, r);
                 }
             }
             calls.push(agent);
@@ -688,6 +704,7 @@ impl Parser {
             with: block_with,
             call_with,
             call_if,
+            call_retries,
         })
     }
 
@@ -1042,7 +1059,7 @@ impl Parser {
 // Duration parser
 // ---------------------------------------------------------------------------
 
-pub(crate) fn parse_duration_str(s: &str) -> std::result::Result<u64, String> {
+pub fn parse_duration_str(s: &str) -> std::result::Result<u64, String> {
     let s = s.trim().trim_matches('"');
     if let Some(hours) = s.strip_suffix('h') {
         let n: u64 = hours

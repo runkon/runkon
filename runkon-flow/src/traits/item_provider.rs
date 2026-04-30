@@ -13,8 +13,8 @@ pub struct FanOutItem {
 
 /// Context passed to providers during item collection.
 pub struct ProviderContext {
-    pub repo_id: Option<String>,
-    pub worktree_id: Option<String>,
+    pub run_id: String,
+    pub step_id: String,
 }
 
 /// Trait for a foreach item source registered with the engine.

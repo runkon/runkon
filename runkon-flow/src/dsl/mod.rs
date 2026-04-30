@@ -12,8 +12,7 @@ pub use api::{
     detect_workflow_cycles, load_workflow_by_name, load_workflow_defs, validate_workflow_name,
     MAX_WORKFLOW_DEPTH,
 };
-#[allow(unused_imports)]
-pub(crate) use parser::parse_duration_str;
+pub use parser::parse_duration_str;
 pub(crate) use parser::parse_workflow_file;
 pub use parser::parse_workflow_str;
 pub use script_utils::{default_skills_dir, make_script_resolver, resolve_script_path};

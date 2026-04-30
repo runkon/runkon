@@ -25,7 +25,7 @@ pub trait ActionExecutor: Send + Sync {
 /// Per-invocation inputs passed to an `ActionExecutor`.
 pub struct ActionParams {
     pub name: String,
-    pub inputs: HashMap<String, String>,
+    pub inputs: Arc<HashMap<String, String>>,
     #[allow(dead_code)]
     pub retries_remaining: u32,
     pub retry_error: Option<String>,
@@ -96,14 +96,14 @@ impl ActionRegistry {
         Self { named, fallback }
     }
 
-    /// Construct a registry for external consumers such as integration-test harnesses.
-    ///
-    /// Production code should use [`FlowEngineBuilder::action`] to register executors.
+    /// Construct a registry for external consumers that build registries outside the
+    /// `FlowEngineBuilder` pipeline — such as bridge adapters or integration-test harnesses
+    /// — that cannot use the builder's fluent API.
     pub fn from_executors(
         named: HashMap<String, Box<dyn ActionExecutor>>,
         fallback: Option<Box<dyn ActionExecutor>>,
     ) -> Self {
-        Self { named, fallback }
+        Self::new(named, fallback)
     }
 
     /// Returns `true` if the named executor is registered OR a fallback is configured.

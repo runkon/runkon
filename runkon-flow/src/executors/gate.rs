@@ -8,6 +8,8 @@ use crate::events::EngineEvent;
 use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
 use crate::traits::persistence::{GateApprovalState, NewStep, StepUpdate};
 
+use super::p_err;
+
 fn resume_run_status(state: &ExecutionState, gate_name: &str, context: &str) {
     if let Err(e) = state.persistence.update_run_status(
         &state.workflow_run_id,
@@ -49,7 +51,7 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
                 iteration: iteration as i64,
                 retry_count: None,
             })
-            .map_err(|e| EngineError::Persistence(e.to_string()))?;
+            .map_err(p_err)?;
         state
             .persistence
             .update_step(
@@ -65,7 +67,7 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
                     step_error: None,
                 },
             )
-            .map_err(|e| EngineError::Persistence(e.to_string()))?;
+            .map_err(p_err)?;
         return Ok(());
     }
 
@@ -80,7 +82,7 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
             iteration: iteration as i64,
             retry_count: None,
         })
-        .map_err(|e| EngineError::Persistence(e.to_string()))?;
+        .map_err(p_err)?;
 
     // Mark as waiting
     state
@@ -98,7 +100,7 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
                 step_error: None,
             },
         )
-        .map_err(|e| EngineError::Persistence(e.to_string()))?;
+        .map_err(p_err)?;
 
     emit_event(
         state,
@@ -238,8 +240,23 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
         }
 
         // Check cancellation
-        if let Ok(true) = state.persistence.is_run_cancelled(&state.workflow_run_id) {
-            return Err(EngineError::Workflow("Workflow run cancelled".to_string()));
+        match state.persistence.is_run_cancelled(&state.workflow_run_id) {
+            Ok(true) => {
+                state
+                    .cancellation
+                    .cancel(crate::cancellation_reason::CancellationReason::UserRequested(None));
+                return Err(EngineError::Cancelled(
+                    crate::cancellation_reason::CancellationReason::UserRequested(None),
+                ));
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(
+                    "Database error during cancellation check for gate '{}': {}",
+                    node.name,
+                    e
+                );
+            }
         }
     }
 }
@@ -272,7 +289,7 @@ pub fn execute_quality_gate(
             iteration: iteration as i64,
             retry_count: None,
         })
-        .map_err(|e| EngineError::Persistence(e.to_string()))?;
+        .map_err(p_err)?;
 
     let set_step_status = |status: WorkflowStepStatus, context: &str| -> Result<()> {
         state
@@ -290,7 +307,7 @@ pub fn execute_quality_gate(
                     step_error: None,
                 },
             )
-            .map_err(|e| EngineError::Persistence(e.to_string()))
+            .map_err(p_err)
     };
 
     // Look up the source step's structured output
@@ -404,10 +421,10 @@ pub fn handle_gate_timeout(
                         markers_out: None,
                         retry_count: None,
                         structured_output: None,
-                        step_error: None,
+                        step_error: Some(format!("Gate '{}' timed out", node.name)),
                     },
                 )
-                .map_err(|e| EngineError::Persistence(e.to_string()))?;
+                .map_err(p_err)?;
             state.all_succeeded = false;
             resume_run_status(state, &node.name, "after timeout (fail)");
             Err(EngineError::Workflow(format!(
@@ -431,7 +448,7 @@ pub fn handle_gate_timeout(
                         step_error: None,
                     },
                 )
-                .map_err(|e| EngineError::Persistence(e.to_string()))?;
+                .map_err(p_err)?;
             resume_run_status(state, &node.name, "after timeout (continue)");
             Ok(())
         }

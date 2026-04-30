@@ -192,4 +192,48 @@ mod tests {
         tok.cancel(CancellationReason::UserRequested(None));
         assert!(clone.is_cancelled());
     }
+
+    #[test]
+    fn reason_prefers_self_over_ancestor() {
+        let parent = CancellationToken::new();
+        let child = parent.child();
+        child.cancel(CancellationReason::FailFast);
+        parent.cancel(CancellationReason::Timeout);
+        assert_eq!(child.reason(), Some(CancellationReason::FailFast));
+    }
+
+    #[test]
+    fn error_if_cancelled_ok_when_not_cancelled() {
+        let tok = CancellationToken::new();
+        assert!(tok.error_if_cancelled().is_ok());
+    }
+
+    #[test]
+    fn error_if_cancelled_returns_err_for_inherited_parent_cancellation() {
+        let parent = CancellationToken::new();
+        let child = parent.child();
+        parent.cancel(CancellationReason::UserRequested(Some("stop".into())));
+        let err = child.error_if_cancelled().unwrap_err();
+        assert!(matches!(
+            err,
+            EngineError::Cancelled(CancellationReason::UserRequested(_))
+        ));
+    }
+
+    #[test]
+    fn poisoned_mutex_does_not_panic() {
+        let token = CancellationToken::new();
+        let inner = token.0.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = inner.reason.lock().unwrap();
+            panic!("intentional poison");
+        })
+        .join();
+        assert!(!token.is_cancelled());
+        assert_eq!(token.reason(), None);
+        token.cancel(CancellationReason::Timeout);
+        assert!(token.is_cancelled());
+        assert_eq!(token.reason(), Some(CancellationReason::Timeout));
+        assert!(token.error_if_cancelled().is_err());
+    }
 }

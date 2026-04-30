@@ -31,10 +31,9 @@ pub struct GateParams {
 }
 
 /// Transient context passed to each `GateResolver::poll` call.
-#[allow(dead_code)]
 pub struct GateContext {
-    pub working_dir: String,
-    pub default_bot_name: Option<String>,
+    pub run_id: String,
+    pub step_id: String,
 }
 
 // ---------------------------------------------------------------------------

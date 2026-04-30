@@ -11,9 +11,11 @@ pub mod helpers;
 pub mod output_schema;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod persistence_memory;
+#[cfg(feature = "rusqlite")]
+pub mod persistence_sqlite;
 pub mod prompt_builder;
 pub mod status;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub mod test_helpers;
 pub mod traits;
 pub mod types;
@@ -23,8 +25,9 @@ pub mod workflow_resolver_memory;
 pub use cancellation::CancellationToken;
 pub use cancellation_reason::CancellationReason;
 pub use dsl::ValidationError;
+pub use engine::ENGINE_INJECTED_KEYS;
 pub use events::{EngineEvent, EngineEventData, EventSink};
-pub use flow_engine::{EngineBundle, FlowEngine, FlowEngineBuilder};
+pub use flow_engine::{FlowEngine, FlowEngineBuilder};
 pub use traits::action_executor::ActionRegistry;
 pub use traits::gate_resolver::GateResolverRegistry;
 pub use traits::item_provider::ItemProviderRegistry;

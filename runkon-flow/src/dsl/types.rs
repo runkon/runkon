@@ -500,6 +500,9 @@ pub struct ParallelNode {
     /// Value is (step_name, marker_name). Run the call only if that marker is present.
     #[serde(default)]
     pub call_if: HashMap<String, (String, String)>,
+    /// Per-call retry counts keyed by index (as string) in `calls`. 0 = no retries.
+    #[serde(default)]
+    pub call_retries: HashMap<String, u32>,
 }
 
 fn default_true() -> bool {
@@ -577,6 +580,7 @@ fn default_one() -> u32 {
     1
 }
 
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GateType {

@@ -1,28 +1,19 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{mpsc, Arc, Mutex};
-use std::thread;
+use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
-use crate::cancellation::CancellationToken;
 use crate::dsl::{ForEachNode, OnChildFail};
 use crate::engine::{
     emit_event, record_step_failure, record_step_success, restore_step, should_skip,
-    ChildWorkflowInput, ExecutionState, WorktreeContext,
+    ChildWorkflowContext, ChildWorkflowInput, ExecutionState,
 };
 use crate::engine_error::{EngineError, Result};
 use crate::events::EngineEvent;
 use crate::status::WorkflowStepStatus;
-use crate::traits::action_executor::ActionRegistry;
-use crate::traits::item_provider::{ItemProviderRegistry, ProviderContext};
-use crate::traits::persistence::{
-    FanOutItemStatus, FanOutItemUpdate, NewStep, StepUpdate, WorkflowPersistence,
-};
-use crate::traits::script_env_provider::ScriptEnvProvider;
+use crate::traits::item_provider::ProviderContext;
+use crate::traits::persistence::{FanOutItemStatus, FanOutItemUpdate, NewStep, StepUpdate};
 
-#[inline]
-fn p_err(e: EngineError) -> EngineError {
-    EngineError::Persistence(e.to_string())
-}
+use super::p_err;
 
 /// Shared parent-state snapshot captured before thread spawning.
 ///
@@ -30,21 +21,13 @@ fn p_err(e: EngineError) -> EngineError {
 /// the parent `ExecutionState` are kept, so the main thread retains full `&mut`
 /// access throughout the dispatch loop.
 struct ForeachParentCtx {
-    persistence: Arc<dyn WorkflowPersistence>,
-    action_registry: Arc<ActionRegistry>,
-    script_env_provider: Arc<dyn ScriptEnvProvider>,
-    registry: Arc<ItemProviderRegistry>,
-    event_sinks: Arc<[Arc<dyn crate::events::EventSink>]>,
     child_runner: Arc<dyn crate::engine::ChildWorkflowRunner>,
-    workflow_run_id: String,
-    workflow_name: String,
-    model: Option<String>,
-    exec_config: crate::types::WorkflowExecConfig,
-    parent_run_id: String,
-    depth: u32,
-    target_label: Option<String>,
-    default_bot_name: Option<String>,
-    worktree_ctx: WorktreeContext,
+    /// Projection of the parent state used by the bridge to resolve child-run
+    /// lineage (ticket_id / repo_id / event sinks / …). Captured directly from
+    /// the parent — must not come from a forked clone, because `fork_child`
+    /// clears `inputs` and the bridge reads ticket_id/repo_id out of inputs.
+    /// See #2728.
+    parent_workflow_ctx: ChildWorkflowContext,
 }
 
 impl ForeachParentCtx {
@@ -53,62 +36,8 @@ impl ForeachParentCtx {
         child_runner: Arc<dyn crate::engine::ChildWorkflowRunner>,
     ) -> Self {
         Self {
-            persistence: Arc::clone(&state.persistence),
-            action_registry: Arc::clone(&state.action_registry),
-            script_env_provider: Arc::clone(&state.script_env_provider),
-            registry: Arc::clone(&state.registry),
-            event_sinks: Arc::clone(&state.event_sinks),
+            parent_workflow_ctx: state.child_workflow_context(),
             child_runner,
-            workflow_run_id: state.workflow_run_id.clone(),
-            workflow_name: state.workflow_name.clone(),
-            model: state.model.clone(),
-            exec_config: state.exec_config.clone(),
-            parent_run_id: state.parent_run_id.clone(),
-            depth: state.depth,
-            target_label: state.target_label.clone(),
-            default_bot_name: state.default_bot_name.clone(),
-            worktree_ctx: state.worktree_ctx.clone(),
-        }
-    }
-
-    fn make_child_state(&self, cancellation: CancellationToken) -> ExecutionState {
-        ExecutionState {
-            persistence: Arc::clone(&self.persistence),
-            action_registry: Arc::clone(&self.action_registry),
-            script_env_provider: Arc::clone(&self.script_env_provider),
-            workflow_run_id: self.workflow_run_id.clone(),
-            workflow_name: self.workflow_name.clone(),
-            worktree_ctx: self.worktree_ctx.clone(),
-            model: self.model.clone(),
-            exec_config: self.exec_config.clone(),
-            inputs: HashMap::new(),
-            parent_run_id: self.parent_run_id.clone(),
-            depth: self.depth,
-            target_label: self.target_label.clone(),
-            step_results: HashMap::new(),
-            contexts: vec![],
-            position: 0,
-            all_succeeded: true,
-            total_cost: 0.0,
-            total_turns: 0,
-            total_duration_ms: 0,
-            total_input_tokens: 0,
-            total_output_tokens: 0,
-            total_cache_read_input_tokens: 0,
-            total_cache_creation_input_tokens: 0,
-            last_gate_feedback: None,
-            block_output: None,
-            block_with: vec![],
-            resume_ctx: None,
-            default_bot_name: self.default_bot_name.clone(),
-            triggered_by_hook: false,
-            schema_resolver: None,
-            child_runner: Some(Arc::clone(&self.child_runner)),
-            last_heartbeat_at: ExecutionState::new_heartbeat(),
-            registry: Arc::clone(&self.registry),
-            event_sinks: Arc::clone(&self.event_sinks),
-            cancellation,
-            current_execution_id: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -144,6 +73,31 @@ fn is_eligible(
         .get(item_id)
         .map(|deps| deps.iter().all(|d| terminal_ids.contains(d)))
         .unwrap_or(true)
+}
+
+/// Record a successful foreach step with the standard set of defaulted arguments.
+///
+/// All of the foreach-specific fields default to `None` / `vec![]`.
+/// This wrapper narrows the call site to the three values that actually vary:
+/// `step_key`, `step_name`, and `context`.
+fn record_foreach_step_success(
+    state: &mut ExecutionState,
+    step_key: String,
+    step_name: &str,
+    context: String,
+    iteration: u32,
+) {
+    record_step_success(
+        state,
+        step_key,
+        crate::types::StepSuccess {
+            step_name: step_name.to_string(),
+            result_text: Some(context.clone()),
+            context,
+            iteration,
+            ..crate::types::StepSuccess::default()
+        },
+    );
 }
 
 /// Execute a `foreach` step: fan out a child workflow over a collection of items.
@@ -216,8 +170,8 @@ pub fn execute_foreach(
 
     // Build provider context
     let provider_ctx = ProviderContext {
-        repo_id: state.worktree_ctx.repo_id.clone(),
-        worktree_id: state.worktree_ctx.worktree_id.clone(),
+        run_id: state.workflow_run_id.clone(),
+        step_id: step_id.clone(),
     };
 
     // Phase 1: Item collection
@@ -270,42 +224,18 @@ pub fn execute_foreach(
 
     if total_items == 0 {
         let context = format!("foreach {}: no items to process", node.name);
-        state
-            .persistence
-            .update_step(
-                &step_id,
-                StepUpdate {
-                    status: WorkflowStepStatus::Completed,
-                    child_run_id: None,
-                    result_text: Some(context.clone()),
-                    context_out: Some(context.clone()),
-                    markers_out: None,
-                    retry_count: Some(0),
-                    structured_output: None,
-                    step_error: None,
-                },
-            )
-            .map_err(p_err)?;
-
-        record_step_success(
+        super::persist_completed_step(
             state,
-            step_key,
-            &node.name,
+            &step_id,
+            None,
+            Some(context.clone()),
             Some(context.clone()),
             None,
+            0,
             None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            vec![],
-            context,
-            None,
-            iteration,
-            None,
-            None,
-        );
+        )?;
+
+        record_foreach_step_success(state, step_key, &node.name, context, iteration);
         return Ok(());
     }
 
@@ -343,18 +273,15 @@ pub fn execute_foreach(
     };
 
     // Lookup maps built once from the initial pending set.
-    let db_id_to_item_id: HashMap<String, String> = pending_items
-        .iter()
-        .map(|i| (i.id.clone(), i.item_id.clone()))
-        .collect();
-    let item_id_to_db_id: HashMap<String, String> = pending_items
-        .iter()
-        .map(|i| (i.item_id.clone(), i.id.clone()))
-        .collect();
-    let item_ref_map: HashMap<String, String> = pending_items
-        .iter()
-        .map(|i| (i.item_id.clone(), i.item_ref.clone()))
-        .collect();
+    let cap = pending_items.len();
+    let mut db_id_to_item_id: HashMap<String, String> = HashMap::with_capacity(cap);
+    let mut item_id_to_db_id: HashMap<String, String> = HashMap::with_capacity(cap);
+    let mut item_ref_map: HashMap<String, String> = HashMap::with_capacity(cap);
+    for i in &pending_items {
+        db_id_to_item_id.insert(i.id.clone(), i.item_id.clone());
+        item_id_to_db_id.insert(i.item_id.clone(), i.id.clone());
+        item_ref_map.insert(i.item_id.clone(), i.item_ref.clone());
+    }
 
     // Channel: spawned threads send (fan_out_item_db_id, succeeded).
     let (tx, rx) = mpsc::channel::<(String, bool)>();
@@ -365,35 +292,53 @@ pub fn execute_foreach(
         Arc::clone(&child_runner),
     ));
 
-    // Build the placeholder WorkflowDef once — same for every item.
-    let placeholder_def = crate::dsl::WorkflowDef {
-        name: node.workflow.clone(),
-        title: None,
-        description: String::new(),
-        trigger: crate::dsl::WorkflowTrigger::Manual,
-        targets: vec![],
-        group: None,
-        inputs: vec![],
-        body: vec![],
-        always: vec![],
-        source_path: String::new(),
-    };
+    // Clone node.inputs once outside the dispatch loop to avoid re-cloning on every iteration.
+    let base_inputs = node.inputs.clone();
 
-    // Dispatch-loop tracking state
-    let mut pending: Vec<crate::types::FanOutItemRow> = pending_items;
+    // Seed terminal counts from items that were already terminal before this dispatch
+    // (e.g. partially-resumed runs).  New completions/failures/skips are tracked
+    // incrementally below so the final phase can skip a DB re-query.
+    // Single pass over existing_items to avoid iterating the slice three times.
+    let (mut completed_count, mut failed_count, mut skipped_count) =
+        existing_items
+            .iter()
+            .fold((0usize, 0usize, 0usize), |(comp, fail, skip), i| {
+                (
+                    comp + usize::from(i.status == "completed"),
+                    fail + usize::from(i.status == "failed"),
+                    skip + usize::from(i.status == "skipped"),
+                )
+            });
+
+    // Dispatch-loop tracking state.
+    // Split pending items into ready (all deps met) and waiting (deps outstanding).
+    // At the start terminal_ids is empty, so items with no deps are immediately ready.
     let mut in_flight: usize = 0;
     let mut halt = false;
     // item_ids that have reached a terminal state (completed, failed, or skipped)
     let mut terminal_ids: HashSet<String> = HashSet::new();
 
+    let (ready_vec, mut waiting): (Vec<_>, Vec<_>) = pending_items
+        .into_iter()
+        .partition(|item| is_eligible(&item.item_id, &dep_map, &terminal_ids));
+    let mut ready: std::collections::VecDeque<crate::types::FanOutItemRow> =
+        ready_vec.into_iter().collect();
+
     tracing::info!(
         "foreach '{}': starting parallel dispatch (max_slots={}, items={})",
         node.name,
         max_slots,
-        pending.len(),
+        ready.len() + waiting.len(),
     );
 
+    let pool = threadpool::ThreadPool::new(max_slots);
+
     loop {
+        // Heartbeat tick + external cancel poll. Best-effort — the cancel
+        // signal lands on `state.cancellation`, and the controlled drain at the
+        // `is_cancelled()` check below picks it up. #2731.
+        let _ = state.tick_heartbeat_throttled();
+
         // 1. When threads are in-flight, block briefly on the first result to yield
         //    the CPU instead of spinning. Then drain any additional ready results.
         let mut completed: Vec<(String, bool)> = Vec::new();
@@ -414,8 +359,17 @@ pub fn execute_foreach(
             let item_id = db_id_to_item_id
                 .get(&item_db_id)
                 .cloned()
-                .unwrap_or_default();
-            let item_ref = item_ref_map.get(&item_id).cloned().unwrap_or_default();
+                .ok_or_else(|| EngineError::Workflow(format!(
+                    "foreach '{}': internal invariant violation — no item_id for db_id '{item_db_id}'",
+                    node.name
+                )))?;
+            let item_ref = item_ref_map.get(&item_id).cloned().unwrap_or_else(|| {
+                tracing::warn!(
+                    item_id = %item_id,
+                    "foreach: item_ref map miss for item — item_ref will be empty"
+                );
+                String::new()
+            });
 
             state
                 .persistence
@@ -440,12 +394,15 @@ pub fn execute_foreach(
             );
 
             if succeeded {
+                completed_count += 1;
                 tracing::info!("foreach '{}': item '{}' → completed", node.name, item_ref);
             } else {
+                failed_count += 1;
                 tracing::warn!("foreach '{}': item '{}' → failed", node.name, item_ref);
             }
 
             terminal_ids.insert(item_id.clone());
+            let mut newly_terminal = vec![item_id.clone()];
 
             if !succeeded {
                 match node.on_child_fail {
@@ -459,6 +416,7 @@ pub fn execute_foreach(
                     OnChildFail::SkipDependents => {
                         let to_skip =
                             collect_transitive_dependents(&item_id, &dependents_map, &terminal_ids);
+                        skipped_count += to_skip.len();
                         for skip_id in &to_skip {
                             if let Some(skip_db_id) = item_id_to_db_id.get(skip_id) {
                                 state
@@ -472,8 +430,10 @@ pub fn execute_foreach(
                                     .map_err(p_err)?;
                             }
                             terminal_ids.insert(skip_id.clone());
+                            newly_terminal.push(skip_id.clone());
                         }
-                        pending.retain(|i| !to_skip.contains(&i.item_id));
+                        ready.retain(|i| !to_skip.contains(&i.item_id));
+                        waiting.retain(|i| !to_skip.contains(&i.item_id));
                         if !to_skip.is_empty() {
                             tracing::info!(
                                 "foreach '{}': skipped {} dependents of '{}'",
@@ -484,6 +444,31 @@ pub fn execute_foreach(
                         }
                     }
                     OnChildFail::Continue => {}
+                }
+            }
+
+            // After recording terminal items, promote newly eligible waiting items to ready.
+            // Only check items that are dependents of the newly terminal items — an item
+            // can only become eligible when one of its dependencies becomes terminal.
+            if !waiting.is_empty() {
+                let mut candidates = HashSet::new();
+                for tid in &newly_terminal {
+                    if let Some(deps) = dependents_map.get(tid) {
+                        candidates.extend(deps.iter().cloned());
+                    }
+                }
+                if !candidates.is_empty() {
+                    let mut still_waiting = Vec::new();
+                    for item in waiting.drain(..) {
+                        if candidates.contains(&item.item_id)
+                            && is_eligible(&item.item_id, &dep_map, &terminal_ids)
+                        {
+                            ready.push_back(item);
+                        } else {
+                            still_waiting.push(item);
+                        }
+                    }
+                    waiting = still_waiting;
                 }
             }
         }
@@ -499,15 +484,15 @@ pub fn execute_foreach(
         }
 
         // 3. Dispatch new items while slots are available and we're not halted.
+        let mut no_more_eligible = false;
         if !halt {
             while in_flight < max_slots {
-                let eligible_pos = pending
-                    .iter()
-                    .position(|item| is_eligible(&item.item_id, &dep_map, &terminal_ids));
-
-                let item = match eligible_pos {
-                    Some(pos) => pending.swap_remove(pos),
-                    None => break,
+                let item = match ready.pop_front() {
+                    Some(item) => item,
+                    None => {
+                        no_more_eligible = true;
+                        break;
+                    }
                 };
 
                 emit_event(
@@ -527,25 +512,24 @@ pub fn execute_foreach(
                     )
                     .map_err(p_err)?;
 
-                let mut child_inputs = node.inputs.clone();
+                let mut child_inputs = base_inputs.clone();
                 child_inputs.insert("item.id".to_string(), item.item_id.clone());
                 child_inputs.insert("item.ref".to_string(), item.item_ref.clone());
 
                 let ctx = Arc::clone(&parent_ctx);
-                let def = placeholder_def.clone();
+                let workflow_name = node.workflow.clone();
                 let inputs = child_inputs;
                 let item_db_id = item.id.clone();
                 let child_cancellation = state.cancellation.child();
                 let tx_clone = tx.clone();
                 let depth = state.depth;
 
-                thread::spawn(move || {
-                    let child_state = ctx.make_child_state(child_cancellation.clone());
+                pool.execute(move || {
                     let succeeded = ctx
                         .child_runner
                         .execute_child(
-                            &def,
-                            &child_state,
+                            &workflow_name,
+                            &ctx.parent_workflow_ctx,
                             ChildWorkflowInput {
                                 inputs,
                                 iteration,
@@ -578,37 +562,16 @@ pub fn execute_foreach(
         }
 
         // 4. Exit when all work is done.
-        let has_eligible = !halt
-            && pending
-                .iter()
-                .any(|item| is_eligible(&item.item_id, &dep_map, &terminal_ids));
-
-        if in_flight == 0 && !has_eligible {
+        if in_flight == 0 && (halt || no_more_eligible) {
             break;
         }
     }
 
-    // Phase 3: Step completion
-    let fan_out_items = state
-        .persistence
-        .get_fan_out_items(&step_id, None)
-        .map_err(p_err)?;
-    let completed_count = fan_out_items
-        .iter()
-        .filter(|i| i.status == "completed")
-        .count();
-    let failed_count = fan_out_items
-        .iter()
-        .filter(|i| i.status == "failed")
-        .count();
-    let skipped_count = fan_out_items
-        .iter()
-        .filter(|i| i.status == "skipped")
-        .count();
-    let total = fan_out_items.len();
+    // Phase 3: Step completion — use in-memory counters accumulated during dispatch
+    // to avoid an extra DB round-trip for counting terminal items.
 
     let context = format!(
-        "foreach {}: {completed_count} completed, {failed_count} failed, {skipped_count} skipped of {total} {}",
+        "foreach {}: {completed_count} completed, {failed_count} failed, {skipped_count} skipped of {total_items} {}",
         node.name, node.over,
     );
 
@@ -632,28 +595,10 @@ pub fn execute_foreach(
             )
             .map_err(p_err)?;
 
-        record_step_success(
-            state,
-            step_key,
-            &node.name,
-            Some(context.clone()),
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            vec![],
-            context,
-            None,
-            iteration,
-            None,
-            None,
-        );
+        record_foreach_step_success(state, step_key, &node.name, context, iteration);
     } else {
         let error_msg = format!(
-            "foreach '{}': {failed_count} of {total} items failed",
+            "foreach '{}': {failed_count} of {total_items} items failed",
             node.name
         );
 
@@ -678,4 +623,473 @@ pub fn execute_foreach(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{HashMap, HashSet, VecDeque};
+
+    use crate::types::FanOutItemRow;
+
+    use super::{collect_transitive_dependents, is_eligible};
+
+    fn make_row(item_id: &str, status: &str) -> FanOutItemRow {
+        FanOutItemRow {
+            id: format!("db-{item_id}"),
+            step_run_id: "step".to_string(),
+            item_type: "repo".to_string(),
+            item_id: item_id.to_string(),
+            item_ref: format!("ref-{item_id}"),
+            child_run_id: None,
+            status: status.to_string(),
+            dispatched_at: None,
+            completed_at: None,
+        }
+    }
+
+    /// Simulates the still_waiting promotion loop: drains `waiting` into `ready` for
+    /// items whose dependencies are all in `terminal_ids`.
+    fn promote_waiting(
+        waiting: &mut Vec<FanOutItemRow>,
+        ready: &mut VecDeque<FanOutItemRow>,
+        dep_map: &HashMap<String, HashSet<String>>,
+        terminal_ids: &HashSet<String>,
+    ) {
+        let mut still_waiting = Vec::new();
+        for item in waiting.drain(..) {
+            if is_eligible(&item.item_id, dep_map, terminal_ids) {
+                ready.push_back(item);
+            } else {
+                still_waiting.push(item);
+            }
+        }
+        *waiting = still_waiting;
+    }
+
+    /// Verifies that the seeding fold correctly counts pre-existing terminal items
+    /// on partial resume without iterating the slice more than once.
+    #[test]
+    fn seed_counts_from_existing_terminal_items() {
+        let existing = [
+            make_row("a", "completed"),
+            make_row("b", "completed"),
+            make_row("c", "failed"),
+            make_row("d", "skipped"),
+            make_row("e", "pending"), // must NOT contribute to any count
+        ];
+
+        let (completed, failed, skipped) =
+            existing
+                .iter()
+                .fold((0usize, 0usize, 0usize), |(comp, fail, skip), i| {
+                    (
+                        comp + usize::from(i.status == "completed"),
+                        fail + usize::from(i.status == "failed"),
+                        skip + usize::from(i.status == "skipped"),
+                    )
+                });
+
+        assert_eq!(completed, 2, "expected 2 completed");
+        assert_eq!(failed, 1, "expected 1 failed");
+        assert_eq!(skipped, 1, "expected 1 skipped");
+    }
+
+    /// No dependencies: all items start in ready immediately (terminal_ids empty).
+    #[test]
+    fn no_dependencies_all_items_start_ready() {
+        let dep_map: HashMap<String, HashSet<String>> = HashMap::new();
+        let terminal_ids: HashSet<String> = HashSet::new();
+
+        let items = vec![
+            make_row("a", "pending"),
+            make_row("b", "pending"),
+            make_row("c", "pending"),
+        ];
+
+        let (ready_vec, waiting): (Vec<_>, Vec<_>) = items
+            .into_iter()
+            .partition(|item| is_eligible(&item.item_id, &dep_map, &terminal_ids));
+
+        assert_eq!(ready_vec.len(), 3, "all items should be ready with no deps");
+        assert!(waiting.is_empty(), "nothing should be waiting");
+    }
+
+    /// Linear chain A → B: B stays waiting until A is terminal, then B moves to ready.
+    #[test]
+    fn linear_chain_b_waits_for_a_then_becomes_ready() {
+        let mut dep_map: HashMap<String, HashSet<String>> = HashMap::new();
+        // B depends on A
+        dep_map
+            .entry("b".to_string())
+            .or_default()
+            .insert("a".to_string());
+
+        let mut terminal_ids: HashSet<String> = HashSet::new();
+
+        let items = vec![make_row("a", "pending"), make_row("b", "pending")];
+
+        let (ready_vec, mut waiting): (Vec<_>, Vec<_>) = items
+            .into_iter()
+            .partition(|item| is_eligible(&item.item_id, &dep_map, &terminal_ids));
+        let mut ready: VecDeque<FanOutItemRow> = ready_vec.into_iter().collect();
+
+        assert_eq!(ready.len(), 1, "only A should be ready initially");
+        assert_eq!(ready.front().unwrap().item_id, "a");
+        assert_eq!(waiting.len(), 1, "B should be waiting");
+
+        // Simulate A completing
+        terminal_ids.insert("a".to_string());
+        promote_waiting(&mut waiting, &mut ready, &dep_map, &terminal_ids);
+
+        // After promotion, A is consumed, B should now be in ready
+        // Drain the 'a' item from ready (it was dispatched)
+        let dispatched = ready.pop_front().unwrap();
+        assert_eq!(dispatched.item_id, "a");
+
+        assert_eq!(ready.len(), 1, "B should now be in ready after A completed");
+        assert_eq!(ready.front().unwrap().item_id, "b");
+        assert!(waiting.is_empty(), "nothing should remain waiting");
+    }
+
+    /// Diamond dependency: C and D both depend on A.
+    /// Once A completes both C and D should move to ready simultaneously.
+    #[test]
+    fn diamond_both_dependents_promoted_after_common_dep_completes() {
+        let mut dep_map: HashMap<String, HashSet<String>> = HashMap::new();
+        // C depends on A, D depends on A
+        dep_map
+            .entry("c".to_string())
+            .or_default()
+            .insert("a".to_string());
+        dep_map
+            .entry("d".to_string())
+            .or_default()
+            .insert("a".to_string());
+
+        let mut terminal_ids: HashSet<String> = HashSet::new();
+
+        let items = vec![
+            make_row("a", "pending"),
+            make_row("c", "pending"),
+            make_row("d", "pending"),
+        ];
+
+        let (ready_vec, mut waiting): (Vec<_>, Vec<_>) = items
+            .into_iter()
+            .partition(|item| is_eligible(&item.item_id, &dep_map, &terminal_ids));
+        let mut ready: VecDeque<FanOutItemRow> = ready_vec.into_iter().collect();
+
+        assert_eq!(ready.len(), 1, "only A should start ready");
+        assert_eq!(waiting.len(), 2, "C and D should be waiting");
+
+        // A completes
+        terminal_ids.insert("a".to_string());
+        promote_waiting(&mut waiting, &mut ready, &dep_map, &terminal_ids);
+
+        // Both C and D should now be ready (plus A still in deque before it's dispatched)
+        assert!(
+            waiting.is_empty(),
+            "no items should remain waiting after A completes"
+        );
+        // ready should contain A (already there) + C + D = 3
+        assert_eq!(ready.len(), 3, "A, C, D should all be in ready");
+    }
+
+    /// Items already in existing_set are skipped; their dependents become eligible.
+    #[test]
+    fn already_completed_items_enable_dependents() {
+        let mut dep_map: HashMap<String, HashSet<String>> = HashMap::new();
+        // B depends on A
+        dep_map
+            .entry("b".to_string())
+            .or_default()
+            .insert("a".to_string());
+
+        // A is already in existing_set (completed before this dispatch loop)
+        let existing_set: HashSet<String> = ["a".to_string()].into_iter().collect();
+        // terminal_ids seeds from existing completed items
+        let mut terminal_ids: HashSet<String> = existing_set.clone();
+
+        // Only B is a new pending item (A was completed earlier)
+        let pending_items = vec![make_row("b", "pending")];
+
+        let (ready_vec, waiting): (Vec<_>, Vec<_>) = pending_items
+            .into_iter()
+            .partition(|item| is_eligible(&item.item_id, &dep_map, &terminal_ids));
+        let ready: VecDeque<FanOutItemRow> = ready_vec.into_iter().collect();
+
+        assert_eq!(
+            ready.len(),
+            1,
+            "B should be immediately ready because A is already terminal"
+        );
+        assert!(waiting.is_empty());
+
+        // Also verify collect_transitive_dependents with everything already terminal
+        terminal_ids.insert("b".to_string());
+        let mut dependents_map: HashMap<String, HashSet<String>> = HashMap::new();
+        dependents_map
+            .entry("a".to_string())
+            .or_default()
+            .insert("b".to_string());
+        let transitive = collect_transitive_dependents("a", &dependents_map, &terminal_ids);
+        assert!(
+            transitive.is_empty(),
+            "B is already terminal so transitive set should be empty"
+        );
+    }
+
+    /// Regression for #2728: `ForeachParentCtx::from_state` must capture the
+    /// parent's *real* projection, not the forked-template's empty inputs.
+    ///
+    /// Prior behavior: pool.execute projected `ChildWorkflowContext` from a
+    /// `child_state` cloned from `template = state.fork_child(...)`, and
+    /// `fork_child` clears `inputs`. The bridge resolves `ticket_id` /
+    /// `repo_id` via `parent_ctx.inputs.get(...)`, so foreach children always
+    /// got `ticket_id = None` / `repo_id = None` on `workflow_runs`. This test
+    /// asserts that the captured `parent_workflow_ctx.inputs` carries the
+    /// parent's actual values.
+    #[test]
+    fn from_state_captures_parent_inputs_for_child_workflow_context() {
+        use std::sync::{Arc, Mutex};
+
+        use crate::cancellation::CancellationToken;
+        use crate::engine::{
+            ChildWorkflowContext, ChildWorkflowInput, ChildWorkflowRunner, ExecutionState,
+            WorktreeContext,
+        };
+        use crate::engine_error::Result;
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use crate::traits::script_env_provider::NoOpScriptEnvProvider;
+        use crate::types::{WorkflowExecConfig, WorkflowResult};
+
+        struct DummyChildRunner;
+        impl ChildWorkflowRunner for DummyChildRunner {
+            fn execute_child(
+                &self,
+                _: &str,
+                _: &ChildWorkflowContext,
+                _: ChildWorkflowInput,
+            ) -> Result<WorkflowResult> {
+                unimplemented!()
+            }
+            fn resume_child(
+                &self,
+                _: &str,
+                _: Option<&str>,
+                _: &ChildWorkflowContext,
+            ) -> Result<WorkflowResult> {
+                unimplemented!()
+            }
+            fn find_resumable_child(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Option<crate::types::WorkflowRun>> {
+                unimplemented!()
+            }
+        }
+
+        let mut parent_inputs = HashMap::new();
+        parent_inputs.insert("ticket_id".to_string(), "TICK-100".to_string());
+        parent_inputs.insert("repo_id".to_string(), "repo-42".to_string());
+        parent_inputs.insert("foo".to_string(), "bar".to_string());
+
+        let parent = ExecutionState {
+            persistence: Arc::new(InMemoryWorkflowPersistence::new()),
+            action_registry: Arc::new(crate::traits::action_executor::ActionRegistry::new(
+                HashMap::new(),
+                None,
+            )),
+            script_env_provider: Arc::new(NoOpScriptEnvProvider),
+            workflow_run_id: "parent-run".into(),
+            workflow_name: "wf".into(),
+            worktree_ctx: WorktreeContext {
+                worktree_id: None,
+                working_dir: String::new(),
+                repo_path: String::new(),
+                ticket_id: None,
+                repo_id: None,
+                extra_plugin_dirs: vec![],
+            },
+            model: None,
+            exec_config: WorkflowExecConfig::default(),
+            inputs: parent_inputs.clone(),
+            parent_run_id: String::new(),
+            depth: 0,
+            target_label: None,
+            step_results: HashMap::new(),
+            contexts: vec![],
+            position: 0,
+            all_succeeded: true,
+            total_cost: 0.0,
+            total_turns: 0,
+            total_duration_ms: 0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cache_read_input_tokens: 0,
+            total_cache_creation_input_tokens: 0,
+            last_gate_feedback: None,
+            block_output: None,
+            block_with: vec![],
+            resume_ctx: None,
+            default_bot_name: None,
+            triggered_by_hook: false,
+            schema_resolver: None,
+            child_runner: None,
+            last_heartbeat_at: ExecutionState::new_heartbeat(),
+            registry: Arc::new(crate::traits::item_provider::ItemProviderRegistry::new()),
+            event_sinks: Arc::from(vec![]),
+            cancellation: CancellationToken::new(),
+            current_execution_id: Arc::new(Mutex::new(None)),
+        };
+
+        let ctx = super::ForeachParentCtx::from_state(&parent, Arc::new(DummyChildRunner));
+
+        // Captured projection must carry parent's intact inputs.
+        assert_eq!(
+            ctx.parent_workflow_ctx
+                .inputs
+                .get("ticket_id")
+                .map(String::as_str),
+            Some("TICK-100"),
+            "foreach parent_workflow_ctx must preserve parent's ticket_id; \
+             the bridge resolves child-run ticket_id from this map. #2728"
+        );
+        assert_eq!(
+            ctx.parent_workflow_ctx
+                .inputs
+                .get("repo_id")
+                .map(String::as_str),
+            Some("repo-42"),
+            "foreach parent_workflow_ctx must preserve parent's repo_id"
+        );
+        assert_eq!(ctx.parent_workflow_ctx.inputs, parent_inputs);
+        assert_eq!(ctx.parent_workflow_ctx.workflow_run_id, "parent-run");
+    }
+
+    /// Regression for #2731: the foreach wait loop must keep `tick_heartbeat`
+    /// firing while children are running. Foreach already had a 50 ms
+    /// `recv_timeout`, but it didn't ping the heartbeat — so a long-running
+    /// child meant `last_heartbeat` went stale and the watchdog reaped the run.
+    #[test]
+    fn foreach_wait_loop_ticks_heartbeat_during_long_children() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use crate::dsl::{ForEachNode, OnChildFail, OnCycle};
+        use crate::engine::{ChildWorkflowContext, ChildWorkflowInput, ChildWorkflowRunner};
+        use crate::engine_error::Result;
+        use crate::traits::item_provider::{
+            FanOutItem, ItemProvider, ItemProviderRegistry, ProviderContext,
+        };
+        use crate::traits::persistence::{NewRun, WorkflowPersistence};
+        use crate::types::WorkflowResult;
+
+        struct OneItemProvider;
+        impl ItemProvider for OneItemProvider {
+            fn name(&self) -> &str {
+                "test_items"
+            }
+            fn items(
+                &self,
+                _ctx: &ProviderContext,
+                _scope: Option<&crate::dsl::ForeachScope>,
+                _filter: &HashMap<String, String>,
+                _existing_set: &HashSet<String>,
+            ) -> Result<Vec<FanOutItem>> {
+                Ok(vec![FanOutItem {
+                    item_type: "test".into(),
+                    item_id: "item-1".into(),
+                    item_ref: "ref-1".into(),
+                }])
+            }
+        }
+
+        struct SleepingChildRunner;
+        impl ChildWorkflowRunner for SleepingChildRunner {
+            fn execute_child(
+                &self,
+                _: &str,
+                _: &ChildWorkflowContext,
+                _: ChildWorkflowInput,
+            ) -> Result<WorkflowResult> {
+                std::thread::sleep(Duration::from_millis(800));
+                Ok(WorkflowResult {
+                    workflow_run_id: "child-run".into(),
+                    worktree_id: None,
+                    workflow_name: "child-wf".into(),
+                    all_succeeded: true,
+                    total_cost: 0.0,
+                    total_turns: 0,
+                    total_duration_ms: 0,
+                    total_input_tokens: 0,
+                    total_output_tokens: 0,
+                    total_cache_read_input_tokens: 0,
+                    total_cache_creation_input_tokens: 0,
+                })
+            }
+            fn resume_child(
+                &self,
+                _: &str,
+                _: Option<&str>,
+                _: &ChildWorkflowContext,
+            ) -> Result<WorkflowResult> {
+                unimplemented!()
+            }
+            fn find_resumable_child(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Option<crate::types::WorkflowRun>> {
+                Ok(None)
+            }
+        }
+
+        let cp = Arc::new(crate::test_helpers::CountingPersistence::new());
+        let run_id = cp
+            .create_run(NewRun {
+                workflow_name: "wf".to_string(),
+                worktree_id: None,
+                ticket_id: None,
+                repo_id: None,
+                parent_run_id: String::new(),
+                dry_run: false,
+                trigger: "manual".to_string(),
+                definition_snapshot: None,
+                parent_workflow_run_id: None,
+                target_label: None,
+            })
+            .unwrap()
+            .id;
+        let cp_for_state: Arc<dyn WorkflowPersistence> = Arc::clone(&cp) as _;
+
+        let mut registry = ItemProviderRegistry::new();
+        registry.register(OneItemProvider);
+
+        let mut state = crate::test_helpers::make_test_execution_state(cp_for_state, run_id);
+        state.child_runner = Some(Arc::new(SleepingChildRunner));
+        state.registry = Arc::new(registry);
+
+        let node = ForEachNode {
+            name: "foreach-test".into(),
+            over: "test_items".into(),
+            scope: None,
+            filter: HashMap::new(),
+            ordered: false,
+            on_cycle: OnCycle::Fail,
+            max_parallel: 1,
+            workflow: "child-wf".into(),
+            inputs: HashMap::new(),
+            on_child_fail: OnChildFail::Continue,
+        };
+
+        super::execute_foreach(&mut state, &node, 0).unwrap();
+
+        assert!(
+            cp.tick_count() >= 1,
+            "expected ≥1 heartbeat tick during foreach wait loop, got {}",
+            cp.tick_count()
+        );
+    }
 }

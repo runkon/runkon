@@ -1,6 +1,8 @@
 use crate::engine_error::EngineError;
 use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
-use crate::types::{FanOutItemRow, WorkflowRun, WorkflowRunStep};
+use crate::types::{WorkflowRun, WorkflowRunStep};
+
+pub use crate::types::FanOutItemRow;
 
 /// Parameters for creating a new workflow run.
 pub struct NewRun {
@@ -32,6 +34,7 @@ pub struct NewStep {
 }
 
 /// Fields to update on an existing workflow step.
+#[derive(Default)]
 pub struct StepUpdate {
     pub status: WorkflowStepStatus,
     pub child_run_id: Option<String>,
@@ -41,6 +44,53 @@ pub struct StepUpdate {
     pub retry_count: Option<i64>,
     pub structured_output: Option<String>,
     pub step_error: Option<String>,
+}
+
+impl StepUpdate {
+    /// Convenience constructor for a successful step completion.
+    pub fn completed(
+        child_run_id: Option<String>,
+        result_text: Option<String>,
+        context_out: Option<String>,
+        markers_out: Option<String>,
+        attempt: u32,
+        structured_output: Option<String>,
+    ) -> Self {
+        Self {
+            status: WorkflowStepStatus::Completed,
+            child_run_id,
+            result_text,
+            context_out,
+            markers_out,
+            retry_count: Some(attempt as i64),
+            structured_output,
+            step_error: None,
+        }
+    }
+
+    /// Convenience constructor for a failed step.
+    pub fn failed(err_msg: impl Into<String>, attempt: u32) -> Self {
+        Self::failed_with_child(err_msg, attempt, None)
+    }
+
+    /// Convenience constructor for a failed step with an optional child run ID.
+    pub fn failed_with_child(
+        err_msg: impl Into<String>,
+        attempt: u32,
+        child_run_id: Option<String>,
+    ) -> Self {
+        let err_msg = err_msg.into();
+        Self {
+            status: WorkflowStepStatus::Failed,
+            child_run_id,
+            result_text: Some(err_msg.clone()),
+            context_out: None,
+            markers_out: None,
+            retry_count: Some(attempt as i64),
+            structured_output: None,
+            step_error: Some(err_msg),
+        }
+    }
 }
 
 /// Status values for fan-out items, mirroring the string constants stored in the DB.
@@ -280,5 +330,51 @@ mod tests {
             }
             other => panic!("expected Rejected, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn step_update_completed_sets_correct_fields() {
+        let update = StepUpdate::completed(
+            Some("child-123".into()),
+            Some("result".into()),
+            Some("ctx".into()),
+            Some("markers".into()),
+            3,
+            Some("{\"key\": \"val\"}".into()),
+        );
+        assert_eq!(update.status, WorkflowStepStatus::Completed);
+        assert_eq!(update.child_run_id, Some("child-123".into()));
+        assert_eq!(update.result_text, Some("result".into()));
+        assert_eq!(update.context_out, Some("ctx".into()));
+        assert_eq!(update.markers_out, Some("markers".into()));
+        assert_eq!(update.retry_count, Some(3));
+        assert_eq!(update.structured_output, Some("{\"key\": \"val\"}".into()));
+        assert!(update.step_error.is_none());
+    }
+
+    #[test]
+    fn step_update_failed_sets_correct_fields() {
+        let update = StepUpdate::failed("oops", 2);
+        assert_eq!(update.status, WorkflowStepStatus::Failed);
+        assert_eq!(update.result_text, Some("oops".into()));
+        assert_eq!(update.step_error, Some("oops".into()));
+        assert!(update.child_run_id.is_none());
+        assert!(update.context_out.is_none());
+        assert!(update.markers_out.is_none());
+        assert!(update.structured_output.is_none());
+        assert_eq!(update.retry_count, Some(2));
+    }
+
+    #[test]
+    fn step_update_failed_with_child_sets_child_run_id() {
+        let update = StepUpdate::failed_with_child("child err", 1, Some("child-run-42".into()));
+        assert_eq!(update.status, WorkflowStepStatus::Failed);
+        assert_eq!(update.result_text, Some("child err".into()));
+        assert_eq!(update.step_error, Some("child err".into()));
+        assert_eq!(update.child_run_id, Some("child-run-42".into()));
+        assert_eq!(update.retry_count, Some(1));
+        assert!(update.context_out.is_none());
+        assert!(update.markers_out.is_none());
+        assert!(update.structured_output.is_none());
     }
 }
