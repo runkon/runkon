@@ -18,4 +18,4 @@ pub use error::{Result, RuntimeError};
 pub use permission::PermissionMode;
 pub use run::{RunHandle, RunStatus};
 pub use runtime::{AgentRuntime, PollError, RuntimeOptions, RuntimeRequest};
-pub use tracker::{NoopEventSink, RunEventSink, RunTracker, RuntimeEvent};
+pub use tracker::{EventSink, NoopEventSink, RunEventSink, RunTracker, RuntimeEvent};

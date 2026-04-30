@@ -186,25 +186,7 @@ mod tests {
     use crate::agent_def::{AgentDef, AgentRole};
     use crate::tracker::NoopEventSink;
     use serde_json::json;
-
-    struct NoopTracker;
-    impl RunTracker for NoopTracker {
-        fn record_pid(&self, _run_id: &str, _pid: u32) -> Result<()> {
-            Ok(())
-        }
-        fn record_runtime(&self, _run_id: &str, _name: &str) -> Result<()> {
-            Ok(())
-        }
-        fn mark_cancelled(&self, _run_id: &str) -> Result<()> {
-            Ok(())
-        }
-        fn mark_failed_if_running(&self, _run_id: &str, _reason: &str) -> Result<()> {
-            Ok(())
-        }
-        fn get_run(&self, _run_id: &str) -> Result<Option<RunHandle>> {
-            Ok(None)
-        }
-    }
+    use test_util::NoopTracker;
 
     fn make_request(req_model: Option<&str>, def_model: Option<&str>) -> RuntimeRequest {
         RuntimeRequest {
@@ -325,7 +307,29 @@ pub(crate) fn record_pid_and_runtime(
 
 #[cfg(test)]
 pub mod test_util {
+    use crate::error::Result;
     use crate::run::{RunHandle, RunStatus};
+    use crate::tracker::RunTracker;
+
+    pub struct NoopTracker;
+
+    impl RunTracker for NoopTracker {
+        fn record_pid(&self, _run_id: &str, _pid: u32) -> Result<()> {
+            Ok(())
+        }
+        fn record_runtime(&self, _run_id: &str, _name: &str) -> Result<()> {
+            Ok(())
+        }
+        fn mark_cancelled(&self, _run_id: &str) -> Result<()> {
+            Ok(())
+        }
+        fn mark_failed_if_running(&self, _run_id: &str, _reason: &str) -> Result<()> {
+            Ok(())
+        }
+        fn get_run(&self, _run_id: &str) -> Result<Option<RunHandle>> {
+            Ok(None)
+        }
+    }
 
     pub fn make_test_run(runtime: &str, subprocess_pid: Option<i64>) -> RunHandle {
         RunHandle {

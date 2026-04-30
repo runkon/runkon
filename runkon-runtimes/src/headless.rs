@@ -7,7 +7,7 @@ use std::process::Command;
 use std::os::unix::process::CommandExt;
 
 use crate::permission::PermissionMode;
-use crate::tracker::{RunEventSink, RuntimeEvent};
+use crate::tracker::{EventSink, RuntimeEvent};
 
 const DEFAULT_AGENT_ERROR_MSG: &str = "Claude reported an error";
 
@@ -253,11 +253,11 @@ pub enum DrainOutcome {
 }
 
 /// Drain the stdout of a headless subprocess, persisting events to the DB.
-pub fn drain_stream_json(
+pub fn drain_stream_json<S: EventSink + ?Sized>(
     stdout: impl std::io::Read,
     run_id: &str,
     log_file: &std::path::Path,
-    sink: &dyn RunEventSink,
+    sink: &S,
 ) -> DrainOutcome {
     use std::io::{BufRead, BufReader, Write};
 
@@ -295,6 +295,8 @@ pub fn drain_stream_json(
             Ok(v) => v,
             Err(_) => continue,
         };
+
+        sink.on_raw_value(run_id, &value);
 
         let event_type = value.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -622,7 +624,7 @@ mod tests {
         events: Arc<Mutex<Vec<crate::tracker::RuntimeEvent>>>,
     }
 
-    impl crate::tracker::RunEventSink for RecordingSink {
+    impl crate::tracker::EventSink for RecordingSink {
         fn on_event(&self, _run_id: &str, event: crate::tracker::RuntimeEvent) {
             self.events.lock().unwrap().push(event);
         }

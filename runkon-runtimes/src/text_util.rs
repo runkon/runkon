@@ -8,7 +8,7 @@ pub fn validate_run_id(run_id: &str) -> Result<()> {
     if !run_id.is_empty()
         && run_id
             .chars()
-            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         Ok(())
     } else {
@@ -94,5 +94,17 @@ mod tests {
         // Leading-dot files are filesystem-special; '.' isn't in the allowed set.
         assert_invalid(".hidden");
         assert_invalid(".");
+    }
+
+    #[test]
+    fn rejects_non_ascii_lookalikes() {
+        // Cyrillic а (U+0430) — visually identical to ASCII 'a'
+        assert_invalid("\u{0430}bc");
+        // Greek ο (U+03BF) — visually identical to ASCII 'o'
+        assert_invalid("f\u{03BF}o");
+        // Mathematical bold 𝟎 (U+1D7CE) — visually identical to ASCII '0'
+        assert_invalid("\u{1D7CE}123");
+        // Han ideograph 中 (U+4E2D)
+        assert_invalid("\u{4E2D}run");
     }
 }

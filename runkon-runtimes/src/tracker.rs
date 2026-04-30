@@ -13,12 +13,15 @@ pub trait RunTracker: Send + Sync {
     fn get_run(&self, run_id: &str) -> Result<Option<RunHandle>, RuntimeError>;
 }
 
-/// Best-effort streaming progress sink for agent stdout events.
-pub trait RunEventSink: Send + Sync {
-    /// Best-effort. The drain thread will not propagate errors from this
-    /// call — implementors should log internally.
+/// Base event sink for synchronous (single-thread) contexts.
+pub trait EventSink {
     fn on_event(&self, run_id: &str, event: RuntimeEvent);
+    fn on_raw_value(&self, _run_id: &str, _value: &serde_json::Value) {}
 }
+
+/// Thread-safe event sink (blanket-impl'd for all EventSink + Send + Sync types).
+pub trait RunEventSink: EventSink + Send + Sync {}
+impl<T: EventSink + Send + Sync> RunEventSink for T {}
 
 /// Events emitted by a running agent process, parsed from its stdout stream.
 #[derive(Debug, Clone)]
@@ -62,6 +65,6 @@ pub enum RuntimeEvent {
 /// A no-op event sink for hosts that don't care about progress events.
 pub struct NoopEventSink;
 
-impl RunEventSink for NoopEventSink {
+impl EventSink for NoopEventSink {
     fn on_event(&self, _run_id: &str, _event: RuntimeEvent) {}
 }

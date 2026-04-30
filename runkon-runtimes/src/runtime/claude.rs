@@ -274,7 +274,7 @@ fn poll_unix(
 mod tests {
     use super::*;
     use crate::agent_def::{AgentDef, AgentRole};
-    use crate::runtime::test_util::make_test_run;
+    use crate::runtime::test_util::{make_test_run, NoopTracker};
     use crate::tracker::NoopEventSink;
 
     fn make_request(run_id: &str) -> RuntimeRequest {
@@ -295,26 +295,6 @@ mod tests {
             plugin_dirs: vec![],
             tracker: Arc::new(NoopTracker),
             event_sink: Arc::new(NoopEventSink),
-        }
-    }
-
-    struct NoopTracker;
-
-    impl RunTracker for NoopTracker {
-        fn record_pid(&self, _run_id: &str, _pid: u32) -> Result<()> {
-            Ok(())
-        }
-        fn record_runtime(&self, _run_id: &str, _runtime_name: &str) -> Result<()> {
-            Ok(())
-        }
-        fn mark_cancelled(&self, _run_id: &str) -> Result<()> {
-            Ok(())
-        }
-        fn mark_failed_if_running(&self, _run_id: &str, _reason: &str) -> Result<()> {
-            Ok(())
-        }
-        fn get_run(&self, _run_id: &str) -> Result<Option<RunHandle>> {
-            Ok(None)
         }
     }
 
