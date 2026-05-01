@@ -11,7 +11,7 @@ use crate::engine_error::{EngineError, Result};
 use crate::events::EngineEvent;
 use crate::status::WorkflowStepStatus;
 use crate::traits::item_provider::ProviderContext;
-use crate::traits::persistence::{FanOutItemStatus, FanOutItemUpdate, NewStep, StepUpdate};
+use crate::traits::persistence::{FanOutItemStatus, FanOutItemUpdate, StepUpdate};
 
 use super::p_err;
 
@@ -119,35 +119,7 @@ pub fn execute_foreach(
     }
 
     // Insert the step record
-    let step_id = state
-        .persistence
-        .insert_step(NewStep {
-            workflow_run_id: state.workflow_run_id.clone(),
-            step_name: step_key.clone(),
-            role: "foreach".to_string(),
-            can_commit: false,
-            position: pos,
-            iteration: iteration as i64,
-            retry_count: Some(0),
-        })
-        .map_err(p_err)?;
-
-    state
-        .persistence
-        .update_step(
-            &step_id,
-            StepUpdate {
-                status: WorkflowStepStatus::Running,
-                child_run_id: None,
-                result_text: None,
-                context_out: None,
-                markers_out: None,
-                retry_count: Some(0),
-                structured_output: None,
-                step_error: None,
-            },
-        )
-        .map_err(p_err)?;
+    let step_id = super::insert_step_record(state, &step_key, "foreach", pos, iteration, Some(0))?;
 
     // Validate the provider exists
     let provider = state.registry.get(&node.over).ok_or_else(|| {

@@ -70,7 +70,7 @@ impl AgentRuntime for ClaudeRuntime {
                 prompt: &request.prompt,
                 resume_session_id: None,
                 model: request.resolved_model(),
-                bot_name: request.bot_name.as_deref(),
+                extra_cli_args: &request.extra_cli_args,
                 permission_mode: Some(&self.options.permission_mode),
                 plugin_dirs: &request.plugin_dirs,
             };
@@ -291,7 +291,7 @@ mod tests {
             prompt: "p".to_string(),
             working_dir: std::path::PathBuf::from("/tmp"),
             model: None,
-            bot_name: None,
+            extra_cli_args: vec![],
             plugin_dirs: vec![],
             tracker: Arc::new(NoopTracker),
             event_sink: Arc::new(NoopEventSink),

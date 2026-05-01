@@ -18,6 +18,70 @@ pub(super) fn p_err(e: impl std::fmt::Display) -> EngineError {
     EngineError::Persistence(format!("{}:{} — {e}", loc.file(), loc.line()))
 }
 
+/// Insert a workflow step record. Returns the new step_id.
+///
+/// `retry_count` semantics: `Some(n)` → status='running' + started_at=now (set by DB);
+/// `None` → status='pending'.
+pub(super) fn insert_step_record(
+    state: &crate::engine::ExecutionState,
+    step_name: &str,
+    role: &str,
+    pos: i64,
+    iteration: u32,
+    retry_count: Option<i64>,
+) -> crate::engine_error::Result<String> {
+    use crate::traits::persistence::NewStep;
+    state
+        .persistence
+        .insert_step(NewStep {
+            workflow_run_id: state.workflow_run_id.clone(),
+            step_name: step_name.to_string(),
+            role: role.to_string(),
+            can_commit: false,
+            position: pos,
+            iteration: iteration as i64,
+            retry_count,
+        })
+        .map_err(p_err)
+}
+
+/// Insert a step then immediately apply a non-Running status update.
+///
+/// Used for terminal/transitional statuses set at insert time:
+/// gate dry-run (Completed), gate waiting (Waiting), parallel conditional-skip (Skipped).
+/// Returns the new step_id.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn insert_step_with_status(
+    state: &crate::engine::ExecutionState,
+    step_name: &str,
+    role: &str,
+    pos: i64,
+    iteration: u32,
+    retry_count: Option<i64>,
+    status: crate::status::WorkflowStepStatus,
+    result_text: Option<String>,
+) -> crate::engine_error::Result<String> {
+    use crate::traits::persistence::StepUpdate;
+    let step_id = insert_step_record(state, step_name, role, pos, iteration, retry_count)?;
+    state
+        .persistence
+        .update_step(
+            &step_id,
+            StepUpdate {
+                status,
+                child_run_id: None,
+                result_text,
+                context_out: None,
+                markers_out: None,
+                retry_count,
+                structured_output: None,
+                step_error: None,
+            },
+        )
+        .map_err(p_err)?;
+    Ok(step_id)
+}
+
 /// Insert a step record and emit a StepRetrying event when `attempt > 0`.
 /// Returns the new step_id.
 pub(super) fn begin_retry_attempt(
@@ -30,7 +94,6 @@ pub(super) fn begin_retry_attempt(
 ) -> crate::engine_error::Result<String> {
     use crate::engine::emit_event;
     use crate::events::EngineEvent;
-    use crate::traits::persistence::NewStep;
     if attempt > 0 {
         emit_event(
             state,
@@ -40,19 +103,7 @@ pub(super) fn begin_retry_attempt(
             },
         );
     }
-    let step_id = state
-        .persistence
-        .insert_step(NewStep {
-            workflow_run_id: state.workflow_run_id.clone(),
-            step_name: step_name.to_string(),
-            role: role.to_string(),
-            can_commit: false,
-            position: pos,
-            iteration: iteration as i64,
-            retry_count: Some(attempt as i64),
-        })
-        .map_err(p_err)?;
-    Ok(step_id)
+    insert_step_record(state, step_name, role, pos, iteration, Some(attempt as i64))
 }
 
 /// Build the inputs map (`Arc<HashMap<String, String>>`) from the current execution state.

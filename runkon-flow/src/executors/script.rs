@@ -8,7 +8,7 @@ use crate::engine::{
 };
 use crate::engine_error::Result;
 use crate::prompt_builder::build_variable_map;
-use crate::traits::persistence::{NewStep, StepUpdate};
+use crate::traits::persistence::StepUpdate;
 use crate::traits::run_context::RunContext;
 
 use super::p_err;
@@ -56,18 +56,7 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
         return Ok(());
     }
 
-    let step_id = state
-        .persistence
-        .insert_step(NewStep {
-            workflow_run_id: state.workflow_run_id.clone(),
-            step_name: node.name.clone(),
-            role: "script".to_string(),
-            can_commit: false,
-            position: pos,
-            iteration: iteration as i64,
-            retry_count: Some(0),
-        })
-        .map_err(p_err)?;
+    let step_id = super::insert_step_record(state, &node.name, "script", pos, iteration, Some(0))?;
 
     if state.exec_config.dry_run {
         tracing::info!("script '{}': dry-run, skipping execution", node.name);

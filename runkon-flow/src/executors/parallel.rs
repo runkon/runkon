@@ -6,7 +6,7 @@ use crate::engine::{record_step_success, resolve_schema, ExecutionState};
 use crate::engine_error::{EngineError, Result};
 use crate::status::WorkflowStepStatus;
 use crate::traits::action_executor::{ActionOutput, ActionParams, ExecutionContext};
-use crate::traits::persistence::{NewStep, StepUpdate};
+use crate::traits::persistence::StepUpdate;
 use crate::types::{StepResult, StepSuccess};
 
 use super::p_err;
@@ -140,53 +140,23 @@ pub fn execute_parallel(
                     cond_step,
                     cond_marker
                 );
-                let step_id = state
-                    .persistence
-                    .insert_step(NewStep {
-                        workflow_run_id: state.workflow_run_id.clone(),
-                        step_name: agent_label.to_string(),
-                        role: "actor".to_string(),
-                        can_commit: false,
-                        position: pos,
-                        iteration: iteration as i64,
-                        retry_count: None,
-                    })
-                    .map_err(p_err)?;
-                state
-                    .persistence
-                    .update_step(
-                        &step_id,
-                        StepUpdate {
-                            status: WorkflowStepStatus::Skipped,
-                            child_run_id: None,
-                            result_text: Some(format!(
-                                "skipped: {cond_step}.{cond_marker} not emitted"
-                            )),
-                            context_out: None,
-                            markers_out: None,
-                            retry_count: None,
-                            structured_output: None,
-                            step_error: None,
-                        },
-                    )
-                    .map_err(p_err)?;
+                super::insert_step_with_status(
+                    state,
+                    agent_label,
+                    "actor",
+                    pos,
+                    iteration,
+                    None,
+                    WorkflowStepStatus::Skipped,
+                    Some(format!("skipped: {cond_step}.{cond_marker} not emitted")),
+                )?;
                 skipped_count += 1;
                 continue;
             }
         }
 
-        let step_id = state
-            .persistence
-            .insert_step(NewStep {
-                workflow_run_id: state.workflow_run_id.clone(),
-                step_name: agent_label.to_string(),
-                role: "actor".to_string(),
-                can_commit: false,
-                position: pos,
-                iteration: iteration as i64,
-                retry_count: Some(0),
-            })
-            .map_err(p_err)?;
+        let step_id =
+            super::insert_step_record(state, agent_label, "actor", pos, iteration, Some(0))?;
 
         let inputs = Arc::clone(&shared_inputs);
 

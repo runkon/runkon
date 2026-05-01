@@ -36,8 +36,8 @@ fn push_optional_agent_flags(
     args: &mut Vec<Cow<'static, str>>,
     resume_session_id: Option<&str>,
     model: Option<&str>,
-    bot_name: Option<&str>,
     permission_mode: Option<&PermissionMode>,
+    extra_cli_args: &[(Cow<'static, str>, Cow<'static, str>)],
     extra_plugin_dirs: &[String],
 ) {
     if let Some(id) = resume_session_id {
@@ -48,15 +48,15 @@ fn push_optional_agent_flags(
         args.push(Cow::Borrowed("--model"));
         args.push(Cow::Owned(m.to_string()));
     }
-    if let Some(b) = bot_name {
-        args.push(Cow::Borrowed("--bot-name"));
-        args.push(Cow::Owned(b.to_string()));
-    }
     if let Some(mode) = permission_mode {
         if let Some(val) = mode.cli_flag_value() {
             args.push(Cow::Borrowed("--permission-mode"));
             args.push(Cow::Owned(val.to_string()));
         }
+    }
+    for (flag, val) in extra_cli_args {
+        args.push(flag.clone());
+        args.push(val.clone());
     }
     for dir in extra_plugin_dirs {
         args.push(Cow::Borrowed("--plugin-dir"));
@@ -213,7 +213,7 @@ pub struct SpawnHeadlessParams<'a> {
     pub prompt: &'a str,
     pub resume_session_id: Option<&'a str>,
     pub model: Option<&'a str>,
-    pub bot_name: Option<&'a str>,
+    pub extra_cli_args: &'a [(Cow<'static, str>, Cow<'static, str>)],
     pub permission_mode: Option<&'a PermissionMode>,
     pub plugin_dirs: &'a [String],
 }
@@ -424,7 +424,7 @@ pub fn build_headless_agent_args(
     let prompt = params.prompt;
     let resume_session_id = params.resume_session_id;
     let model = params.model;
-    let bot_name = params.bot_name;
+    let extra_cli_args = params.extra_cli_args;
     let permission_mode = params.permission_mode;
     let extra_plugin_dirs = params.plugin_dirs;
 
@@ -444,8 +444,8 @@ pub fn build_headless_agent_args(
         &mut args,
         resume_session_id,
         model,
-        bot_name,
         permission_mode,
+        extra_cli_args,
         extra_plugin_dirs,
     );
 
@@ -482,7 +482,7 @@ mod tests {
         prompt: &'a str,
         resume_session_id: Option<&'a str>,
         model: Option<&'a str>,
-        bot_name: Option<&'a str>,
+        extra_cli_args: &'a [(Cow<'static, str>, Cow<'static, str>)],
     ) -> super::SpawnHeadlessParams<'a> {
         super::SpawnHeadlessParams {
             run_id,
@@ -490,7 +490,7 @@ mod tests {
             prompt,
             resume_session_id,
             model,
-            bot_name,
+            extra_cli_args,
             permission_mode: None,
             plugin_dirs: &[],
         }
@@ -501,7 +501,7 @@ mod tests {
         let run_id = "run-short-1";
         let prompt = "short prompt";
         let (args, _) =
-            super::build_headless_agent_args(&make_params(run_id, prompt, None, None, None))
+            super::build_headless_agent_args(&make_params(run_id, prompt, None, None, &[]))
                 .unwrap();
         let expected_path = std::env::temp_dir().join(format!("conductor-prompt-{run_id}.txt"));
         assert_file_prompt(&args, prompt, expected_path.to_str().unwrap());
@@ -513,7 +513,7 @@ mod tests {
         let run_id = "run-long-99";
         let prompt = "x".repeat(513);
         let (args, _) =
-            super::build_headless_agent_args(&make_params(run_id, &prompt, None, None, None))
+            super::build_headless_agent_args(&make_params(run_id, &prompt, None, None, &[]))
                 .unwrap();
         let expected_path = std::env::temp_dir().join(format!("conductor-prompt-{run_id}.txt"));
         assert_file_prompt(&args, &prompt, expected_path.to_str().unwrap());
@@ -528,7 +528,7 @@ mod tests {
             "short prompt",
             Some("sess-abc"),
             None,
-            None,
+            &[],
         ))
         .unwrap();
         let resume_idx = args
@@ -549,7 +549,7 @@ mod tests {
             "prompt",
             None,
             Some("claude-sonnet-4-6"),
-            None,
+            &[],
         ))
         .unwrap();
         let idx = args
@@ -563,21 +563,20 @@ mod tests {
     }
 
     #[test]
-    fn build_agent_args_with_bot_name() {
-        let run_id = "run-bot-name-01";
-        let (args, _) = super::build_headless_agent_args(&make_params(
-            run_id,
-            "prompt",
-            None,
-            None,
-            Some("my-bot"),
-        ))
-        .unwrap();
+    fn build_agent_args_with_extra_cli_args() {
+        let run_id = "run-extra-cli-args-01";
+        let extra = [(
+            Cow::Borrowed("--custom-flag"),
+            Cow::Owned("custom-value".to_string()),
+        )];
+        let (args, _) =
+            super::build_headless_agent_args(&make_params(run_id, "prompt", None, None, &extra))
+                .unwrap();
         let idx = args
             .iter()
-            .position(|a| a == "--bot-name")
-            .expect("expected --bot-name flag");
-        assert_eq!(args[idx + 1], "my-bot");
+            .position(|a| a == "--custom-flag")
+            .expect("expected --custom-flag flag");
+        assert_eq!(args[idx + 1], "custom-value");
         let _ = std::fs::remove_file(
             std::env::temp_dir().join(format!("conductor-prompt-{run_id}.txt")),
         );
@@ -593,7 +592,7 @@ mod tests {
             "secret prompt",
             None,
             None,
-            None,
+            &[],
         ))
         .unwrap();
         let file_idx = args

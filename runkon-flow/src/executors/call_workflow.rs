@@ -5,7 +5,7 @@ use crate::engine::{
 };
 use crate::engine_error::{EngineError, Result};
 use crate::prompt_builder::build_variable_map;
-use crate::traits::persistence::{NewStep, StepUpdate};
+use crate::traits::persistence::StepUpdate;
 
 use super::p_err;
 
@@ -115,18 +115,14 @@ pub fn execute_call_workflow(
     match child_runner.find_resumable_child(&state.workflow_run_id, &node.workflow) {
         Ok(Some(prior_child)) => {
             // Resume the prior child run
-            let step_id = state
-                .persistence
-                .insert_step(NewStep {
-                    workflow_run_id: state.workflow_run_id.clone(),
-                    step_name: wf_step_name.clone(),
-                    role: "workflow".to_string(),
-                    can_commit: false,
-                    position: pos,
-                    iteration: iteration as i64,
-                    retry_count: Some(0),
-                })
-                .map_err(p_err)?;
+            let step_id = super::insert_step_record(
+                state,
+                &wf_step_name,
+                "workflow",
+                pos,
+                iteration,
+                Some(0),
+            )?;
 
             tracing::info!(
                 "Step 'workflow:{}': resuming prior child run '{}'",

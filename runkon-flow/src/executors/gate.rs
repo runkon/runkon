@@ -6,7 +6,7 @@ use crate::engine::{emit_event, restore_step, should_skip, ExecutionState};
 use crate::engine_error::{EngineError, Result};
 use crate::events::EngineEvent;
 use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
-use crate::traits::persistence::{GateApprovalState, NewStep, StepUpdate};
+use crate::traits::persistence::{GateApprovalState, StepUpdate};
 
 use super::p_err;
 
@@ -40,67 +40,30 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
     // Dry-run: auto-approve all gates
     if state.exec_config.dry_run {
         tracing::info!("gate '{}': dry-run auto-approved", node.name);
-        let step_id = state
-            .persistence
-            .insert_step(NewStep {
-                workflow_run_id: state.workflow_run_id.clone(),
-                step_name: node.name.clone(),
-                role: "reviewer".to_string(),
-                can_commit: false,
-                position: pos,
-                iteration: iteration as i64,
-                retry_count: None,
-            })
-            .map_err(p_err)?;
-        state
-            .persistence
-            .update_step(
-                &step_id,
-                StepUpdate {
-                    status: WorkflowStepStatus::Completed,
-                    child_run_id: None,
-                    result_text: Some("dry-run: auto-approved".to_string()),
-                    context_out: None,
-                    markers_out: None,
-                    retry_count: None,
-                    structured_output: None,
-                    step_error: None,
-                },
-            )
-            .map_err(p_err)?;
+        super::insert_step_with_status(
+            state,
+            &node.name,
+            "reviewer",
+            pos,
+            iteration,
+            None,
+            WorkflowStepStatus::Completed,
+            Some("dry-run: auto-approved".to_string()),
+        )?;
         return Ok(());
     }
 
-    let step_id = state
-        .persistence
-        .insert_step(NewStep {
-            workflow_run_id: state.workflow_run_id.clone(),
-            step_name: node.name.clone(),
-            role: "gate".to_string(),
-            can_commit: false,
-            position: pos,
-            iteration: iteration as i64,
-            retry_count: None,
-        })
-        .map_err(p_err)?;
-
-    // Mark as waiting
-    state
-        .persistence
-        .update_step(
-            &step_id,
-            StepUpdate {
-                status: WorkflowStepStatus::Waiting,
-                child_run_id: None,
-                result_text: None,
-                context_out: None,
-                markers_out: None,
-                retry_count: None,
-                structured_output: None,
-                step_error: None,
-            },
-        )
-        .map_err(p_err)?;
+    // Insert step and mark as waiting
+    let step_id = super::insert_step_with_status(
+        state,
+        &node.name,
+        "gate",
+        pos,
+        iteration,
+        None,
+        WorkflowStepStatus::Waiting,
+        None,
+    )?;
 
     emit_event(
         state,
@@ -278,18 +241,7 @@ pub fn execute_quality_gate(
     let threshold = qg.threshold;
     let on_fail_action = qg.on_fail_action.clone();
 
-    let step_id = state
-        .persistence
-        .insert_step(NewStep {
-            workflow_run_id: state.workflow_run_id.clone(),
-            step_name: node.name.clone(),
-            role: "gate".to_string(),
-            can_commit: false,
-            position: pos,
-            iteration: iteration as i64,
-            retry_count: None,
-        })
-        .map_err(p_err)?;
+    let step_id = super::insert_step_record(state, &node.name, "gate", pos, iteration, None)?;
 
     let set_step_status = |status: WorkflowStepStatus, context: &str| -> Result<()> {
         state

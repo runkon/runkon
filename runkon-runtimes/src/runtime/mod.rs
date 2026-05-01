@@ -4,6 +4,7 @@ pub mod claude;
 pub mod cli;
 pub mod script;
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{atomic::AtomicBool, Arc};
@@ -63,7 +64,7 @@ pub struct RuntimeRequest {
     pub prompt: String,
     pub working_dir: PathBuf,
     pub model: Option<String>,
-    pub bot_name: Option<String>,
+    pub extra_cli_args: Vec<(Cow<'static, str>, Cow<'static, str>)>,
     pub plugin_dirs: Vec<String>,
     pub tracker: Arc<dyn RunTracker>,
     pub event_sink: Arc<dyn RunEventSink>,
@@ -202,7 +203,7 @@ mod tests {
             prompt: "p".to_string(),
             working_dir: PathBuf::from("/tmp"),
             model: req_model.map(String::from),
-            bot_name: None,
+            extra_cli_args: vec![],
             plugin_dirs: vec![],
             tracker: Arc::new(NoopTracker),
             event_sink: Arc::new(NoopEventSink),
