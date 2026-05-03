@@ -11,8 +11,6 @@ use crate::prompt_builder::build_variable_map;
 use crate::traits::persistence::StepUpdate;
 use crate::traits::run_context::RunContext;
 
-use super::p_err;
-
 use wait_timeout::ChildExt;
 
 fn apply_script_on_fail(
@@ -38,10 +36,10 @@ fn fail_script_step(
     err_msg: String,
 ) -> Result<()> {
     tracing::warn!("{}", err_msg);
+    let generation = state.expect_lease_generation();
     state
         .persistence
-        .update_step(step_id, StepUpdate::failed(err_msg.clone(), 0))
-        .map_err(p_err)?;
+        .update_step(step_id, StepUpdate::failed(generation, err_msg.clone(), 0))?;
     apply_script_on_fail(state, &node.name, &node.on_fail, err_msg)
 }
 
@@ -502,6 +500,9 @@ mod tests {
             event_sinks: Arc::from(vec![]),
             cancellation: crate::cancellation::CancellationToken::new(),
             current_execution_id: Arc::new(std::sync::Mutex::new(None)),
+            owner_token: None,
+            // Run was created with generation=0; use that so update_step check passes.
+            lease_generation: Some(0),
         }
     }
 

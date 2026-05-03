@@ -325,6 +325,7 @@ pub fn execute_foreach(
             completed.push(m);
         }
 
+        let mut batch: Vec<(String, FanOutItemUpdate)> = Vec::new();
         for (item_db_id, succeeded) in completed {
             in_flight -= 1;
 
@@ -343,19 +344,16 @@ pub fn execute_foreach(
                 String::new()
             });
 
-            state
-                .persistence
-                .update_fan_out_item(
-                    &item_db_id,
-                    FanOutItemUpdate::Terminal {
-                        status: if succeeded {
-                            FanOutItemStatus::Completed
-                        } else {
-                            FanOutItemStatus::Failed
-                        },
+            batch.push((
+                item_db_id,
+                FanOutItemUpdate::Terminal {
+                    status: if succeeded {
+                        FanOutItemStatus::Completed
+                    } else {
+                        FanOutItemStatus::Failed
                     },
-                )
-                .map_err(p_err)?;
+                },
+            ));
 
             emit_event(
                 state,
@@ -391,15 +389,12 @@ pub fn execute_foreach(
                         skipped_count += to_skip.len();
                         for skip_id in &to_skip {
                             if let Some(skip_db_id) = item_id_to_db_id.get(skip_id) {
-                                state
-                                    .persistence
-                                    .update_fan_out_item(
-                                        skip_db_id,
-                                        FanOutItemUpdate::Terminal {
-                                            status: FanOutItemStatus::Skipped,
-                                        },
-                                    )
-                                    .map_err(p_err)?;
+                                batch.push((
+                                    skip_db_id.clone(),
+                                    FanOutItemUpdate::Terminal {
+                                        status: FanOutItemStatus::Skipped,
+                                    },
+                                ));
                             }
                             terminal_ids.insert(skip_id.clone());
                             newly_terminal.push(skip_id.clone());
@@ -430,19 +425,24 @@ pub fn execute_foreach(
                     }
                 }
                 if !candidates.is_empty() {
-                    let mut still_waiting = Vec::new();
-                    for item in waiting.drain(..) {
+                    waiting.retain(|item| {
                         if candidates.contains(&item.item_id)
                             && is_eligible(&item.item_id, &dep_map, &terminal_ids)
                         {
-                            ready.push_back(item);
+                            ready.push_back(item.clone());
+                            false
                         } else {
-                            still_waiting.push(item);
+                            true
                         }
-                    }
-                    waiting = still_waiting;
+                    });
                 }
             }
+        }
+        if !batch.is_empty() {
+            state
+                .persistence
+                .batch_update_fan_out_items(&batch)
+                .map_err(p_err)?;
         }
 
         // 2. Check parent cancellation.
@@ -549,23 +549,23 @@ pub fn execute_foreach(
 
     let step_succeeded = failed_count == 0;
 
+    let generation = state.expect_lease_generation();
+
     if step_succeeded {
-        state
-            .persistence
-            .update_step(
-                &step_id,
-                StepUpdate {
-                    status: WorkflowStepStatus::Completed,
-                    child_run_id: None,
-                    result_text: Some(context.clone()),
-                    context_out: Some(context.clone()),
-                    markers_out: None,
-                    retry_count: Some(0),
-                    structured_output: None,
-                    step_error: None,
-                },
-            )
-            .map_err(p_err)?;
+        state.persistence.update_step(
+            &step_id,
+            StepUpdate {
+                generation,
+                status: WorkflowStepStatus::Completed,
+                child_run_id: None,
+                result_text: Some(context.clone()),
+                context_out: Some(context.clone()),
+                markers_out: None,
+                retry_count: Some(0),
+                structured_output: None,
+                step_error: None,
+            },
+        )?;
 
         record_foreach_step_success(state, step_key, &node.name, context, iteration);
     } else {
@@ -574,22 +574,20 @@ pub fn execute_foreach(
             node.name
         );
 
-        state
-            .persistence
-            .update_step(
-                &step_id,
-                StepUpdate {
-                    status: WorkflowStepStatus::Failed,
-                    child_run_id: None,
-                    result_text: Some(error_msg.clone()),
-                    context_out: Some(context),
-                    markers_out: None,
-                    retry_count: Some(0),
-                    structured_output: None,
-                    step_error: Some(error_msg.clone()),
-                },
-            )
-            .map_err(p_err)?;
+        state.persistence.update_step(
+            &step_id,
+            StepUpdate {
+                generation,
+                status: WorkflowStepStatus::Failed,
+                child_run_id: None,
+                result_text: Some(error_msg.clone()),
+                context_out: Some(context),
+                markers_out: None,
+                retry_count: Some(0),
+                structured_output: None,
+                step_error: Some(error_msg.clone()),
+            },
+        )?;
 
         return record_step_failure(state, step_key, &node.name, error_msg, 1, true);
     }
@@ -627,15 +625,14 @@ mod tests {
         dep_map: &HashMap<String, HashSet<String>>,
         terminal_ids: &HashSet<String>,
     ) {
-        let mut still_waiting = Vec::new();
-        for item in waiting.drain(..) {
+        waiting.retain(|item| {
             if is_eligible(&item.item_id, dep_map, terminal_ids) {
-                ready.push_back(item);
+                ready.push_back(item.clone());
+                false
             } else {
-                still_waiting.push(item);
+                true
             }
-        }
-        *waiting = still_waiting;
+        });
     }
 
     /// Verifies that the seeding fold correctly counts pre-existing terminal items
@@ -914,6 +911,8 @@ mod tests {
             event_sinks: Arc::from(vec![]),
             cancellation: CancellationToken::new(),
             current_execution_id: Arc::new(Mutex::new(None)),
+            owner_token: None,
+            lease_generation: None,
         };
 
         let ctx = super::ForeachParentCtx::from_state(&parent, Arc::new(DummyChildRunner));

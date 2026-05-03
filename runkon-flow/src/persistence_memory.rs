@@ -6,6 +6,7 @@ use std::sync::Mutex;
 
 use chrono::Utc;
 
+use crate::cancellation_reason::CancellationReason;
 use crate::engine_error::EngineError;
 use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
 use crate::traits::persistence::{
@@ -36,6 +37,8 @@ pub struct InMemoryWorkflowPersistence {
     fail_get_fan_out_items: AtomicBool,
     /// When `true`, `get_steps` returns a `Workflow` error.
     fail_get_steps: AtomicBool,
+    /// When `true`, `acquire_lease` returns a `Persistence` error.
+    fail_acquire_lease: AtomicBool,
 }
 
 impl InMemoryWorkflowPersistence {
@@ -50,6 +53,7 @@ impl InMemoryWorkflowPersistence {
             }),
             fail_get_fan_out_items: AtomicBool::new(false),
             fail_get_steps: AtomicBool::new(false),
+            fail_acquire_lease: AtomicBool::new(false),
         }
     }
 }
@@ -73,6 +77,74 @@ impl InMemoryWorkflowPersistence {
     pub fn set_fail_get_steps(&self, fail: bool) {
         self.fail_get_steps
             .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Inject a failure into `acquire_lease`. When `fail` is `true`, every call
+    /// to `acquire_lease` returns `EngineError::Persistence`. Used to test the
+    /// refresh-thread DB error path.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn set_fail_acquire_lease(&self, fail: bool) {
+        self.fail_acquire_lease
+            .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Test helper: insert a minimal `WorkflowRun` with the given `id` so that
+    /// `acquire_lease` can find it. Use this in tests that call `FlowEngine::run`
+    /// or `FlowEngine::resume` against an `InMemoryWorkflowPersistence` without
+    /// going through `create_run` (which generates its own id).
+    #[cfg(test)]
+    pub fn seed_run(&self, id: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        let run = crate::types::WorkflowRun {
+            id: id.to_string(),
+            workflow_name: String::new(),
+            worktree_id: None,
+            parent_run_id: String::new(),
+            status: crate::status::WorkflowRunStatus::Pending,
+            dry_run: false,
+            trigger: "test".to_string(),
+            started_at: now,
+            ended_at: None,
+            result_summary: None,
+            error: None,
+            definition_snapshot: None,
+            inputs: std::collections::HashMap::new(),
+            ticket_id: None,
+            repo_id: None,
+            parent_workflow_run_id: None,
+            target_label: None,
+            default_bot_name: None,
+            iteration: 0,
+            blocked_on: None,
+            workflow_title: None,
+            total_input_tokens: None,
+            total_output_tokens: None,
+            total_cache_read_input_tokens: None,
+            total_cache_creation_input_tokens: None,
+            total_turns: None,
+            total_cost_usd: None,
+            total_duration_ms: None,
+            model: None,
+            dismissed: false,
+            owner_token: None,
+            lease_until: None,
+            generation: 0,
+        };
+        self.store.lock().unwrap().runs.insert(id.to_string(), run);
+    }
+
+    /// Test helper: forcibly expire the current lease for `run_id`, then immediately
+    /// steal it with `new_token`. Used to simulate another engine claiming the lease
+    /// while the original engine is still running.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn expire_and_steal_lease(&self, run_id: &str, new_token: &str) {
+        {
+            let mut store = self.store.lock().unwrap();
+            if let Some(run) = store.runs.get_mut(run_id) {
+                run.lease_until = Some("1970-01-01T00:00:00Z".to_string());
+            }
+        }
+        self.acquire_lease(run_id, new_token, 3600).unwrap();
     }
 
     /// Test helper: directly set the metric fields on a step so that
@@ -159,6 +231,9 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
             total_duration_ms: None,
             model: None,
             dismissed: false,
+            owner_token: None,
+            lease_until: None,
+            generation: 0,
         };
         let mut store = self.lock()?;
         store.runs.insert(id, run.clone());
@@ -273,10 +348,23 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
 
     fn update_step(&self, step_id: &str, update: StepUpdate) -> Result<(), EngineError> {
         let mut store = self.lock()?;
+
+        // Check generation before touching the step.
+        let run_id = store
+            .steps
+            .get(step_id)
+            .ok_or_else(|| EngineError::Persistence(format!("step {step_id} not found")))?
+            .workflow_run_id
+            .clone();
+        let run_generation = store.runs.get(&run_id).map(|r| r.generation).unwrap_or(0);
+        if run_generation != update.generation {
+            return Err(EngineError::Cancelled(CancellationReason::LeaseLost));
+        }
+
         let step = store
             .steps
             .get_mut(step_id)
-            .ok_or_else(|| EngineError::Persistence(format!("step {step_id} not found")))?;
+            .expect("step existence verified above when reading workflow_run_id");
         let now = Utc::now().to_rfc3339();
         let is_starting = update.status == WorkflowStepStatus::Running
             || update.status == WorkflowStepStatus::Waiting;
@@ -381,6 +469,34 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
             FanOutItemUpdate::Terminal { status } => {
                 item.status = status.as_str().to_string();
                 item.completed_at = Some(now);
+            }
+        }
+        Ok(())
+    }
+
+    fn batch_update_fan_out_items(
+        &self,
+        updates: &[(String, FanOutItemUpdate)],
+    ) -> Result<(), EngineError> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let mut store = self.lock()?;
+        let now = Utc::now().to_rfc3339();
+        for (item_id, update) in updates {
+            let item = store.fan_out_items.get_mut(item_id).ok_or_else(|| {
+                EngineError::Persistence(format!("fan-out item {item_id} not found"))
+            })?;
+            match update {
+                FanOutItemUpdate::Running { child_run_id } => {
+                    item.status = "running".to_string();
+                    item.child_run_id = Some(child_run_id.clone());
+                    item.dispatched_at = Some(now.clone());
+                }
+                FanOutItemUpdate::Terminal { status } => {
+                    item.status = status.as_str().to_string();
+                    item.completed_at = Some(now.clone());
+                }
             }
         }
         Ok(())
@@ -494,6 +610,49 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
                 )
             })
             .unwrap_or(false))
+    }
+
+    fn acquire_lease(
+        &self,
+        run_id: &str,
+        token: &str,
+        ttl_seconds: i64,
+    ) -> Result<Option<i64>, EngineError> {
+        if self.fail_acquire_lease.load(Ordering::Relaxed) {
+            return Err(EngineError::Persistence(
+                "simulated acquire_lease failure".to_string(),
+            ));
+        }
+        let mut store = self.store.lock().map_err(|_| lock_err())?;
+        let now = chrono::Utc::now();
+
+        // If the run doesn't exist, return None (no rows updated) — consistent with the SQLite
+        // implementation which returns None when the UPDATE matches 0 rows.
+        let Some(run) = store.runs.get_mut(run_id) else {
+            return Ok(None);
+        };
+
+        let can_claim = match &run.owner_token {
+            None => true,
+            Some(t) if t == token => true,
+            Some(_) => run.lease_until.as_deref().is_some_and(|until| {
+                chrono::DateTime::parse_from_rfc3339(until)
+                    .map(|exp| exp < now)
+                    .unwrap_or(false)
+            }),
+        };
+
+        if !can_claim {
+            return Ok(None);
+        }
+
+        // Only increment generation when ownership actually changes.
+        if run.owner_token.as_deref() != Some(token) {
+            run.generation += 1;
+        }
+        run.owner_token = Some(token.to_string());
+        run.lease_until = Some((now + chrono::Duration::seconds(ttl_seconds)).to_rfc3339());
+        Ok(Some(run.generation))
     }
 
     fn tick_heartbeat(&self, _run_id: &str) -> Result<(), EngineError> {
@@ -639,6 +798,7 @@ mod tests {
         p.update_step(
             &step_id,
             StepUpdate {
+                generation: 0,
                 status: WorkflowStepStatus::Completed,
                 child_run_id: None,
                 result_text: Some("done".to_string()),
@@ -655,6 +815,58 @@ mod tests {
         assert_eq!(steps[0].status, WorkflowStepStatus::Completed);
         assert_eq!(steps[0].result_text.as_deref(), Some("done"));
         assert!(steps[0].ended_at.is_some());
+    }
+
+    #[test]
+    fn update_step_returns_lease_lost_on_stale_generation() {
+        use crate::cancellation_reason::CancellationReason;
+        use crate::engine_error::EngineError;
+
+        let p = InMemoryWorkflowPersistence::new();
+        let run = p.create_run(make_new_run("test")).unwrap();
+        // Acquire lease → generation becomes 1.
+        p.acquire_lease(&run.id, "tok", 60).unwrap();
+        let step_id = p.insert_step(make_new_step(&run.id, "s")).unwrap();
+
+        // Supply stale generation=0; DB has generation=1.
+        let result = p.update_step(
+            &step_id,
+            StepUpdate {
+                generation: 0,
+                status: WorkflowStepStatus::Completed,
+                child_run_id: None,
+                result_text: None,
+                context_out: None,
+                markers_out: None,
+                retry_count: None,
+                structured_output: None,
+                step_error: None,
+            },
+        );
+        assert!(
+            matches!(
+                result,
+                Err(EngineError::Cancelled(CancellationReason::LeaseLost))
+            ),
+            "stale generation should return LeaseLost; got {result:?}"
+        );
+
+        // Correct generation passes.
+        p.update_step(
+            &step_id,
+            StepUpdate {
+                generation: 1,
+                status: WorkflowStepStatus::Completed,
+                child_run_id: None,
+                result_text: None,
+                context_out: None,
+                markers_out: None,
+                retry_count: None,
+                structured_output: None,
+                step_error: None,
+            },
+        )
+        .unwrap();
     }
 
     #[test]
@@ -863,5 +1075,173 @@ mod tests {
         assert!(p
             .persist_metrics(&run.id, 100, 200, 50, 25, 0.01, 3, 5000)
             .is_ok());
+    }
+
+    #[test]
+    fn batch_update_fan_out_items_mixed_terminal_statuses() {
+        use crate::traits::persistence::{FanOutItemStatus, FanOutItemUpdate};
+
+        let p = InMemoryWorkflowPersistence::new();
+        let run = p.create_run(make_new_run("test")).unwrap();
+        let step_id = p.insert_step(make_new_step(&run.id, "foreach")).unwrap();
+
+        let id1 = p
+            .insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1")
+            .unwrap();
+        let id2 = p
+            .insert_fan_out_item(&step_id, "ticket", "t-2", "ref-2")
+            .unwrap();
+        let id3 = p
+            .insert_fan_out_item(&step_id, "ticket", "t-3", "ref-3")
+            .unwrap();
+
+        let updates = vec![
+            (
+                id1.clone(),
+                FanOutItemUpdate::Terminal {
+                    status: FanOutItemStatus::Completed,
+                },
+            ),
+            (
+                id2.clone(),
+                FanOutItemUpdate::Terminal {
+                    status: FanOutItemStatus::Failed,
+                },
+            ),
+            (
+                id3.clone(),
+                FanOutItemUpdate::Terminal {
+                    status: FanOutItemStatus::Skipped,
+                },
+            ),
+        ];
+
+        p.batch_update_fan_out_items(&updates).unwrap();
+
+        let items = p.get_fan_out_items(&step_id, None).unwrap();
+        let get = |id: &str| items.iter().find(|i| i.id == id).unwrap().clone();
+
+        let item1 = get(&id1);
+        assert_eq!(item1.status, "completed");
+        assert!(item1.completed_at.is_some(), "completed_at must be set");
+
+        let item2 = get(&id2);
+        assert_eq!(item2.status, "failed");
+        assert!(item2.completed_at.is_some());
+
+        let item3 = get(&id3);
+        assert_eq!(item3.status, "skipped");
+        assert!(item3.completed_at.is_some());
+    }
+
+    #[test]
+    fn batch_update_fan_out_items_empty_is_noop() {
+        use crate::traits::persistence::FanOutItemUpdate;
+
+        let p = InMemoryWorkflowPersistence::new();
+        let run = p.create_run(make_new_run("test")).unwrap();
+        let step_id = p.insert_step(make_new_step(&run.id, "foreach")).unwrap();
+        let _id = p
+            .insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1")
+            .unwrap();
+
+        p.batch_update_fan_out_items(&[] as &[(String, FanOutItemUpdate)])
+            .unwrap();
+
+        let items = p.get_fan_out_items(&step_id, None).unwrap();
+        assert_eq!(items[0].status, "pending", "empty batch must be a no-op");
+    }
+
+    #[test]
+    fn batch_update_fan_out_items_running_variant() {
+        use crate::traits::persistence::FanOutItemUpdate;
+
+        let p = InMemoryWorkflowPersistence::new();
+        let run = p.create_run(make_new_run("test")).unwrap();
+        let step_id = p.insert_step(make_new_step(&run.id, "foreach")).unwrap();
+        let id1 = p
+            .insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1")
+            .unwrap();
+
+        let updates = vec![(
+            id1.clone(),
+            FanOutItemUpdate::Running {
+                child_run_id: "run-child-abc".to_string(),
+            },
+        )];
+        p.batch_update_fan_out_items(&updates).unwrap();
+
+        let items = p.get_fan_out_items(&step_id, None).unwrap();
+        let item = items.iter().find(|i| i.id == id1).unwrap();
+        assert_eq!(item.status, "running");
+        assert_eq!(item.child_run_id.as_deref(), Some("run-child-abc"));
+        assert!(item.dispatched_at.is_some(), "dispatched_at must be set");
+        assert!(item.completed_at.is_none(), "completed_at must not be set");
+    }
+
+    #[test]
+    fn batch_update_fan_out_items_missing_item_returns_error() {
+        use crate::traits::persistence::{FanOutItemStatus, FanOutItemUpdate};
+
+        let p = InMemoryWorkflowPersistence::new();
+        let run = p.create_run(make_new_run("test")).unwrap();
+        let _step_id = p.insert_step(make_new_step(&run.id, "foreach")).unwrap();
+
+        let updates = vec![(
+            "does-not-exist".to_string(),
+            FanOutItemUpdate::Terminal {
+                status: FanOutItemStatus::Completed,
+            },
+        )];
+        assert!(
+            p.batch_update_fan_out_items(&updates).is_err(),
+            "should error for non-existent item"
+        );
+    }
+
+    #[test]
+    fn test_acquire_lease_nonexistent_run_returns_none() {
+        let p = InMemoryWorkflowPersistence::new();
+        let result = p.acquire_lease("does-not-exist", "token-abc", 30);
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn test_acquire_lease_existing_run_returns_generation() {
+        let p = InMemoryWorkflowPersistence::new();
+        let run = p.create_run(make_new_run("test")).unwrap();
+        let result = p.acquire_lease(&run.id, "token-abc", 30).unwrap();
+        assert_eq!(result, Some(1));
+    }
+
+    #[test]
+    fn test_acquire_lease_same_token_is_idempotent() {
+        let p = InMemoryWorkflowPersistence::new();
+        let run = p.create_run(make_new_run("test")).unwrap();
+        p.acquire_lease(&run.id, "token-abc", 30).unwrap();
+        // Same-token renewal must not increment generation.
+        let result = p.acquire_lease(&run.id, "token-abc", 30).unwrap();
+        assert_eq!(result, Some(1));
+    }
+
+    #[test]
+    fn test_acquire_lease_conflict_returns_none() {
+        let p = InMemoryWorkflowPersistence::new();
+        let run = p.create_run(make_new_run("test")).unwrap();
+        p.acquire_lease(&run.id, "token-first", 3600).unwrap();
+        let result = p.acquire_lease(&run.id, "token-second", 30).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_acquire_lease_expired_lease_allows_new_token() {
+        let p = InMemoryWorkflowPersistence::new();
+        let run = p.create_run(make_new_run("test")).unwrap();
+        // Acquire with a negative TTL so the lease is already in the past.
+        let gen1 = p.acquire_lease(&run.id, "token-first", -1).unwrap();
+        assert_eq!(gen1, Some(1));
+        // A different token should be able to claim the expired lease.
+        let gen2 = p.acquire_lease(&run.id, "token-second", 30).unwrap();
+        assert_eq!(gen2, Some(2));
     }
 }

@@ -9,7 +9,7 @@ use crate::events::EngineEvent;
 use crate::status::WorkflowStepStatus;
 use crate::traits::persistence::StepUpdate;
 
-use super::{build_action_params, p_err, record_dispatch_success};
+use super::{build_action_params, record_dispatch_success};
 
 pub fn execute_call(state: &mut ExecutionState, node: &CallNode, iteration: u32) -> Result<()> {
     // Call-level output overrides block-level; if neither is set, use None.
@@ -222,29 +222,28 @@ fn execute_call_inner(
                     agent_label,
                     node.timeout,
                 );
-                state
-                    .persistence
-                    .update_step(
-                        &step_id,
-                        StepUpdate {
-                            status: WorkflowStepStatus::TimedOut,
-                            child_run_id: None,
-                            result_text: Some(format!(
-                                "timed out after {}",
-                                node.timeout.as_deref().unwrap_or("?")
-                            )),
-                            context_out: None,
-                            markers_out: None,
-                            retry_count: Some(attempt as i64),
-                            structured_output: None,
-                            step_error: Some(format!(
-                                "step '{}' timed out after {}",
-                                agent_label,
-                                node.timeout.as_deref().unwrap_or("?"),
-                            )),
-                        },
-                    )
-                    .map_err(p_err)?;
+                let generation = state.expect_lease_generation();
+                state.persistence.update_step(
+                    &step_id,
+                    StepUpdate {
+                        generation,
+                        status: WorkflowStepStatus::TimedOut,
+                        child_run_id: None,
+                        result_text: Some(format!(
+                            "timed out after {}",
+                            node.timeout.as_deref().unwrap_or("?")
+                        )),
+                        context_out: None,
+                        markers_out: None,
+                        retry_count: Some(attempt as i64),
+                        structured_output: None,
+                        step_error: Some(format!(
+                            "step '{}' timed out after {}",
+                            agent_label,
+                            node.timeout.as_deref().unwrap_or("?"),
+                        )),
+                    },
+                )?;
                 return Err(EngineError::Cancelled(CancellationReason::Timeout));
             }
         }
@@ -278,22 +277,21 @@ fn execute_call_inner(
                 return Ok(());
             }
             Err(EngineError::Cancelled(reason)) => {
-                state
-                    .persistence
-                    .update_step(
-                        &step_id,
-                        StepUpdate {
-                            status: WorkflowStepStatus::Failed,
-                            child_run_id: None,
-                            result_text: Some("executor shutdown requested".to_string()),
-                            context_out: None,
-                            markers_out: None,
-                            retry_count: Some(attempt as i64),
-                            structured_output: None,
-                            step_error: None,
-                        },
-                    )
-                    .map_err(p_err)?;
+                let generation = state.expect_lease_generation();
+                state.persistence.update_step(
+                    &step_id,
+                    StepUpdate {
+                        generation,
+                        status: WorkflowStepStatus::Failed,
+                        child_run_id: None,
+                        result_text: Some("executor shutdown requested".to_string()),
+                        context_out: None,
+                        markers_out: None,
+                        retry_count: Some(attempt as i64),
+                        structured_output: None,
+                        step_error: None,
+                    },
+                )?;
                 return Err(EngineError::Cancelled(reason));
             }
             Err(e) => {
@@ -304,10 +302,11 @@ fn execute_call_inner(
                     attempt + 1,
                     max_attempts,
                 );
-                state
-                    .persistence
-                    .update_step(&step_id, StepUpdate::failed(err_msg.clone(), attempt))
-                    .map_err(p_err)?;
+                let generation = state.expect_lease_generation();
+                state.persistence.update_step(
+                    &step_id,
+                    StepUpdate::failed(generation, err_msg.clone(), attempt),
+                )?;
                 last_error = err_msg;
                 continue;
             }
@@ -390,6 +389,8 @@ mod tests {
 
         let mut state = crate::test_helpers::make_test_execution_state(cp_for_state, run_id);
         state.action_registry = Arc::new(registry);
+        // Run was created with generation=0; use that so update_step generation check passes.
+        state.lease_generation = Some(0);
 
         let node = CallNode {
             agent: AgentRef::Name("sleeping_exec".to_string()),

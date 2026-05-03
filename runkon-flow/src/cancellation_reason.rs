@@ -6,4 +6,5 @@ pub enum CancellationReason {
     FailFast,
     ParentCancelled,
     EngineShutdown,
+    LeaseLost,
 }

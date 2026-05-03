@@ -62,9 +62,11 @@ impl WorkflowRunStatus {
         WorkflowRunStatus::Waiting,
     ];
 
+    const ACTIVE_STRS: [&'static str; 3] = ["pending", "running", "waiting"];
+
     /// Returns the SQL string representations of all active statuses.
-    pub fn active_strings() -> Vec<String> {
-        Self::ACTIVE.iter().map(|s| s.to_string()).collect()
+    pub fn active_strings() -> &'static [&'static str] {
+        &Self::ACTIVE_STRS
     }
 
     /// Whether this status is terminal (no further transitions expected).
@@ -202,6 +204,23 @@ mod sql_impls {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_strings_matches_display() {
+        let from_display: Vec<String> = WorkflowRunStatus::ACTIVE
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(
+            WorkflowRunStatus::active_strings(),
+            from_display
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .as_slice(),
+            "ACTIVE_STRS must match Display impl for each ACTIVE variant"
+        );
+    }
 
     #[test]
     fn run_terminal_states() {

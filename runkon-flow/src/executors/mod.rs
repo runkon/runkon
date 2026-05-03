@@ -63,22 +63,21 @@ pub(super) fn insert_step_with_status(
 ) -> crate::engine_error::Result<String> {
     use crate::traits::persistence::StepUpdate;
     let step_id = insert_step_record(state, step_name, role, pos, iteration, retry_count)?;
-    state
-        .persistence
-        .update_step(
-            &step_id,
-            StepUpdate {
-                status,
-                child_run_id: None,
-                result_text,
-                context_out: None,
-                markers_out: None,
-                retry_count,
-                structured_output: None,
-                step_error: None,
-            },
-        )
-        .map_err(p_err)?;
+    let generation = state.expect_lease_generation();
+    state.persistence.update_step(
+        &step_id,
+        StepUpdate {
+            generation,
+            status,
+            child_run_id: None,
+            result_text,
+            context_out: None,
+            markers_out: None,
+            retry_count,
+            structured_output: None,
+            step_error: None,
+        },
+    )?;
     Ok(step_id)
 }
 
@@ -151,8 +150,8 @@ pub(super) fn build_execution_context(
 
 /// Persist a successfully completed step via `state.persistence.update_step`.
 ///
-/// Wraps the `StepUpdate::completed(...)` + `.map_err(p_err)` pattern that is
-/// duplicated in `call.rs`, `parallel.rs`, and `call_workflow.rs`.
+/// Wraps the `StepUpdate::completed(...)` pattern used in `call.rs`, `parallel.rs`,
+/// and `call_workflow.rs`. Propagates `Cancelled(LeaseLost)` without wrapping.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn persist_completed_step(
     state: &crate::engine::ExecutionState,
@@ -165,20 +164,19 @@ pub(super) fn persist_completed_step(
     structured_output: Option<String>,
 ) -> crate::engine_error::Result<()> {
     use crate::traits::persistence::StepUpdate;
-    state
-        .persistence
-        .update_step(
-            step_id,
-            StepUpdate::completed(
-                child_run_id,
-                result_text,
-                context_out,
-                markers_out,
-                attempt,
-                structured_output,
-            ),
-        )
-        .map_err(p_err)
+    let generation = state.expect_lease_generation();
+    state.persistence.update_step(
+        step_id,
+        StepUpdate::completed(
+            generation,
+            child_run_id,
+            result_text,
+            context_out,
+            markers_out,
+            attempt,
+            structured_output,
+        ),
+    )
 }
 
 /// Build [`ActionParams`] from the fields that are identical in `call.rs` and `parallel.rs`.

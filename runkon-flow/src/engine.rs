@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -32,8 +32,8 @@ pub struct WorktreeContext {
 /// Pre-loaded context for resuming a workflow run.
 #[derive(Clone)]
 pub struct ResumeContext {
-    /// Completed step records keyed by step key, for O(1) skip check and restore.
-    pub step_map: HashMap<StepKey, WorkflowRunStep>,
+    /// Completed step records keyed by (step_name, iteration), for O(1) zero-alloc lookup.
+    pub step_map: HashMap<String, HashMap<u32, WorkflowRunStep>>,
 }
 
 /// Mutable runtime state for a workflow execution — no conductor-core deps.
@@ -85,6 +85,10 @@ pub struct ExecutionState {
     /// Written by execute_call before dispatch; read by FlowEngine::cancel_run()
     /// to fire-and-forget executor.cancel().
     pub current_execution_id: Arc<Mutex<Option<(String, String)>>>,
+    /// Lease token held by this engine instance after a successful acquire_lease().
+    /// Used by PRs 3–5 for refresh and generation checks.
+    pub owner_token: Option<String>,
+    pub lease_generation: Option<i64>,
 }
 
 /// Input parameters for child workflow execution.
@@ -152,6 +156,16 @@ impl ExecutionState {
         Arc::new(AtomicI64::new(0))
     }
 
+    /// Read the current lease generation, panicking with a consistent message
+    /// if the lease was never acquired. Every executor `update_step` call site
+    /// requires a generation, and `FlowEngine::run`/`resume` is the single
+    /// entry point that sets it — so a `None` here is a programmer error in
+    /// engine construction, not a runtime condition.
+    pub fn expect_lease_generation(&self) -> i64 {
+        self.lease_generation
+            .expect("lease_generation must be set after FlowEngine::run/resume entry")
+    }
+
     /// Throttled heartbeat tick + external cancel check.
     ///
     /// Bumps `last_heartbeat` in persistence at most once every 5 seconds and
@@ -168,6 +182,11 @@ impl ExecutionState {
     /// Without this being called from inside long-running wait loops (parallel
     /// blocks, foreach fan-out), the heartbeat goes stale during multi-minute
     /// waits and the watchdog reaper races the engine after >60 s — see #2731.
+    ///
+    /// NOTE (#2731/#2796): lease refresh (refresh_lease_loop in flow_engine.rs)
+    /// is now the load-bearing ownership mechanism. Heartbeat writes are retained
+    /// solely for UI staleness display (detect_stuck_workflow_run_ids reads
+    /// last_heartbeat). Do not remove them without auditing that query.
     pub fn tick_heartbeat_throttled(&self) -> Result<()> {
         use crate::cancellation_reason::CancellationReason;
 
@@ -251,6 +270,8 @@ impl ExecutionState {
         child.last_heartbeat_at = Self::new_heartbeat();
         child.cancellation = cancellation;
         child.current_execution_id = Arc::new(std::sync::Mutex::new(None));
+        child.owner_token = None;
+        child.lease_generation = None;
         child
     }
 
@@ -420,6 +441,17 @@ pub fn run_workflow_engine(
         tracing::error!("Body execution error: {msg}");
         state.all_succeeded = false;
         body_error = Some(msg);
+        // Mirror LeaseLost onto the cancellation token so FlowEngine::run's
+        // lease_lost_during_run check fires even when the error reached us via
+        // a step-write failure rather than the refresh thread.
+        if matches!(
+            e,
+            EngineError::Cancelled(crate::cancellation_reason::CancellationReason::LeaseLost)
+        ) {
+            state
+                .cancellation
+                .cancel(crate::cancellation_reason::CancellationReason::LeaseLost);
+        }
     }
 
     // Execute always block regardless of outcome
@@ -752,7 +784,8 @@ pub fn handle_on_fail(
 pub fn should_skip(state: &ExecutionState, step_name: &str, iteration: u32) -> bool {
     state.resume_ctx.as_ref().is_some_and(|ctx| {
         ctx.step_map
-            .contains_key(&(step_name.to_owned(), iteration))
+            .get(step_name)
+            .is_some_and(|m| m.contains_key(&iteration))
     })
 }
 
@@ -786,7 +819,7 @@ pub fn restore_completed_step(
     step_key: &str,
     iteration: u32,
 ) {
-    let completed_step = ctx.step_map.get(&(step_key.to_owned(), iteration));
+    let completed_step = ctx.step_map.get(step_key).and_then(|m| m.get(&iteration));
 
     let Some(step) = completed_step else {
         tracing::warn!(
@@ -885,7 +918,7 @@ pub fn fetch_child_completion_data(
 /// iterations). Returns `Err` if stuck, `Ok(())` otherwise.
 pub fn check_stuck(
     state: &mut ExecutionState,
-    prev_marker_sets: &mut Vec<HashSet<String>>,
+    prev_marker_sets: &mut VecDeque<HashSet<String>>,
     step: &str,
     marker: &str,
     stuck_after: u32,
@@ -897,19 +930,21 @@ pub fn check_stuck(
         .map(|r| r.markers.iter().cloned().collect())
         .unwrap_or_default();
 
-    prev_marker_sets.push(current_markers.clone());
+    prev_marker_sets.push_back(current_markers.clone());
+    if prev_marker_sets.len() > stuck_after as usize {
+        prev_marker_sets.pop_front();
+    }
 
-    if prev_marker_sets.len() >= stuck_after as usize {
-        let window = &prev_marker_sets[prev_marker_sets.len() - stuck_after as usize..];
-        if window.iter().all(|s| s == &current_markers) {
-            tracing::warn!(
-                "{loop_kind} {step}.{marker} — stuck: identical markers for {stuck_after} consecutive iterations",
-            );
-            state.all_succeeded = false;
-            return Err(EngineError::Workflow(format!(
-                "{loop_kind} {step}.{marker} stuck after {stuck_after} iterations with identical markers",
-            )));
-        }
+    if prev_marker_sets.len() >= stuck_after as usize
+        && prev_marker_sets.iter().all(|s| s == &current_markers)
+    {
+        tracing::warn!(
+            "{loop_kind} {step}.{marker} — stuck: identical markers for {stuck_after} consecutive iterations",
+        );
+        state.all_succeeded = false;
+        return Err(EngineError::Workflow(format!(
+            "{loop_kind} {step}.{marker} stuck after {stuck_after} iterations with identical markers",
+        )));
     }
 
     Ok(())
@@ -1110,6 +1145,8 @@ mod tests {
             event_sinks: Arc::from(vec![]),
             cancellation: CancellationToken::new(),
             current_execution_id: Arc::new(std::sync::Mutex::new(None)),
+            owner_token: None,
+            lease_generation: None,
         };
 
         let child_cancellation = CancellationToken::new();
@@ -1235,6 +1272,8 @@ mod tests {
             event_sinks: Arc::clone(&sinks),
             cancellation: CancellationToken::new(),
             current_execution_id: Arc::new(std::sync::Mutex::new(None)),
+            owner_token: None,
+            lease_generation: None,
         };
 
         let ctx = parent.child_workflow_context();
@@ -1313,5 +1352,81 @@ mod tests {
             state.cancellation.is_cancelled(),
             "helper must set state.cancellation on external cancel"
         );
+    }
+
+    #[test]
+    fn check_stuck_bounds_buffer() {
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use crate::types::StepResult;
+
+        let mut state = crate::test_helpers::make_test_execution_state(
+            Arc::new(InMemoryWorkflowPersistence::new()),
+            "run-bounds".into(),
+        );
+
+        let stuck_after = 3u32;
+        let mut prev_marker_sets: VecDeque<HashSet<String>> = VecDeque::new();
+
+        for i in 0u32..10 {
+            let result = StepResult {
+                markers: vec![format!("marker-{i}")],
+                ..Default::default()
+            };
+            state.step_results.insert("step".to_string(), result);
+
+            let res = check_stuck(
+                &mut state,
+                &mut prev_marker_sets,
+                "step",
+                "m",
+                stuck_after,
+                "while",
+            );
+            assert!(
+                res.is_ok(),
+                "should not be stuck with changing markers at iteration {i}"
+            );
+            assert!(
+                prev_marker_sets.len() <= stuck_after as usize,
+                "buffer exceeded stuck_after at iteration {i}: len={}",
+                prev_marker_sets.len()
+            );
+        }
+    }
+
+    #[test]
+    fn check_stuck_detects_stuck() {
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use crate::types::StepResult;
+
+        let mut state = crate::test_helpers::make_test_execution_state(
+            Arc::new(InMemoryWorkflowPersistence::new()),
+            "run-stuck".into(),
+        );
+
+        let stuck_after = 3u32;
+        let mut prev_marker_sets: VecDeque<HashSet<String>> = VecDeque::new();
+
+        let step = StepResult {
+            markers: vec!["same-marker".to_string()],
+            ..Default::default()
+        };
+        state.step_results.insert("step".to_string(), step);
+
+        for i in 0u32..stuck_after {
+            let res = check_stuck(
+                &mut state,
+                &mut prev_marker_sets,
+                "step",
+                "m",
+                stuck_after,
+                "while",
+            );
+            if i + 1 < stuck_after {
+                assert!(res.is_ok(), "should not be stuck yet at iteration {i}");
+            } else {
+                assert!(res.is_err(), "should detect stuck at iteration {i}");
+            }
+        }
     }
 }

@@ -44,3 +44,7 @@ required-features = ["test-utils"]
 [[test]]
 name = "gates_and_errors"
 required-features = ["test-utils"]
+
+[[test]]
+name = "lease_refresh"
+required-features = ["test-utils"]

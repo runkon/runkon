@@ -251,26 +251,56 @@ pub fn build_workflow_summary(state: &ExecutionState) -> String {
     lines.join("\n")
 }
 
+fn collect_leaf_step_keys_inner(node: &WorkflowNode, out: &mut Vec<String>) {
+    match node {
+        WorkflowNode::Call(c) => out.push(c.agent.step_key()),
+        WorkflowNode::Parallel(p) => out.extend(p.calls.iter().map(|a| a.step_key())),
+        WorkflowNode::Gate(g) => out.push(g.name.clone()),
+        WorkflowNode::CallWorkflow(cw) => out.push(format!("workflow:{}", cw.workflow)),
+        WorkflowNode::Script(s) => out.push(s.name.clone()),
+        WorkflowNode::If(n) => {
+            for child in &n.body {
+                collect_leaf_step_keys_inner(child, out);
+            }
+        }
+        WorkflowNode::Unless(n) => {
+            for child in &n.body {
+                collect_leaf_step_keys_inner(child, out);
+            }
+        }
+        WorkflowNode::While(n) => {
+            for child in &n.body {
+                collect_leaf_step_keys_inner(child, out);
+            }
+        }
+        WorkflowNode::DoWhile(n) => {
+            for child in &n.body {
+                collect_leaf_step_keys_inner(child, out);
+            }
+        }
+        WorkflowNode::Do(n) => {
+            for child in &n.body {
+                collect_leaf_step_keys_inner(child, out);
+            }
+        }
+        WorkflowNode::Always(n) => {
+            for child in &n.body {
+                collect_leaf_step_keys_inner(child, out);
+            }
+        }
+        WorkflowNode::ForEach(n) => out.push(format!("foreach:{}", n.name)),
+    }
+}
+
 /// Extract all leaf-node step keys from a workflow node.
 ///
 /// Recurses into control-flow nodes (if/unless/while/always) and collects
 /// keys from all trackable leaves: `Call`, `Parallel` agents, `Gate`, and
 /// `CallWorkflow`.
 pub fn collect_leaf_step_keys(node: &WorkflowNode) -> Vec<String> {
-    match node {
-        WorkflowNode::Call(c) => vec![c.agent.step_key()],
-        WorkflowNode::Parallel(p) => p.calls.iter().map(|a| a.step_key()).collect(),
-        WorkflowNode::Gate(g) => vec![g.name.clone()],
-        WorkflowNode::CallWorkflow(cw) => vec![format!("workflow:{}", cw.workflow)],
-        WorkflowNode::Script(s) => vec![s.name.clone()],
-        WorkflowNode::If(n) => n.body.iter().flat_map(collect_leaf_step_keys).collect(),
-        WorkflowNode::Unless(n) => n.body.iter().flat_map(collect_leaf_step_keys).collect(),
-        WorkflowNode::While(n) => n.body.iter().flat_map(collect_leaf_step_keys).collect(),
-        WorkflowNode::DoWhile(n) => n.body.iter().flat_map(collect_leaf_step_keys).collect(),
-        WorkflowNode::Do(n) => n.body.iter().flat_map(collect_leaf_step_keys).collect(),
-        WorkflowNode::Always(n) => n.body.iter().flat_map(collect_leaf_step_keys).collect(),
-        WorkflowNode::ForEach(n) => vec![format!("foreach:{}", n.name)],
-    }
+    let mut out = Vec::new();
+    collect_leaf_step_keys_inner(node, &mut out);
+    out
 }
 
 /// Find the starting iteration for a while loop on resume.
@@ -285,7 +315,10 @@ pub fn find_max_completed_while_iteration(state: &ExecutionState, node: &WhileNo
     };
 
     // Collect step keys from all trackable body nodes
-    let body_keys: Vec<String> = node.body.iter().flat_map(collect_leaf_step_keys).collect();
+    let mut body_keys: Vec<String> = Vec::new();
+    for n in &node.body {
+        collect_leaf_step_keys_inner(n, &mut body_keys);
+    }
 
     if body_keys.is_empty() {
         return 0;
@@ -298,12 +331,14 @@ pub fn find_max_completed_while_iteration(state: &ExecutionState, node: &WhileNo
     // keys only — non-body steps from other parts of the workflow are irrelevant here.
     let mut completed_by_iter: std::collections::HashMap<u32, std::collections::HashSet<&str>> =
         std::collections::HashMap::new();
-    for (name, iter) in step_map.keys() {
+    for (name, inner) in step_map {
         if body_key_set.contains(name.as_str()) {
-            completed_by_iter
-                .entry(*iter)
-                .or_default()
-                .insert(name.as_str());
+            for iter in inner.keys() {
+                completed_by_iter
+                    .entry(*iter)
+                    .or_default()
+                    .insert(name.as_str());
+            }
         }
     }
 

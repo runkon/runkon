@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use chrono::Utc;
 use rusqlite::{named_params, Connection, OptionalExtension};
 
-use crate::constants::RUN_COLUMNS;
+use crate::cancellation_reason::CancellationReason;
+use crate::constants::{RUN_COLUMNS, TERMINAL_STATUSES_SQL};
 use crate::engine_error::EngineError;
 use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
 use crate::traits::persistence::{
@@ -40,6 +41,34 @@ static STEP_COLUMNS_WITH_PREFIX: std::sync::LazyLock<String> = std::sync::LazyLo
         .map(|c| format!("s.{c}"))
         .collect::<Vec<_>>()
         .join(", ")
+});
+
+/// Precomputed SQL for the terminal-status UPDATE in `update_step`. Allocated once so
+/// the hot-path call site carries no per-invocation heap cost.
+static SQL_UPDATE_TERMINAL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "UPDATE workflow_run_steps SET status = :status, \
+         child_run_id = COALESCE(:child_run_id, child_run_id), \
+         ended_at = :ended_at, result_text = :result_text, context_out = :context_out, \
+         markers_out = :markers_out, \
+         retry_count = COALESCE(:retry_count, retry_count), \
+         structured_output = :structured_output, step_error = :step_error \
+         WHERE id = :id \
+         AND (SELECT generation FROM workflow_runs \
+              WHERE id = workflow_run_steps.workflow_run_id) = :generation \
+         AND status NOT IN ({TERMINAL_STATUSES_SQL})"
+    )
+});
+
+/// Precomputed SQL for the already-terminal disambiguation check in `update_step`.
+static SQL_CHECK_TERMINAL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    format!(
+        "SELECT 1 FROM workflow_run_steps \
+         WHERE id = :id \
+         AND (SELECT generation FROM workflow_runs \
+              WHERE id = workflow_run_steps.workflow_run_id) = :generation \
+         AND status IN ({TERMINAL_STATUSES_SQL})"
+    )
 });
 
 // ---------------------------------------------------------------------------
@@ -104,6 +133,9 @@ fn row_to_run(row: &rusqlite::Row) -> rusqlite::Result<WorkflowRun> {
         total_duration_ms: row.get("total_duration_ms")?,
         model: row.get("model")?,
         dismissed: dismissed_int != 0,
+        owner_token: row.get("owner_token")?,
+        lease_until: row.get("lease_until")?,
+        generation: row.get("generation")?,
     })
 }
 
@@ -318,6 +350,9 @@ impl WorkflowPersistence for SqliteWorkflowPersistence {
             total_duration_ms: None,
             model: None,
             dismissed: false,
+            owner_token: None,
+            lease_until: None,
+            generation: 0,
         })
     }
 
@@ -450,49 +485,79 @@ impl WorkflowPersistence for SqliteWorkflowPersistence {
 
     fn update_step(&self, step_id: &str, update: StepUpdate) -> Result<(), EngineError> {
         let conn = self.lock()?;
-        if update.status.is_starting() {
+        let affected = if update.status.is_starting() {
             let now = Utc::now().to_rfc3339();
             conn.execute(
                 "UPDATE workflow_run_steps SET status = :status, child_run_id = :child_run_id, \
-                 started_at = :started_at WHERE id = :id",
+                 started_at = :started_at WHERE id = :id \
+                 AND (SELECT generation FROM workflow_runs \
+                      WHERE id = workflow_run_steps.workflow_run_id) = :generation",
                 named_params![
                     ":status": update.status,
                     ":child_run_id": update.child_run_id,
                     ":started_at": now,
                     ":id": step_id,
+                    ":generation": update.generation,
                 ],
             )
-            .map_err(db_err)?;
+            .map_err(db_err)?
         } else if update.status.is_terminal() {
             let now = Utc::now().to_rfc3339();
-            conn.execute(
-                "UPDATE workflow_run_steps SET status = :status, \
-                 child_run_id = COALESCE(:child_run_id, child_run_id), \
-                 ended_at = :ended_at, result_text = :result_text, context_out = :context_out, \
-                 markers_out = :markers_out, \
-                 retry_count = COALESCE(:retry_count, retry_count), \
-                 structured_output = :structured_output, step_error = :step_error \
-                 WHERE id = :id",
-                named_params![
-                    ":status": update.status,
-                    ":child_run_id": update.child_run_id,
-                    ":ended_at": now,
-                    ":result_text": update.result_text,
-                    ":context_out": update.context_out,
-                    ":markers_out": update.markers_out,
-                    ":retry_count": update.retry_count,
-                    ":structured_output": update.structured_output,
-                    ":step_error": update.step_error,
-                    ":id": step_id,
-                ],
-            )
-            .map_err(db_err)?;
+            let n = conn
+                .execute(
+                    &SQL_UPDATE_TERMINAL,
+                    named_params![
+                        ":status": update.status,
+                        ":child_run_id": update.child_run_id,
+                        ":ended_at": now,
+                        ":result_text": update.result_text,
+                        ":context_out": update.context_out,
+                        ":markers_out": update.markers_out,
+                        ":retry_count": update.retry_count,
+                        ":structured_output": update.structured_output,
+                        ":step_error": update.step_error,
+                        ":id": step_id,
+                        ":generation": update.generation,
+                    ],
+                )
+                .map_err(db_err)?;
+            if n == 0 {
+                // Disambiguate: already terminal with correct generation (benign no-op) vs
+                // generation truly mismatched (caller lost the lease).
+                let already_terminal = conn
+                    .query_row(
+                        &SQL_CHECK_TERMINAL,
+                        named_params![":id": step_id, ":generation": update.generation],
+                        |_| Ok(()),
+                    )
+                    .optional()
+                    .map_err(db_err)?
+                    .is_some();
+                if already_terminal {
+                    tracing::debug!(
+                        step_id = %step_id,
+                        "update_step: step already terminal, skipping overwrite"
+                    );
+                    return Ok(());
+                }
+                return Err(EngineError::Cancelled(CancellationReason::LeaseLost));
+            }
+            n
         } else {
             conn.execute(
-                "UPDATE workflow_run_steps SET status = :status WHERE id = :id",
-                named_params![":status": update.status, ":id": step_id],
+                "UPDATE workflow_run_steps SET status = :status WHERE id = :id \
+                 AND (SELECT generation FROM workflow_runs \
+                      WHERE id = workflow_run_steps.workflow_run_id) = :generation",
+                named_params![
+                    ":status": update.status,
+                    ":id": step_id,
+                    ":generation": update.generation,
+                ],
             )
-            .map_err(db_err)?;
+            .map_err(db_err)?
+        };
+        if affected == 0 {
+            return Err(EngineError::Cancelled(CancellationReason::LeaseLost));
         }
         Ok(())
     }
@@ -573,6 +638,53 @@ impl WorkflowPersistence for SqliteWorkflowPersistence {
                 .map_err(db_err)?;
             }
         }
+        Ok(())
+    }
+
+    fn batch_update_fan_out_items(
+        &self,
+        updates: &[(String, FanOutItemUpdate)],
+    ) -> Result<(), EngineError> {
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let conn = self.lock()?;
+        let tx = conn.unchecked_transaction().map_err(db_err)?;
+        let now = Utc::now().to_rfc3339();
+        for (item_id, update) in updates {
+            let rows_changed = match update {
+                FanOutItemUpdate::Running { child_run_id } => tx
+                    .execute(
+                        "UPDATE workflow_run_step_fan_out_items \
+                         SET status = 'running', child_run_id = :child_run_id, dispatched_at = :now \
+                         WHERE id = :id",
+                        named_params![
+                            ":child_run_id": child_run_id,
+                            ":now": now,
+                            ":id": item_id,
+                        ],
+                    )
+                    .map_err(db_err)?,
+                FanOutItemUpdate::Terminal { status } => tx
+                    .execute(
+                        "UPDATE workflow_run_step_fan_out_items \
+                         SET status = :status, completed_at = :now \
+                         WHERE id = :id",
+                        named_params![
+                            ":status": status.as_str(),
+                            ":now": now,
+                            ":id": item_id,
+                        ],
+                    )
+                    .map_err(db_err)?,
+            };
+            if rows_changed == 0 {
+                return Err(EngineError::Persistence(format!(
+                    "fan-out item {item_id} not found"
+                )));
+            }
+        }
+        tx.commit().map_err(db_err)?;
         Ok(())
     }
 
@@ -742,6 +854,39 @@ impl WorkflowPersistence for SqliteWorkflowPersistence {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn acquire_lease(
+        &self,
+        run_id: &str,
+        token: &str,
+        ttl_seconds: i64,
+    ) -> Result<Option<i64>, EngineError> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE workflow_runs \
+             SET owner_token = :token, \
+                 lease_until = datetime('now', '+' || :ttl || ' seconds'), \
+                 generation  = CASE WHEN owner_token = :token THEN generation ELSE generation + 1 END \
+             WHERE id = :run_id \
+               AND (owner_token IS NULL \
+                    OR lease_until < datetime('now') \
+                    OR owner_token = :token)",
+            named_params! { ":token": token, ":ttl": ttl_seconds, ":run_id": run_id },
+        )
+        .map_err(|e| EngineError::Persistence(format!("acquire_lease UPDATE: {e}")))?;
+
+        if conn.changes() == 0u64 {
+            return Ok(None);
+        }
+        let gen: i64 = conn
+            .query_row(
+                "SELECT generation FROM workflow_runs WHERE id = ?1",
+                [run_id],
+                |r| r.get(0),
+            )
+            .map_err(|e| EngineError::Persistence(format!("acquire_lease read generation: {e}")))?;
+        Ok(Some(gen))
+    }
+
     fn persist_metrics(
         &self,
         run_id: &str,
@@ -848,4 +993,441 @@ fn validate_gate_selections(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::SqliteWorkflowPersistence;
+    use crate::traits::persistence::WorkflowPersistence;
+
+    /// Create an in-memory SQLite DB with the minimal schema for acquire_lease tests.
+    fn make_lease_db() -> (SqliteWorkflowPersistence, String) {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE workflow_runs (
+                id TEXT PRIMARY KEY,
+                owner_token TEXT,
+                lease_until TEXT,
+                generation INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO workflow_runs (id) VALUES ('run-1');",
+        )
+        .unwrap();
+        let p = SqliteWorkflowPersistence::from_shared_connection(Arc::new(Mutex::new(conn)));
+        (p, "run-1".to_string())
+    }
+
+    #[test]
+    fn acquire_lease_increments_generation_on_new_owner() {
+        let (p, run_id) = make_lease_db();
+
+        let gen1 = p.acquire_lease(&run_id, "tok", 60).unwrap();
+        assert_eq!(gen1, Some(1), "first acquire should return generation 1");
+
+        // Same-token renewal must NOT increment generation.
+        let gen2 = p.acquire_lease(&run_id, "tok", 60).unwrap();
+        assert_eq!(
+            gen2,
+            Some(1),
+            "same-token re-acquire must not increment generation"
+        );
+    }
+
+    /// create a minimal DB with workflow_runs + workflow_run_steps for update_step tests.
+    fn make_step_db() -> (SqliteWorkflowPersistence, String, String) {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE workflow_runs (
+                id TEXT PRIMARY KEY,
+                owner_token TEXT,
+                lease_until TEXT,
+                generation INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE workflow_run_steps (
+                id TEXT PRIMARY KEY,
+                workflow_run_id TEXT NOT NULL REFERENCES workflow_runs(id),
+                step_name TEXT NOT NULL DEFAULT '',
+                role TEXT NOT NULL DEFAULT 'actor',
+                can_commit INTEGER NOT NULL DEFAULT 0,
+                condition_expr TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                started_at TEXT,
+                ended_at TEXT,
+                result_text TEXT,
+                context_out TEXT,
+                markers_out TEXT,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                structured_output TEXT,
+                step_error TEXT,
+                child_run_id TEXT,
+                position INTEGER NOT NULL DEFAULT 0,
+                iteration INTEGER NOT NULL DEFAULT 0,
+                output_file TEXT,
+                gate_options TEXT
+            );
+            INSERT INTO workflow_runs (id, generation) VALUES ('run-1', 1);
+            INSERT INTO workflow_run_steps (id, workflow_run_id, status) VALUES ('step-1', 'run-1', 'running');",
+        )
+        .unwrap();
+        let p = SqliteWorkflowPersistence::from_shared_connection(Arc::new(Mutex::new(conn)));
+        (p, "run-1".to_string(), "step-1".to_string())
+    }
+
+    #[test]
+    fn update_step_starting_branch_returns_lease_lost_on_stale_generation() {
+        use crate::cancellation_reason::CancellationReason;
+        use crate::engine_error::EngineError;
+        use crate::status::WorkflowStepStatus;
+        use crate::traits::persistence::StepUpdate;
+
+        let (p, _run_id, step_id) = make_step_db();
+
+        // DB has generation=1; send generation=0 (stale).
+        let result = p.update_step(
+            &step_id,
+            StepUpdate {
+                generation: 0,
+                status: WorkflowStepStatus::Running,
+                child_run_id: None,
+                result_text: None,
+                context_out: None,
+                markers_out: None,
+                retry_count: None,
+                structured_output: None,
+                step_error: None,
+            },
+        );
+        assert!(
+            matches!(
+                result,
+                Err(EngineError::Cancelled(CancellationReason::LeaseLost))
+            ),
+            "starting branch should return LeaseLost on stale generation; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn update_step_terminal_branch_returns_lease_lost_on_stale_generation() {
+        use crate::cancellation_reason::CancellationReason;
+        use crate::engine_error::EngineError;
+        use crate::status::WorkflowStepStatus;
+        use crate::traits::persistence::StepUpdate;
+
+        let (p, _run_id, step_id) = make_step_db();
+
+        // DB has generation=1; send generation=0 (stale).
+        let result = p.update_step(
+            &step_id,
+            StepUpdate {
+                generation: 0,
+                status: WorkflowStepStatus::Completed,
+                child_run_id: None,
+                result_text: None,
+                context_out: None,
+                markers_out: None,
+                retry_count: None,
+                structured_output: None,
+                step_error: None,
+            },
+        );
+        assert!(
+            matches!(
+                result,
+                Err(EngineError::Cancelled(CancellationReason::LeaseLost))
+            ),
+            "terminal branch should return LeaseLost on stale generation; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn update_step_terminal_branch_noop_when_already_completed() {
+        use crate::status::WorkflowStepStatus;
+        use crate::traits::persistence::StepUpdate;
+
+        let (p, run_id, step_id) = make_step_db();
+
+        // Mark the step as completed (generation=1 matches the DB seed).
+        p.update_step(
+            &step_id,
+            StepUpdate {
+                generation: 1,
+                status: WorkflowStepStatus::Completed,
+                child_run_id: None,
+                result_text: Some("success".to_string()),
+                context_out: None,
+                markers_out: None,
+                retry_count: None,
+                structured_output: None,
+                step_error: None,
+            },
+        )
+        .expect("first update to completed must succeed");
+
+        // Capture the ended_at written by the first update.
+        let (status_after_first, ended_at_after_first): (String, String) = p
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status, ended_at FROM workflow_run_steps WHERE id = ?",
+                rusqlite::params![step_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("row must exist");
+        assert_eq!(status_after_first, "completed");
+
+        // Try to overwrite with Failed — must be a no-op.
+        let result = p.update_step(
+            &step_id,
+            StepUpdate {
+                generation: 1,
+                status: WorkflowStepStatus::Failed,
+                child_run_id: None,
+                result_text: Some("overwrite attempt".to_string()),
+                context_out: None,
+                markers_out: None,
+                retry_count: None,
+                structured_output: None,
+                step_error: Some("cancelled".to_string()),
+            },
+        );
+        assert!(
+            result.is_ok(),
+            "update_step on already-completed step must return Ok; got {result:?}"
+        );
+
+        // Row must be unchanged.
+        let (status_final, ended_at_final): (String, String) = p
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT status, ended_at FROM workflow_run_steps WHERE id = ?",
+                rusqlite::params![step_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("row must still exist");
+        assert_eq!(status_final, "completed", "status must remain completed");
+        assert_eq!(
+            ended_at_final, ended_at_after_first,
+            "ended_at must be unchanged after no-op"
+        );
+
+        // run_id is read by other tests; suppress the unused warning.
+        let _ = run_id;
+    }
+
+    #[test]
+    fn update_step_status_only_branch_returns_lease_lost_on_stale_generation() {
+        use crate::cancellation_reason::CancellationReason;
+        use crate::engine_error::EngineError;
+        use crate::status::WorkflowStepStatus;
+        use crate::traits::persistence::StepUpdate;
+
+        let (p, _run_id, step_id) = make_step_db();
+
+        // DB has generation=1; send generation=0 (stale). Status=Pending is the
+        // only value that is neither `is_starting()` nor `is_terminal()`, so
+        // it's the only one that hits the third (status-only) UPDATE branch.
+        let result = p.update_step(
+            &step_id,
+            StepUpdate {
+                generation: 0,
+                status: WorkflowStepStatus::Pending,
+                child_run_id: None,
+                result_text: None,
+                context_out: None,
+                markers_out: None,
+                retry_count: None,
+                structured_output: None,
+                step_error: None,
+            },
+        );
+        assert!(
+            matches!(
+                result,
+                Err(EngineError::Cancelled(CancellationReason::LeaseLost))
+            ),
+            "status-only branch should return LeaseLost on stale generation; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn acquire_lease_returns_none_when_held_by_other() {
+        let (p, run_id) = make_lease_db();
+
+        // Acquire with token 'x' and a 1-hour TTL.
+        let gen = p.acquire_lease(&run_id, "x", 3600).unwrap();
+        assert_eq!(gen, Some(1));
+
+        // Attempt to acquire with a different token 'y' — lease is still held.
+        let result = p.acquire_lease(&run_id, "y", 3600).unwrap();
+        assert_eq!(
+            result, None,
+            "different-token acquire on held lease should return None"
+        );
+    }
+
+    fn make_fan_out_db() -> (SqliteWorkflowPersistence, String) {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE workflow_run_step_fan_out_items (
+                id TEXT PRIMARY KEY,
+                step_run_id TEXT NOT NULL,
+                item_type TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                item_ref TEXT NOT NULL DEFAULT '',
+                child_run_id TEXT,
+                status TEXT NOT NULL DEFAULT 'pending',
+                dispatched_at TEXT,
+                completed_at TEXT
+            );",
+        )
+        .unwrap();
+        let p = SqliteWorkflowPersistence::from_shared_connection(Arc::new(Mutex::new(conn)));
+        (p, "step-1".to_string())
+    }
+
+    #[test]
+    fn batch_update_fan_out_items_mixed_terminal_statuses() {
+        use crate::traits::persistence::{FanOutItemStatus, FanOutItemUpdate};
+
+        let (p, step_id) = make_fan_out_db();
+
+        let id1 = p
+            .insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1")
+            .unwrap();
+        let id2 = p
+            .insert_fan_out_item(&step_id, "ticket", "t-2", "ref-2")
+            .unwrap();
+        let id3 = p
+            .insert_fan_out_item(&step_id, "ticket", "t-3", "ref-3")
+            .unwrap();
+
+        let updates = vec![
+            (
+                id1.clone(),
+                FanOutItemUpdate::Terminal {
+                    status: FanOutItemStatus::Completed,
+                },
+            ),
+            (
+                id2.clone(),
+                FanOutItemUpdate::Terminal {
+                    status: FanOutItemStatus::Failed,
+                },
+            ),
+            (
+                id3.clone(),
+                FanOutItemUpdate::Terminal {
+                    status: FanOutItemStatus::Skipped,
+                },
+            ),
+        ];
+
+        p.batch_update_fan_out_items(&updates).unwrap();
+
+        let items = p.get_fan_out_items(&step_id, None).unwrap();
+        let get = |id: &str| items.iter().find(|i| i.id == id).unwrap().clone();
+
+        let item1 = get(&id1);
+        assert_eq!(item1.status, "completed");
+        assert!(item1.completed_at.is_some(), "completed_at must be set");
+
+        let item2 = get(&id2);
+        assert_eq!(item2.status, "failed");
+        assert!(item2.completed_at.is_some());
+
+        let item3 = get(&id3);
+        assert_eq!(item3.status, "skipped");
+        assert!(item3.completed_at.is_some());
+    }
+
+    #[test]
+    fn batch_update_fan_out_items_empty_is_noop() {
+        use crate::traits::persistence::FanOutItemUpdate;
+
+        let (p, step_id) = make_fan_out_db();
+        let _id = p
+            .insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1")
+            .unwrap();
+
+        p.batch_update_fan_out_items(&[] as &[(String, FanOutItemUpdate)])
+            .unwrap();
+
+        let items = p.get_fan_out_items(&step_id, None).unwrap();
+        assert_eq!(items[0].status, "pending", "empty batch must be a no-op");
+    }
+
+    #[test]
+    fn batch_update_fan_out_items_running_variant() {
+        use crate::traits::persistence::FanOutItemUpdate;
+
+        let (p, step_id) = make_fan_out_db();
+        let id1 = p
+            .insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1")
+            .unwrap();
+
+        let updates = vec![(
+            id1.clone(),
+            FanOutItemUpdate::Running {
+                child_run_id: "run-child-abc".to_string(),
+            },
+        )];
+        p.batch_update_fan_out_items(&updates).unwrap();
+
+        let items = p.get_fan_out_items(&step_id, None).unwrap();
+        let item = items.iter().find(|i| i.id == id1).unwrap();
+        assert_eq!(item.status, "running");
+        assert_eq!(item.child_run_id.as_deref(), Some("run-child-abc"));
+        assert!(item.dispatched_at.is_some(), "dispatched_at must be set");
+        assert!(item.completed_at.is_none(), "completed_at must not be set");
+    }
+
+    #[test]
+    fn batch_update_fan_out_items_missing_item_returns_error() {
+        use crate::traits::persistence::{FanOutItemStatus, FanOutItemUpdate};
+
+        let (p, _step_id) = make_fan_out_db();
+
+        let updates = vec![(
+            "does-not-exist".to_string(),
+            FanOutItemUpdate::Terminal {
+                status: FanOutItemStatus::Completed,
+            },
+        )];
+        assert!(
+            p.batch_update_fan_out_items(&updates).is_err(),
+            "should error for non-existent item"
+        );
+    }
+
+    #[test]
+    fn acquire_lease_succeeds_when_expired() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE workflow_runs (
+                id TEXT PRIMARY KEY,
+                owner_token TEXT,
+                lease_until TEXT,
+                generation INTEGER NOT NULL DEFAULT 0
+            );
+            -- Insert a row with an already-expired lease held by 'old-engine'.
+            INSERT INTO workflow_runs (id, owner_token, lease_until, generation)
+            VALUES ('run-exp', 'old-engine', datetime('now', '-1 second'), 5);",
+        )
+        .unwrap();
+        let p = SqliteWorkflowPersistence::from_shared_connection(Arc::new(Mutex::new(conn)));
+
+        let result = p.acquire_lease("run-exp", "new-engine", 60).unwrap();
+        assert!(
+            result.is_some(),
+            "acquire on expired lease should succeed; got None"
+        );
+        assert_eq!(
+            result,
+            Some(6),
+            "generation should be incremented from 5 to 6"
+        );
+    }
 }

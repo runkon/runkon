@@ -7,8 +7,6 @@ use crate::engine_error::{EngineError, Result};
 use crate::prompt_builder::build_variable_map;
 use crate::traits::persistence::StepUpdate;
 
-use super::p_err;
-
 pub fn execute_call_workflow(
     state: &mut ExecutionState,
     node: &CallWorkflowNode,
@@ -152,17 +150,16 @@ pub fn execute_call_workflow(
                         node.workflow,
                         result.workflow_run_id,
                     );
-                    state
-                        .persistence
-                        .update_step(
-                            &step_id,
-                            StepUpdate::failed_with_child(
-                                msg.clone(),
-                                0,
-                                Some(result.workflow_run_id),
-                            ),
-                        )
-                        .map_err(p_err)?;
+                    let generation = state.expect_lease_generation();
+                    state.persistence.update_step(
+                        &step_id,
+                        StepUpdate::failed_with_child(
+                            generation,
+                            msg.clone(),
+                            0,
+                            Some(result.workflow_run_id),
+                        ),
+                    )?;
                     msg
                 }
                 Err(e) => {
@@ -172,13 +169,16 @@ pub fn execute_call_workflow(
                         node.workflow,
                         prior_child.id,
                     );
-                    state
-                        .persistence
-                        .update_step(
-                            &step_id,
-                            StepUpdate::failed_with_child(msg.clone(), 0, Some(prior_child.id)),
-                        )
-                        .map_err(p_err)?;
+                    let generation = state.expect_lease_generation();
+                    state.persistence.update_step(
+                        &step_id,
+                        StepUpdate::failed_with_child(
+                            generation,
+                            msg.clone(),
+                            0,
+                            Some(prior_child.id),
+                        ),
+                    )?;
                     msg
                 }
             };
@@ -250,10 +250,11 @@ pub fn execute_call_workflow(
                     node.workflow, missing,
                 );
                 tracing::warn!("{msg}");
-                state
-                    .persistence
-                    .update_step(&step_id, StepUpdate::failed(msg.clone(), attempt))
-                    .map_err(p_err)?;
+                let generation = state.expect_lease_generation();
+                state.persistence.update_step(
+                    &step_id,
+                    StepUpdate::failed(generation, msg.clone(), attempt),
+                )?;
                 last_error = msg;
                 continue;
             }
@@ -291,17 +292,16 @@ pub fn execute_call_workflow(
                         max_attempts,
                         result.workflow_run_id,
                     );
-                    state
-                        .persistence
-                        .update_step(
-                            &step_id,
-                            StepUpdate::failed_with_child(
-                                msg.clone(),
-                                attempt,
-                                Some(result.workflow_run_id),
-                            ),
-                        )
-                        .map_err(p_err)?;
+                    let generation = state.expect_lease_generation();
+                    state.persistence.update_step(
+                        &step_id,
+                        StepUpdate::failed_with_child(
+                            generation,
+                            msg.clone(),
+                            attempt,
+                            Some(result.workflow_run_id),
+                        ),
+                    )?;
                     last_error = msg;
                     continue;
                 }
@@ -309,10 +309,11 @@ pub fn execute_call_workflow(
             Err(e) => {
                 let msg = format!("Sub-workflow '{}' error: {e}", node.workflow);
                 tracing::warn!("{} (attempt {}/{})", msg, attempt + 1, max_attempts);
-                state
-                    .persistence
-                    .update_step(&step_id, StepUpdate::failed(msg.clone(), attempt))
-                    .map_err(p_err)?;
+                let generation = state.expect_lease_generation();
+                state.persistence.update_step(
+                    &step_id,
+                    StepUpdate::failed(generation, msg.clone(), attempt),
+                )?;
                 last_error = msg;
                 continue;
             }

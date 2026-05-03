@@ -173,7 +173,8 @@ impl HeadlessHandle {
         drop(self.stdout.take());
         drop(self.stderr.take());
         if let Some(mut child) = self.child.take() {
-            let _ = child.kill();
+            // SIGKILL the whole process group so no descendants survive.
+            unsafe { libc::kill(-(self.pid as libc::pid_t), libc::SIGKILL) };
             let _ = child.wait();
         }
     }

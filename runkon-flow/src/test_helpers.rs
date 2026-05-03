@@ -158,6 +158,10 @@ pub fn make_test_execution_state(
         event_sinks: Arc::from(vec![]),
         cancellation: CancellationToken::new(),
         current_execution_id: Arc::new(Mutex::new(None)),
+        owner_token: None,
+        // Runs created via CountingPersistence start at generation=0; match that
+        // so update_step's generation check passes in executor-level tests.
+        lease_generation: Some(0),
     }
 }
 
@@ -198,6 +202,14 @@ impl CountingPersistence {
 }
 
 impl crate::traits::persistence::WorkflowPersistence for CountingPersistence {
+    fn acquire_lease(
+        &self,
+        run_id: &str,
+        token: &str,
+        ttl_seconds: i64,
+    ) -> Result<Option<i64>, crate::engine_error::EngineError> {
+        self.inner.acquire_lease(run_id, token, ttl_seconds)
+    }
     fn is_run_cancelled(&self, run_id: &str) -> Result<bool, crate::engine_error::EngineError> {
         if self.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
             return Ok(true);
@@ -271,6 +283,12 @@ impl crate::traits::persistence::WorkflowPersistence for CountingPersistence {
         u: crate::traits::persistence::FanOutItemUpdate,
     ) -> Result<(), crate::engine_error::EngineError> {
         self.inner.update_fan_out_item(id, u)
+    }
+    fn batch_update_fan_out_items(
+        &self,
+        updates: &[(String, crate::traits::persistence::FanOutItemUpdate)],
+    ) -> Result<(), crate::engine_error::EngineError> {
+        self.inner.batch_update_fan_out_items(updates)
     }
     fn get_fan_out_items(
         &self,

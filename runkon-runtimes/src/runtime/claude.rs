@@ -68,7 +68,7 @@ impl AgentRuntime for ClaudeRuntime {
                 run_id: &request.run_id,
                 working_dir: request.working_dir.to_str().unwrap_or("."),
                 prompt: &request.prompt,
-                resume_session_id: None,
+                resume_session_id: request.resume_session_id.as_deref(),
                 model: request.resolved_model(),
                 extra_cli_args: &request.extra_cli_args,
                 permission_mode: Some(&self.options.permission_mode),
@@ -217,8 +217,13 @@ fn poll_unix(
         if let Some(pf) = prompt_file {
             let _ = std::fs::remove_file(pf);
         }
-        finish();
+        // Unblock poll_unix immediately — don't let cleanup gate the result.
         let _ = tx.send(outcome);
+        // Kill the whole process group (pgid == pid because spawn_headless uses
+        // .process_group(0)). Terminates claude + all descendants.
+        process_utils::cancel_subprocess(pid);
+        // Reap the direct child; returns promptly since the group is now dead.
+        finish();
     });
 
     // Helper: tear down the running agent (warn → mark cancelled → kill process
@@ -293,6 +298,7 @@ mod tests {
             model: None,
             extra_cli_args: vec![],
             plugin_dirs: vec![],
+            resume_session_id: None,
             tracker: Arc::new(NoopTracker),
             event_sink: Arc::new(NoopEventSink),
         }
@@ -382,6 +388,62 @@ mod tests {
         let runtime = ClaudeRuntime::default();
         let run = make_test_run("claude", Some(dead_pid));
         assert!(runtime.cancel(&run).is_ok());
+    }
+
+    /// Inject a script child that forks a long-running grandchild, emits a result
+    /// event, then blocks in `wait` — simulating claude waiting for cargo nextest.
+    #[cfg(unix)]
+    fn inject_script_child(runtime: &ClaudeRuntime) -> (u32, tempfile::NamedTempFile) {
+        use std::io::Write as _;
+        use std::os::unix::process::CommandExt;
+        use std::process::Stdio;
+
+        let mut script = tempfile::NamedTempFile::new().expect("tempfile");
+        writeln!(script, "sleep 300 &").unwrap();
+        writeln!(script, r#"echo '{{"type":"result","result":"done"}}'"#).unwrap();
+        writeln!(script, "wait").unwrap();
+
+        let child = std::process::Command::new("sh")
+            .arg(script.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .expect("sh must be available");
+        let handle = crate::headless::HeadlessHandle::from_child(child)
+            .expect("HeadlessHandle from_child failed");
+        let pid = handle.pid();
+        *runtime.handle.lock().unwrap() = Some(handle);
+        *runtime.tracker.lock().unwrap() = Some(Arc::new(NoopTracker));
+        *runtime.event_sink.lock().unwrap() = Some(Arc::new(NoopEventSink));
+        (pid, script)
+    }
+
+    /// After poll returns, the drain thread must kill the whole process group.
+    /// A leaked grandchild (sleep 300, simulating cargo nextest) must be dead
+    /// within 10 s — well within the 5-s SIGTERM grace + SIGKILL cycle.
+    #[cfg(unix)]
+    #[test]
+    fn poll_kills_leaked_grandchildren_after_result() {
+        let runtime = ClaudeRuntime::default();
+        let (pgid, _script) = inject_script_child(&runtime);
+
+        // poll returns Err::Failed because NoopTracker.get_run returns None;
+        // that is expected — we are testing process-group cleanup, not DB.
+        let _ = runtime.poll("pgkill-test", None, Duration::from_secs(30));
+
+        // Assert the process group is dead within 10 s.
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            if !crate::process_utils::pid_is_alive(pgid) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "process group {pgid} still alive 10 s after poll returned"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
     }
 
     /// Inject a long-running child so we can test poll without needing the real conductor binary.

@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::cancellation::CancellationToken;
 use crate::cancellation_reason::CancellationReason;
@@ -15,7 +16,7 @@ use crate::traits::item_provider::{ItemProvider, ItemProviderRegistry};
 use crate::traits::persistence::WorkflowPersistence;
 use crate::traits::script_env_provider::{NoOpScriptEnvProvider, ScriptEnvProvider};
 use crate::traits::workflow_resolver::WorkflowResolver;
-use crate::types::WorkflowResult;
+use crate::types::{WorkflowResult, WorkflowRunStep};
 use crate::workflow_resolver_directory::DirectoryWorkflowResolver;
 
 // ---------------------------------------------------------------------------
@@ -31,6 +32,83 @@ struct ActiveRunEntry {
     registry: Arc<ActionRegistry>,
     /// (executor_label, step_id) of the step currently in flight, if any.
     exec_info: Arc<Mutex<Option<(String, String)>>>,
+    /// Stop flag for the lease refresh thread. Set to `true` to ask it to exit.
+    refresh_stop: Arc<AtomicBool>,
+    /// Thread handle used to `unpark()` the refresh thread for fast teardown.
+    refresh_thread: Option<std::thread::Thread>,
+    /// Join handle for the refresh thread.
+    refresh_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+// ---------------------------------------------------------------------------
+// Lease refresh thread
+// ---------------------------------------------------------------------------
+
+struct RefreshContext {
+    persistence: Arc<dyn WorkflowPersistence>,
+    run_id: String,
+    token: String,
+    ttl_seconds: i64,
+    refresh_interval: Duration,
+    stop: Arc<AtomicBool>,
+    cancellation: CancellationToken,
+    shutdown: Arc<AtomicBool>,
+    registry: Arc<ActionRegistry>,
+    exec_info: Arc<Mutex<Option<(String, String)>>>,
+}
+
+fn refresh_lease_loop(ctx: RefreshContext) {
+    loop {
+        std::thread::park_timeout(ctx.refresh_interval);
+        if ctx.stop.load(Ordering::Relaxed) {
+            return;
+        }
+        match ctx
+            .persistence
+            .acquire_lease(&ctx.run_id, &ctx.token, ctx.ttl_seconds)
+        {
+            Ok(Some(_)) => {} // renewed successfully
+            Ok(None) => {
+                tracing::warn!(
+                    "run {}: lease reclaimed by another engine, aborting",
+                    ctx.run_id
+                );
+                signal_lease_abort(ctx.shutdown, ctx.cancellation, ctx.registry, ctx.exec_info);
+                return;
+            }
+            Err(e) => {
+                tracing::warn!("run {}: lease refresh DB error: {e}, aborting", ctx.run_id);
+                signal_lease_abort(ctx.shutdown, ctx.cancellation, ctx.registry, ctx.exec_info);
+                return;
+            }
+        }
+    }
+}
+
+fn signal_lease_abort(
+    shutdown: Arc<AtomicBool>,
+    cancellation: CancellationToken,
+    registry: Arc<ActionRegistry>,
+    exec_info: Arc<Mutex<Option<(String, String)>>>,
+) {
+    shutdown.store(true, Ordering::SeqCst);
+    cancellation.cancel(CancellationReason::LeaseLost);
+    let snap = exec_info.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    if let Some((exec_label, step_id)) = snap {
+        std::thread::spawn(move || {
+            if let Err(e) = registry.cancel(&exec_label, &step_id) {
+                tracing::warn!("lease abort: cancel step '{step_id}' failed: {e}");
+            }
+        });
+    }
+}
+
+/// Signal the refresh thread to exit and wake it immediately.
+fn stop_refresh_thread(stop: &AtomicBool, thread: Option<&std::thread::Thread>) {
+    stop.store(true, Ordering::SeqCst);
+    if let Some(t) = thread {
+        t.unpark();
+    }
 }
 
 /// The primary harness for running and validating workflows.
@@ -111,6 +189,25 @@ impl FlowEngine {
         }
         state.event_sinks = Arc::from(self.event_sinks.clone());
 
+        let lease_ttl_secs = state.exec_config.lease_ttl_secs;
+        let refresh_interval = state.exec_config.lease_refresh_interval;
+
+        // Acquire or re-claim lease (idempotent when token already set by resume()).
+        let token = state
+            .owner_token
+            .get_or_insert_with(|| ulid::Ulid::new().to_string())
+            .as_str();
+        match state
+            .persistence
+            .acquire_lease(&state.workflow_run_id, token, lease_ttl_secs)
+        {
+            Ok(Some(gen)) => {
+                state.lease_generation = Some(gen);
+            }
+            Ok(None) => return Err(EngineError::AlreadyOwned(state.workflow_run_id.clone())),
+            Err(e) => return Err(e),
+        }
+
         // Ensure the exec_config.shutdown arc exists so cancel_run() can set it.
         let shutdown_arc = state
             .exec_config
@@ -118,9 +215,32 @@ impl FlowEngine {
             .get_or_insert_with(|| Arc::new(AtomicBool::new(false)))
             .clone();
 
+        let run_id = state.workflow_run_id.clone();
+
+        // Spawn the background refresh thread.
+        let refresh_stop = Arc::new(AtomicBool::new(false));
+        let refresh_handle = {
+            let ctx = RefreshContext {
+                persistence: Arc::clone(&state.persistence),
+                run_id: run_id.clone(),
+                token: state
+                    .owner_token
+                    .clone()
+                    .expect("owner_token was just set by get_or_insert_with"),
+                ttl_seconds: lease_ttl_secs,
+                refresh_interval,
+                stop: Arc::clone(&refresh_stop),
+                cancellation: state.cancellation.clone(),
+                shutdown: Arc::clone(&shutdown_arc),
+                registry: Arc::clone(&state.action_registry),
+                exec_info: Arc::clone(&state.current_execution_id),
+            };
+            std::thread::spawn(move || refresh_lease_loop(ctx))
+        };
+        let refresh_thread = refresh_handle.thread().clone();
+
         // Register all per-run cancellation state in a single lock so cancel_run()
         // and Drop each see a consistent snapshot.
-        let run_id = state.workflow_run_id.clone();
         {
             let mut runs = self.active_runs.lock().unwrap_or_else(|e| e.into_inner());
             runs.insert(
@@ -131,16 +251,37 @@ impl FlowEngine {
                     persistence: Arc::clone(&state.persistence),
                     registry: Arc::clone(&state.action_registry),
                     exec_info: Arc::clone(&state.current_execution_id),
+                    refresh_stop,
+                    refresh_thread: Some(refresh_thread),
+                    refresh_handle: Some(refresh_handle),
                 },
             );
         }
 
         let result = run_workflow_engine(state, def);
 
-        // Deregister on completion regardless of outcome.
-        {
+        // Capture LeaseLost BEFORE stopping the refresh thread to avoid a teardown
+        // race where the thread sets LeaseLost after the run has already succeeded.
+        let lease_lost_during_run = matches!(
+            state.cancellation.reason(),
+            Some(CancellationReason::LeaseLost)
+        );
+
+        // Stop the refresh thread and join it before deregistering.
+        let join_handle = {
             let mut runs = self.active_runs.lock().unwrap_or_else(|e| e.into_inner());
-            runs.remove(&run_id);
+            runs.remove(&run_id).and_then(|entry| {
+                stop_refresh_thread(&entry.refresh_stop, entry.refresh_thread.as_ref());
+                entry.refresh_handle
+            })
+        };
+        // Join outside the lock to avoid blocking cancel_run callers.
+        if let Some(h) = join_handle {
+            let _ = h.join();
+        }
+
+        if lease_lost_during_run {
+            return Err(EngineError::Cancelled(CancellationReason::LeaseLost));
         }
 
         result
@@ -161,6 +302,22 @@ impl FlowEngine {
                 "resume() requires resume_ctx to be None on entry".to_string(),
             ));
         }
+
+        // Acquire before any DB reads so concurrent resume() calls race exactly once.
+        let token = ulid::Ulid::new().to_string();
+        let lease_ttl_secs = state.exec_config.lease_ttl_secs;
+        match state
+            .persistence
+            .acquire_lease(&state.workflow_run_id, &token, lease_ttl_secs)
+        {
+            Ok(Some(gen)) => {
+                state.owner_token = Some(token);
+                state.lease_generation = Some(gen);
+            }
+            Ok(None) => return Err(EngineError::AlreadyOwned(state.workflow_run_id.clone())),
+            Err(e) => return Err(e),
+        }
+
         let steps = state
             .persistence
             .get_steps(&state.workflow_run_id)
@@ -170,11 +327,16 @@ impl FlowEngine {
                     state.workflow_run_id
                 ))
             })?;
-        let step_map: HashMap<_, _> = steps
+        let mut step_map: HashMap<String, HashMap<u32, WorkflowRunStep>> = HashMap::new();
+        for s in steps
             .into_iter()
             .filter(|s| s.status == crate::status::WorkflowStepStatus::Completed)
-            .map(|s| ((s.step_name.clone(), s.iteration as u32), s))
-            .collect();
+        {
+            step_map
+                .entry(s.step_name.clone())
+                .or_default()
+                .insert(s.iteration as u32, s);
+        }
         if !step_map.is_empty() {
             state.resume_ctx = Some(crate::engine::ResumeContext { step_map });
         }
@@ -203,18 +365,21 @@ impl FlowEngine {
                     Arc::clone(&e.persistence),
                     Arc::clone(&e.registry),
                     Arc::clone(&e.exec_info),
+                    Arc::clone(&e.refresh_stop),
+                    e.refresh_thread.clone(),
                 )
             })
         };
 
-        let (token, shutdown, persistence, registry, exec_info) = match entry {
-            Some(e) => e,
-            None => {
-                return Err(EngineError::Workflow(format!(
-                    "cancel_run: run '{run_id}' is not active in this engine instance"
-                )))
-            }
-        };
+        let (token, shutdown, persistence, registry, exec_info, refresh_stop, refresh_thread) =
+            match entry {
+                Some(e) => e,
+                None => {
+                    return Err(EngineError::Workflow(format!(
+                        "cancel_run: run '{run_id}' is not active in this engine instance"
+                    )))
+                }
+            };
 
         // Mark DB as Cancelling so cross-process engines also observe the signal.
         if let Err(e) =
@@ -240,6 +405,9 @@ impl FlowEngine {
                 }
             });
         }
+
+        // Stop the refresh thread (does not join — run() teardown handles the join).
+        stop_refresh_thread(&refresh_stop, refresh_thread.as_ref());
 
         Ok(())
     }
@@ -567,6 +735,9 @@ impl Drop for FlowEngine {
             guard.drain().map(|(_, e)| e).collect()
         };
         for entry in entries {
+            // Stop the refresh thread first so it exits before we cancel the token.
+            stop_refresh_thread(&entry.refresh_stop, entry.refresh_thread.as_ref());
+            // Dropping refresh_handle detaches the thread; no join in Drop to avoid deadlock.
             entry.shutdown.store(true, Ordering::SeqCst);
             entry.token.cancel(CancellationReason::EngineShutdown);
         }
@@ -1092,8 +1263,10 @@ mod tests {
         use crate::persistence_memory::InMemoryWorkflowPersistence;
         use crate::traits::script_env_provider::NoOpScriptEnvProvider;
         use crate::types::WorkflowExecConfig;
+        let persistence = InMemoryWorkflowPersistence::new();
+        persistence.seed_run("test-run");
         ExecutionState {
-            persistence: Arc::new(InMemoryWorkflowPersistence::new()),
+            persistence: Arc::new(persistence),
             action_registry: Arc::new(ActionRegistry::new(HashMap::new(), None)),
             script_env_provider: Arc::new(NoOpScriptEnvProvider),
             workflow_run_id: "test-run".to_string(),
@@ -1136,6 +1309,8 @@ mod tests {
             event_sinks: Arc::from(vec![]),
             cancellation: CancellationToken::new(),
             current_execution_id: Arc::new(std::sync::Mutex::new(None)),
+            owner_token: None,
+            lease_generation: None,
         }
     }
 
@@ -1525,6 +1700,9 @@ mod tests {
                     persistence: Arc::clone(&persistence) as Arc<dyn WorkflowPersistence>,
                     registry: Arc::new(ActionRegistry::new(HashMap::new(), None)),
                     exec_info: Arc::new(Mutex::new(None)),
+                    refresh_stop: Arc::new(AtomicBool::new(false)),
+                    refresh_thread: None,
+                    refresh_handle: None,
                 },
             );
         }
@@ -1742,6 +1920,7 @@ mod tests {
             .update_step(
                 &step_id,
                 StepUpdate {
+                    generation: 0,
                     status: WorkflowStepStatus::Completed,
                     child_run_id: None,
                     result_text: None,
@@ -1799,6 +1978,7 @@ mod tests {
             .update_step(
                 &step_id,
                 StepUpdate {
+                    generation: 0,
                     status: WorkflowStepStatus::Completed,
                     child_run_id: None,
                     result_text: None,
@@ -1897,6 +2077,7 @@ mod tests {
             .update_step(
                 &cond_id,
                 StepUpdate {
+                    generation: 0,
                     status: WorkflowStepStatus::Completed,
                     child_run_id: None,
                     result_text: None,
@@ -1927,6 +2108,7 @@ mod tests {
                     .update_step(
                         &sid,
                         StepUpdate {
+                            generation: 0,
                             status: WorkflowStepStatus::Completed,
                             child_run_id: None,
                             result_text: None,
@@ -2005,6 +2187,7 @@ mod tests {
         use crate::persistence_memory::InMemoryWorkflowPersistence;
 
         let persistence = Arc::new(InMemoryWorkflowPersistence::new());
+        persistence.seed_run("run-123");
         persistence.set_fail_get_steps(true);
 
         let engine = FlowEngineBuilder::new().build().unwrap();
@@ -2043,6 +2226,360 @@ mod tests {
         assert!(
             err.to_string().contains("resume_ctx"),
             "error should mention resume_ctx; got: {err}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Lease acquisition tests
+    // ---------------------------------------------------------------------------
+
+    // AC: run() sets owner_token and lease_generation after a successful acquire.
+    #[test]
+    fn run_sets_lease_fields_on_success() {
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+
+        let persistence = Arc::new(InMemoryWorkflowPersistence::new());
+        let run = make_test_run(&persistence);
+
+        let engine = FlowEngineBuilder::new()
+            .action(Box::new(AlphaExecutor))
+            .build()
+            .unwrap();
+        let def = make_def("wf", vec![call_node("alpha")]);
+
+        let mut state = make_bare_state("wf");
+        state.persistence =
+            Arc::clone(&persistence) as Arc<dyn crate::traits::persistence::WorkflowPersistence>;
+        state.action_registry = Arc::new(ActionRegistry::new(
+            {
+                let mut m = HashMap::new();
+                m.insert(
+                    "alpha".to_string(),
+                    Box::new(AlphaExecutor)
+                        as Box<dyn crate::traits::action_executor::ActionExecutor>,
+                );
+                m
+            },
+            None,
+        ));
+        state.workflow_run_id = run.id.clone();
+
+        engine.run(&def, &mut state).unwrap();
+
+        assert!(
+            state.owner_token.is_some(),
+            "owner_token should be set after run()"
+        );
+        assert_eq!(
+            state.lease_generation,
+            Some(1),
+            "lease_generation should be 1 after first acquire"
+        );
+    }
+
+    // AC: two concurrent FlowEngine::run calls on same run_id → exactly one succeeds.
+    #[test]
+    fn two_concurrent_runs_exactly_one_succeeds() {
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use crate::traits::persistence::WorkflowPersistence;
+        use std::thread;
+
+        let persistence = Arc::new(InMemoryWorkflowPersistence::new());
+        let run = make_test_run(&persistence);
+        let run_id = run.id.clone();
+
+        let persistence: Arc<dyn WorkflowPersistence> = persistence;
+
+        // Build a state factory
+        let make_state_for_run = |run_id: String, p: Arc<dyn WorkflowPersistence>| {
+            let mut s = make_bare_state("wf");
+            s.persistence = p;
+            s.action_registry = Arc::new(ActionRegistry::new(
+                {
+                    let mut m = HashMap::new();
+                    m.insert(
+                        "alpha".to_string(),
+                        Box::new(AlphaExecutor)
+                            as Box<dyn crate::traits::action_executor::ActionExecutor>,
+                    );
+                    m
+                },
+                None,
+            ));
+            s.workflow_run_id = run_id;
+            s
+        };
+
+        let def = make_def("wf", vec![call_node("alpha")]);
+
+        // Use a barrier so both threads start run() at the same time.
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        let p1 = Arc::clone(&persistence);
+        let run_id1 = run_id.clone();
+        let barrier1 = Arc::clone(&barrier);
+        let def1 = def.clone();
+        let t1 = thread::spawn(move || {
+            let engine = FlowEngineBuilder::new()
+                .action(Box::new(AlphaExecutor))
+                .build()
+                .unwrap();
+            let mut state = make_state_for_run(run_id1, p1);
+            barrier1.wait();
+            engine.run(&def1, &mut state)
+        });
+
+        let p2 = Arc::clone(&persistence);
+        let run_id2 = run_id.clone();
+        let barrier2 = Arc::clone(&barrier);
+        let def2 = def.clone();
+        let t2 = thread::spawn(move || {
+            let engine = FlowEngineBuilder::new()
+                .action(Box::new(AlphaExecutor))
+                .build()
+                .unwrap();
+            let mut state = make_state_for_run(run_id2, p2);
+            barrier2.wait();
+            engine.run(&def2, &mut state)
+        });
+
+        let r1 = t1.join().unwrap();
+        let r2 = t2.join().unwrap();
+
+        let successes = [&r1, &r2].iter().filter(|r| r.is_ok()).count();
+        let already_owned = [&r1, &r2]
+            .iter()
+            .filter(|r| matches!(r, Err(EngineError::AlreadyOwned(_))))
+            .count();
+
+        assert_eq!(
+            successes, 1,
+            "exactly one run should succeed; got r1={r1:?}, r2={r2:?}"
+        );
+        assert_eq!(
+            already_owned, 1,
+            "exactly one run should fail with AlreadyOwned; got r1={r1:?}, r2={r2:?}"
+        );
+    }
+
+    // AC: resume() acquires lease before get_steps() — a pre-held lease blocks resume().
+    #[test]
+    fn resume_acquires_before_get_steps() {
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use crate::traits::persistence::WorkflowPersistence;
+
+        let persistence = Arc::new(InMemoryWorkflowPersistence::new());
+        let run = make_test_run(&persistence);
+
+        // Manually acquire the lease for another token (TTL = 1 hour, won't expire).
+        persistence
+            .acquire_lease(&run.id, "other-engine-token", 3600)
+            .unwrap();
+
+        let engine = FlowEngineBuilder::new()
+            .action(Box::new(AlphaExecutor))
+            .build()
+            .unwrap();
+        let def = make_def("wf", vec![call_node("alpha")]);
+
+        let mut state = make_bare_state("wf");
+        state.persistence = Arc::clone(&persistence) as Arc<dyn WorkflowPersistence>;
+        state.workflow_run_id = run.id.clone();
+
+        let err = engine.resume(&def, &mut state).unwrap_err();
+        assert!(
+            matches!(err, EngineError::AlreadyOwned(_)),
+            "resume() with a pre-held lease should fail with AlreadyOwned; got {err:?}"
+        );
+    }
+
+    // AC: existing single-engine workflow still completes normally.
+    #[test]
+    fn single_engine_workflow_still_completes() {
+        let engine = FlowEngineBuilder::new()
+            .action(Box::new(AlphaExecutor))
+            .build()
+            .unwrap();
+        let def = make_single_step_def();
+        let mut state = make_state_with_persistence("wf");
+        let result = engine.run(&def, &mut state).unwrap();
+        assert!(
+            result.all_succeeded,
+            "single-engine workflow should complete successfully"
+        );
+    }
+
+    // AC: refresh_lease_loop Err path — DB error during refresh triggers LeaseLost abort.
+    //
+    // Setup: executor blocks until its shutdown flag is set; fail_acquire_lease is flipped
+    // from a side thread once the executor is running so the initial acquire() in run()
+    // still succeeds. The first refresh tick then returns Err, calling signal_lease_abort
+    // which sets shutdown=true. The executor exits, and run() returns Err(Cancelled(LeaseLost)).
+    #[test]
+    fn refresh_db_error_causes_lease_lost_abort() {
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use crate::traits::action_executor::{ActionOutput, ActionParams, ExecutionContext};
+        use crate::traits::persistence::WorkflowPersistence;
+        use std::sync::atomic::Ordering;
+        use std::thread;
+        use std::time::Duration;
+
+        struct BlockingExecutor {
+            started: Arc<AtomicBool>,
+        }
+        impl ActionExecutor for BlockingExecutor {
+            fn name(&self) -> &str {
+                "alpha"
+            }
+            fn execute(
+                &self,
+                ectx: &ExecutionContext,
+                _: &ActionParams,
+            ) -> Result<ActionOutput, EngineError> {
+                self.started.store(true, Ordering::SeqCst);
+                // Spin until the engine's shutdown flag is set by signal_lease_abort.
+                loop {
+                    if ectx
+                        .shutdown
+                        .as_ref()
+                        .is_some_and(|s| s.load(Ordering::Relaxed))
+                    {
+                        return Ok(ActionOutput::default());
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        }
+
+        let persistence = Arc::new(InMemoryWorkflowPersistence::new());
+        let run = make_test_run(&persistence);
+
+        let started = Arc::new(AtomicBool::new(false));
+        let started_clone = Arc::clone(&started);
+        let persistence_clone = Arc::clone(&persistence);
+
+        // Side thread: wait until the executor has started (initial acquire done),
+        // then flip fail_acquire_lease so the next refresh tick returns Err.
+        let watcher = thread::spawn(move || {
+            while !started_clone.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            persistence_clone.set_fail_acquire_lease(true);
+        });
+
+        let mut m = HashMap::new();
+        m.insert(
+            "alpha".to_string(),
+            Box::new(BlockingExecutor {
+                started: Arc::clone(&started),
+            }) as Box<dyn crate::traits::action_executor::ActionExecutor>,
+        );
+        let mut state = make_bare_state("wf");
+        state.persistence = Arc::clone(&persistence) as Arc<dyn WorkflowPersistence>;
+        state.action_registry = Arc::new(ActionRegistry::new(m, None));
+        state.workflow_run_id = run.id.clone();
+        // Short refresh interval so the error is detected quickly.
+        state.exec_config.lease_refresh_interval = Duration::from_millis(15);
+
+        let engine = FlowEngineBuilder::new().build().unwrap();
+        let def = make_def("wf", vec![call_node("alpha")]);
+
+        let result = engine.run(&def, &mut state);
+        watcher.join().unwrap();
+
+        assert!(
+            matches!(
+                result,
+                Err(EngineError::Cancelled(CancellationReason::LeaseLost))
+            ),
+            "DB error in refresh should abort with LeaseLost; got {result:?}"
+        );
+    }
+
+    // AC: stale generation on step write — when another engine steals the lease mid-run,
+    // the next executor step write sees a generation mismatch, returns LeaseLost, and
+    // the engine aborts cleanly without duplicate side effects.
+    #[test]
+    fn stale_generation_on_step_write_aborts_with_lease_lost() {
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use crate::traits::action_executor::{ActionOutput, ActionParams, ExecutionContext};
+        use crate::traits::persistence::WorkflowPersistence;
+        use std::sync::atomic::Ordering;
+        use std::thread;
+        use std::time::Duration;
+
+        // Executor that signals when started, waits for proceed, then returns Ok.
+        // The stealer steals the lease between started and proceed so the step
+        // write (persist_completed_step) sees a stale generation.
+        struct LatchedExecutor {
+            started: Arc<AtomicBool>,
+            proceed: Arc<AtomicBool>,
+        }
+        impl ActionExecutor for LatchedExecutor {
+            fn name(&self) -> &str {
+                "alpha"
+            }
+            fn execute(
+                &self,
+                _ectx: &ExecutionContext,
+                _: &ActionParams,
+            ) -> Result<ActionOutput, EngineError> {
+                self.started.store(true, Ordering::SeqCst);
+                while !self.proceed.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Ok(ActionOutput::default())
+            }
+        }
+
+        let persistence = Arc::new(InMemoryWorkflowPersistence::new());
+        let run = make_test_run(&persistence);
+        let run_id = run.id.clone();
+
+        let started = Arc::new(AtomicBool::new(false));
+        let proceed = Arc::new(AtomicBool::new(false));
+        let started_clone = Arc::clone(&started);
+        let proceed_clone = Arc::clone(&proceed);
+        let persistence_clone = Arc::clone(&persistence);
+
+        // Side thread: waits for the executor to start, steals the lease (bumps
+        // generation), then lets the executor proceed so it tries to write the step.
+        let stealer = thread::spawn(move || {
+            while !started_clone.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            persistence_clone.expire_and_steal_lease(&run_id, "thief-token");
+            proceed_clone.store(true, Ordering::SeqCst);
+        });
+
+        let mut m = HashMap::new();
+        m.insert(
+            "alpha".to_string(),
+            Box::new(LatchedExecutor {
+                started: Arc::clone(&started),
+                proceed: Arc::clone(&proceed),
+            }) as Box<dyn crate::traits::action_executor::ActionExecutor>,
+        );
+
+        let mut state = make_bare_state("wf");
+        state.persistence = Arc::clone(&persistence) as Arc<dyn WorkflowPersistence>;
+        state.action_registry = Arc::new(ActionRegistry::new(m, None));
+        state.workflow_run_id = run.id.clone();
+        // Short refresh interval so the refresh thread also detects the steal quickly.
+        state.exec_config.lease_refresh_interval = Duration::from_millis(15);
+
+        let engine = FlowEngineBuilder::new().build().unwrap();
+        let def = make_def("wf", vec![call_node("alpha")]);
+
+        let result = engine.run(&def, &mut state);
+        stealer.join().unwrap();
+
+        assert!(
+            matches!(
+                result,
+                Err(EngineError::Cancelled(CancellationReason::LeaseLost))
+            ),
+            "stale generation on step write should abort with LeaseLost; got {result:?}"
         );
     }
 

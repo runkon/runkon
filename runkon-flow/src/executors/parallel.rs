@@ -9,8 +9,6 @@ use crate::traits::action_executor::{ActionOutput, ActionParams, ExecutionContex
 use crate::traits::persistence::StepUpdate;
 use crate::types::{StepResult, StepSuccess};
 
-use super::p_err;
-
 pub fn execute_parallel(
     state: &mut ExecutionState,
     node: &ParallelNode,
@@ -344,10 +342,11 @@ pub fn execute_parallel(
             }
             Err(e) => {
                 tracing::warn!("parallel: '{}' failed: {e}", pr.agent_name);
-                state
-                    .persistence
-                    .update_step(&pr.step_id, StepUpdate::failed(e.to_string(), pr.attempt))
-                    .map_err(p_err)?;
+                let generation = state.expect_lease_generation();
+                state.persistence.update_step(
+                    &pr.step_id,
+                    StepUpdate::failed(generation, e.to_string(), pr.attempt),
+                )?;
                 failures += 1;
             }
         }
@@ -503,6 +502,9 @@ mod tests {
             event_sinks: Arc::from(vec![]),
             cancellation: crate::cancellation::CancellationToken::new(),
             current_execution_id: Arc::new(std::sync::Mutex::new(None)),
+            owner_token: None,
+            // Run was created with generation=0; use that so update_step check passes.
+            lease_generation: Some(0),
         }
     }
 

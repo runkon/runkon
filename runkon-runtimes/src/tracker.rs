@@ -68,3 +68,24 @@ pub struct NoopEventSink;
 impl EventSink for NoopEventSink {
     fn on_event(&self, _run_id: &str, _event: RuntimeEvent) {}
 }
+
+/// A no-op run tracker for contexts that don't need lifecycle persistence.
+pub struct NoopTracker;
+
+impl RunTracker for NoopTracker {
+    fn record_pid(&self, _run_id: &str, _pid: u32) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+    fn record_runtime(&self, _run_id: &str, _name: &str) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+    fn mark_cancelled(&self, _run_id: &str) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+    fn mark_failed_if_running(&self, _run_id: &str, _reason: &str) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+    fn get_run(&self, _run_id: &str) -> Result<Option<RunHandle>, RuntimeError> {
+        Ok(None)
+    }
+}

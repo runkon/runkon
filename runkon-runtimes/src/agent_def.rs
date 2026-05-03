@@ -1,9 +1,10 @@
 use serde::Serialize;
 
 /// Role type for an agent.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRole {
+    #[default]
     Actor,
     Reviewer,
 }
@@ -45,4 +46,17 @@ pub struct AgentDef {
     pub runtime: String,
     /// The prompt template (full markdown body after frontmatter).
     pub prompt: String,
+}
+
+impl Default for AgentDef {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            role: AgentRole::Actor,
+            can_commit: false,
+            model: None,
+            runtime: "claude".to_string(),
+            prompt: String::new(),
+        }
+    }
 }

@@ -8,8 +8,6 @@ use crate::events::EngineEvent;
 use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
 use crate::traits::persistence::{GateApprovalState, StepUpdate};
 
-use super::p_err;
-
 fn resume_run_status(state: &ExecutionState, gate_name: &str, context: &str) {
     if let Err(e) = state.persistence.update_run_status(
         &state.workflow_run_id,
@@ -242,24 +240,23 @@ pub fn execute_quality_gate(
     let on_fail_action = qg.on_fail_action.clone();
 
     let step_id = super::insert_step_record(state, &node.name, "gate", pos, iteration, None)?;
+    let generation = state.expect_lease_generation();
 
     let set_step_status = |status: WorkflowStepStatus, context: &str| -> Result<()> {
-        state
-            .persistence
-            .update_step(
-                &step_id,
-                StepUpdate {
-                    status,
-                    child_run_id: None,
-                    result_text: Some(context.to_string()),
-                    context_out: None,
-                    markers_out: None,
-                    retry_count: None,
-                    structured_output: None,
-                    step_error: None,
-                },
-            )
-            .map_err(p_err)
+        state.persistence.update_step(
+            &step_id,
+            StepUpdate {
+                generation,
+                status,
+                child_run_id: None,
+                result_text: Some(context.to_string()),
+                context_out: None,
+                markers_out: None,
+                retry_count: None,
+                structured_output: None,
+                step_error: None,
+            },
+        )
     };
 
     // Look up the source step's structured output
@@ -359,24 +356,23 @@ pub fn handle_gate_timeout(
     node: &GateNode,
 ) -> Result<()> {
     tracing::warn!("Gate '{}' timed out", node.name);
+    let generation = state.expect_lease_generation();
     match node.on_timeout {
         OnTimeout::Fail => {
-            state
-                .persistence
-                .update_step(
-                    step_id,
-                    StepUpdate {
-                        status: WorkflowStepStatus::Failed,
-                        child_run_id: None,
-                        result_text: Some("gate timed out".to_string()),
-                        context_out: None,
-                        markers_out: None,
-                        retry_count: None,
-                        structured_output: None,
-                        step_error: Some(format!("Gate '{}' timed out", node.name)),
-                    },
-                )
-                .map_err(p_err)?;
+            state.persistence.update_step(
+                step_id,
+                StepUpdate {
+                    generation,
+                    status: WorkflowStepStatus::Failed,
+                    child_run_id: None,
+                    result_text: Some("gate timed out".to_string()),
+                    context_out: None,
+                    markers_out: None,
+                    retry_count: None,
+                    structured_output: None,
+                    step_error: Some(format!("Gate '{}' timed out", node.name)),
+                },
+            )?;
             state.all_succeeded = false;
             resume_run_status(state, &node.name, "after timeout (fail)");
             Err(EngineError::Workflow(format!(
@@ -385,22 +381,20 @@ pub fn handle_gate_timeout(
             )))
         }
         OnTimeout::Continue => {
-            state
-                .persistence
-                .update_step(
-                    step_id,
-                    StepUpdate {
-                        status: WorkflowStepStatus::TimedOut,
-                        child_run_id: None,
-                        result_text: Some("gate timed out (continuing)".to_string()),
-                        context_out: None,
-                        markers_out: None,
-                        retry_count: None,
-                        structured_output: None,
-                        step_error: None,
-                    },
-                )
-                .map_err(p_err)?;
+            state.persistence.update_step(
+                step_id,
+                StepUpdate {
+                    generation,
+                    status: WorkflowStepStatus::TimedOut,
+                    child_run_id: None,
+                    result_text: Some("gate timed out (continuing)".to_string()),
+                    context_out: None,
+                    markers_out: None,
+                    retry_count: None,
+                    structured_output: None,
+                    step_error: None,
+                },
+            )?;
             resume_run_status(state, &node.name, "after timeout (continue)");
             Ok(())
         }

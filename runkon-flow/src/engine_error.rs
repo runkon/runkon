@@ -14,4 +14,6 @@ pub enum EngineError {
     Workflow(String),
     #[error("workflow not found: {0}")]
     WorkflowNotFound(String),
+    #[error("workflow run already owned by another engine: {0}")]
+    AlreadyOwned(String),
 }
