@@ -12,7 +12,7 @@ use chrono::Utc;
 use rusqlite::{named_params, Connection, OptionalExtension};
 
 use crate::cancellation_reason::CancellationReason;
-use crate::constants::{RUN_COLUMNS, TERMINAL_STATUSES_SQL};
+use crate::constants::{RUN_COLUMNS, STEP_COLUMNS, TERMINAL_STATUSES_SQL};
 use crate::engine_error::EngineError;
 use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
 use crate::traits::persistence::{
@@ -20,17 +20,6 @@ use crate::traits::persistence::{
     GateApprovalState, NewRun, NewStep, StepUpdate, WorkflowPersistence,
 };
 use crate::types::{extract_workflow_title, BlockedOn, WorkflowRun, WorkflowRunStep};
-
-/// Column list for `workflow_run_steps` SELECT queries (used by `row_to_step`).
-const STEP_COLUMNS: &str =
-    "id, workflow_run_id, step_name, role, can_commit, condition_expr, status, \
-     child_run_id, position, started_at, ended_at, result_text, condition_met, \
-     iteration, parallel_group_id, context_out, markers_out, retry_count, \
-     gate_type, gate_prompt, gate_timeout, gate_approved_by, gate_approved_at, gate_feedback, \
-     structured_output, output_file, gate_options, gate_selections, \
-     fan_out_total, fan_out_completed, fan_out_failed, fan_out_skipped, step_error, \
-     input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, \
-     cost_usd, num_turns, duration_ms";
 
 /// `s.`-prefixed variant of [`STEP_COLUMNS`] for queries that JOIN additional
 /// context tables (workflow_runs, worktrees, etc.) and need disambiguated column

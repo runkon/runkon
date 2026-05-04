@@ -17,6 +17,19 @@ pub const RUN_COLUMNS: &str =
 /// SQL fragment listing every terminal step status, for use in `IN`/`NOT IN` clauses.
 pub const TERMINAL_STATUSES_SQL: &str = "'completed','failed','skipped','timed_out'";
 
+/// Column list for `workflow_run_steps` SELECT queries (used by row mappers in both
+/// conductor-core and runkon-flow). Single source of truth — importers use
+/// `runkon_flow::constants::STEP_COLUMNS` or `pub use` re-export.
+pub const STEP_COLUMNS: &str =
+    "id, workflow_run_id, step_name, role, can_commit, condition_expr, status, \
+     child_run_id, position, started_at, ended_at, result_text, condition_met, \
+     iteration, parallel_group_id, context_out, markers_out, retry_count, \
+     gate_type, gate_prompt, gate_timeout, gate_approved_by, gate_approved_at, gate_feedback, \
+     structured_output, output_file, gate_options, gate_selections, \
+     fan_out_total, fan_out_completed, fan_out_failed, fan_out_skipped, step_error, \
+     input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, \
+     cost_usd, num_turns, duration_ms";
+
 pub const FLOW_OUTPUT_INSTRUCTION: &str = r#"
 When you have finished your work, output the following block exactly as the
 last thing in your response. Do not include this block in code examples or
