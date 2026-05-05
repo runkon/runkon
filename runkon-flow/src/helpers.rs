@@ -303,6 +303,20 @@ pub fn collect_leaf_step_keys(node: &WorkflowNode) -> Vec<String> {
     out
 }
 
+/// Format a list of user-selected gate items as a context-out string for
+/// downstream `{{step.context}}` consumption. Used by gate approval flows
+/// across all persistence backends.
+#[allow(dead_code)]
+pub(crate) fn format_gate_selection_context(items: &[String]) -> String {
+    let mut out = String::from("User selected the following items:\n");
+    for item in items {
+        out.push_str("- ");
+        out.push_str(item);
+        out.push('\n');
+    }
+    out
+}
+
 /// Find the starting iteration for a while loop on resume.
 ///
 /// Looks at the skip_completed set for step keys that match body nodes of the
@@ -867,5 +881,17 @@ mod tests {
         }
         let result = serialize_or_empty_array(&AlwaysFails, "test");
         assert_eq!(result, "[]");
+    }
+
+    #[test]
+    fn format_gate_selection_context_lists_items_with_dash_prefix() {
+        let out = super::format_gate_selection_context(&["alpha".to_string(), "beta".to_string()]);
+        assert_eq!(out, "User selected the following items:\n- alpha\n- beta\n");
+    }
+
+    #[test]
+    fn format_gate_selection_context_empty_returns_header_only() {
+        let out = super::format_gate_selection_context(&[]);
+        assert_eq!(out, "User selected the following items:\n");
     }
 }

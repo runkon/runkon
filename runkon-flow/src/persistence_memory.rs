@@ -149,14 +149,6 @@ fn lock_err() -> EngineError {
     EngineError::Persistence("InMemoryWorkflowPersistence: mutex poisoned".into())
 }
 
-fn format_gate_selection_context(selections: &[String]) -> String {
-    let mut s = "User selected the following items:\n".to_string();
-    for item in selections {
-        s.push_str(&format!("- {item}\n"));
-    }
-    s
-}
-
 impl InMemoryWorkflowPersistence {
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, InMemoryStore>, EngineError> {
         self.store.lock().map_err(|_| lock_err())
@@ -214,7 +206,7 @@ impl GateApprovalStore for InMemoryWorkflowPersistence {
         step.gate_selections = selections
             .map(|s| serde_json::to_string(s).expect("Vec<String> serialization is infallible"));
         if let Some(items) = selections.filter(|s| !s.is_empty()) {
-            step.context_out = Some(format_gate_selection_context(items));
+            step.context_out = Some(crate::helpers::format_gate_selection_context(items));
         }
         step.status = WorkflowStepStatus::Completed;
         step.ended_at = Some(now);

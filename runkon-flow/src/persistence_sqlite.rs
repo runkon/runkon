@@ -193,16 +193,6 @@ fn row_to_fan_out_item(row: &rusqlite::Row) -> rusqlite::Result<FanOutItemRow> {
 // Gate helpers
 // ---------------------------------------------------------------------------
 
-fn format_gate_selection_context(items: &[String]) -> String {
-    let mut out = String::from("User selected the following items:\n");
-    for item in items {
-        out.push_str("- ");
-        out.push_str(item);
-        out.push('\n');
-    }
-    out
-}
-
 fn serialize_gate_selections(selections: Option<&[String]>) -> Result<Option<String>, EngineError> {
     match selections {
         None => Ok(None),
@@ -395,7 +385,7 @@ impl GateApprovalStore for SqliteWorkflowPersistence {
     ) -> Result<(), EngineError> {
         let context_out = selections
             .filter(|s| !s.is_empty())
-            .map(format_gate_selection_context);
+            .map(crate::helpers::format_gate_selection_context);
 
         let conn = self.lock()?;
         if let Some(sels) = selections {
