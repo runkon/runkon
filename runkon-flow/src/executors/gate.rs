@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::thread;
 use std::time::Duration;
 
@@ -71,9 +72,9 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
     );
 
     // Resolve gate options (if any) — stored for future use by gate resolvers
-    let _resolved_options: Vec<String> = if let Some(ref gate_opts) = node.options {
+    let _resolved_options: HashMap<String, String> = if let Some(ref gate_opts) = node.options {
         match gate_opts {
-            GateOptions::Static(items) => items.clone(),
+            GateOptions::Static(map) => map.clone(),
             GateOptions::StepRef(dotted) => {
                 let dot = dotted.find('.').ok_or_else(|| {
                     EngineError::Workflow(format!(
@@ -101,19 +102,19 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
                         node.name
                     ))
                 })?;
-                let arr = val.get(field_key).and_then(|v| v.as_array()).ok_or_else(|| {
+                let obj = val.get(field_key).and_then(|v| v.as_object()).ok_or_else(|| {
                     EngineError::Workflow(format!(
-                        "Gate '{}': field '{field_key}' in step '{step_key}' structured_output is not a JSON array",
+                        "Gate '{}': field '{field_key}' in step '{step_key}' structured_output is not a JSON object",
                         node.name
                     ))
                 })?;
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
+                obj.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
                     .collect()
             }
         }
     } else {
-        Vec::new()
+        HashMap::new()
     };
 
     // Log human gate instructions before entering the poll loop.

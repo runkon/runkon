@@ -817,20 +817,19 @@ impl Parser {
                     }
                 }
                 let parsed = match v {
-                    KvValue::Array(items) => GateOptions::Static(items.clone()),
+                    KvValue::Array(items) => {
+                        let map: HashMap<String, String> =
+                            items.iter().map(|s| (s.clone(), s.clone())).collect();
+                        GateOptions::Static(map)
+                    }
+                    KvValue::Map(map) => GateOptions::Static(map.clone()),
                     KvValue::Bare(s) | KvValue::Quoted(s) if s.contains('.') => {
                         GateOptions::StepRef(s.clone())
                     }
                     KvValue::Bare(s) | KvValue::Quoted(s) => {
                         return Err(format!(
-                            "Invalid `options` value '{s}': expected an array [\"...\"] or a step field reference like 'step.field'"
+                            "Invalid `options` value '{s}': expected a map {{key: value, ...}}, an array [\"...\"], or a step field reference like 'step.field'"
                         ));
-                    }
-                    KvValue::Map(_) => {
-                        return Err(
-                            "`options` must be an array or step field reference, not a map"
-                                .to_string(),
-                        );
                     }
                 };
                 Some(parsed)

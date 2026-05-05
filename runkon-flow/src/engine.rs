@@ -13,21 +13,11 @@ use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
 use crate::traits::action_executor::ActionRegistry;
 use crate::traits::item_provider::ItemProviderRegistry;
 use crate::traits::persistence::WorkflowPersistence;
+use crate::traits::run_context::RunContext;
 use crate::traits::script_env_provider::ScriptEnvProvider;
 use crate::types::{
     ContextEntry, StepKey, StepResult, WorkflowExecConfig, WorkflowResult, WorkflowRunStep,
 };
-
-/// Domain-identity context for a single workflow execution.
-#[derive(Clone)]
-pub struct WorktreeContext {
-    pub worktree_id: Option<String>,
-    pub working_dir: String,
-    pub repo_path: String,
-    pub ticket_id: Option<String>,
-    pub repo_id: Option<String>,
-    pub extra_plugin_dirs: Vec<String>,
-}
 
 /// Pre-loaded context for resuming a workflow run.
 #[derive(Clone)]
@@ -44,7 +34,13 @@ pub struct ExecutionState {
     pub script_env_provider: Arc<dyn ScriptEnvProvider>,
     pub workflow_run_id: String,
     pub workflow_name: String,
-    pub worktree_ctx: WorktreeContext,
+    /// Shared per-run context carrying injected variables and working directory.
+    /// `Arc` (not `Box`) because `ExecutionState` derives `Clone` for `fork_child`.
+    pub run_ctx: Arc<dyn RunContext>,
+    /// Extra plugin directories for the executor. Not part of `RunContext`
+    /// because `Vec<String>` doesn't fit the `HashMap<&'static str, String>`
+    /// injected-variables contract, and only executor code reads it.
+    pub extra_plugin_dirs: Vec<String>,
     pub model: Option<String>,
     pub exec_config: WorkflowExecConfig,
     pub inputs: HashMap<String, String>,
@@ -117,13 +113,12 @@ pub struct ChildWorkflowInput {
 /// run. Build via [`ExecutionState::child_workflow_context`].
 #[derive(Clone)]
 pub struct ChildWorkflowContext {
-    pub worktree_ctx: WorktreeContext,
+    pub run_ctx: Arc<dyn RunContext>,
+    pub extra_plugin_dirs: Vec<String>,
     pub workflow_run_id: String,
     pub model: Option<String>,
-    pub target_label: Option<String>,
     pub exec_config: WorkflowExecConfig,
     pub inputs: HashMap<String, String>,
-    pub triggered_by_hook: bool,
     pub event_sinks: Arc<[Arc<dyn EventSink>]>,
 }
 
@@ -180,20 +175,19 @@ impl ExecutionState {
     /// helper before the `Err` is returned.
     ///
     /// Without this being called from inside long-running wait loops (parallel
-    /// blocks, foreach fan-out), the heartbeat goes stale during multi-minute
-    /// waits and the watchdog reaper races the engine after >60 s — see #2731.
+    /// blocks, foreach fan-out), the cancellation check is skipped during
+    /// multi-minute waits — see #2731.
     ///
     /// NOTE (#2731/#2796): lease refresh (refresh_lease_loop in flow_engine.rs)
-    /// is now the load-bearing ownership mechanism. Heartbeat writes are retained
-    /// solely for UI staleness display (detect_stuck_workflow_run_ids reads
-    /// last_heartbeat). Do not remove them without auditing that query.
-    pub fn tick_heartbeat_throttled(&self) -> Result<()> {
+    /// is the load-bearing ownership mechanism. `detect_stuck_workflow_run_ids`
+    /// falls back to `started_at` when `last_heartbeat` is NULL (new runs).
+    pub fn check_cancellation_throttled(&self) -> Result<()> {
         use crate::cancellation_reason::CancellationReason;
 
         let now_secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_else(|e| {
-                tracing::warn!("system clock regressed: {e}; heartbeat suppressed");
+                tracing::warn!("system clock regressed: {e}; cancellation check suppressed");
                 e.duration()
             })
             .as_secs() as i64;
@@ -223,9 +217,6 @@ impl ExecutionState {
                 );
             }
         }
-        if let Err(e) = self.persistence.tick_heartbeat(&self.workflow_run_id) {
-            tracing::warn!("tick_heartbeat failed (non-fatal): {e}");
-        }
         Ok(())
     }
 
@@ -233,13 +224,12 @@ impl ExecutionState {
     /// implementation needs to spawn a child run.
     pub fn child_workflow_context(&self) -> ChildWorkflowContext {
         ChildWorkflowContext {
-            worktree_ctx: self.worktree_ctx.clone(),
+            run_ctx: Arc::clone(&self.run_ctx),
+            extra_plugin_dirs: self.extra_plugin_dirs.clone(),
             workflow_run_id: self.workflow_run_id.clone(),
             model: self.model.clone(),
-            target_label: self.target_label.clone(),
             exec_config: self.exec_config.clone(),
             inputs: self.inputs.clone(),
-            triggered_by_hook: self.triggered_by_hook,
             event_sinks: Arc::clone(&self.event_sinks),
         }
     }
@@ -320,30 +310,19 @@ impl ExecutionState {
         }
         changed
     }
-
-    /// Persist the current accumulated metrics to the workflow run row.
-    pub fn flush_metrics(&self) -> Result<()> {
-        self.persistence.persist_metrics(
-            &self.workflow_run_id,
-            self.total_input_tokens,
-            self.total_output_tokens,
-            self.total_cache_read_input_tokens,
-            self.total_cache_creation_input_tokens,
-            self.total_cost,
-            self.total_turns,
-            self.total_duration_ms,
-        )
-    }
 }
 
 /// Resolve a schema by name using the schema_resolver callback.
 pub fn resolve_schema(state: &ExecutionState, name: &str) -> Result<OutputSchema> {
     match &state.schema_resolver {
-        Some(resolver) => resolver(
-            &state.worktree_ctx.working_dir,
-            &state.worktree_ctx.repo_path,
-            name,
-        ),
+        Some(resolver) => {
+            let working_dir = state.run_ctx.working_dir_str();
+            let repo_path = state
+                .run_ctx
+                .get(crate::traits::run_context::keys::REPO_PATH)
+                .unwrap_or_default();
+            resolver(&working_dir, &repo_path, name)
+        }
         None => Err(EngineError::Workflow(format!(
             "No schema resolver configured — cannot load schema '{name}'"
         ))),
@@ -360,7 +339,7 @@ pub fn emit_event(state: &ExecutionState, event: EngineEvent) {
 
 /// Input keys that the workflow engine injects automatically from the run context.
 ///
-/// These keys are populated from `WorktreeContext` fields at execution time; callers
+/// These keys are populated from the run context at execution time; callers
 /// should treat them as read-only and avoid defining workflow inputs with these names.
 pub const ENGINE_INJECTED_KEYS: &[&str] = &[
     "ticket_id",
@@ -483,12 +462,6 @@ pub fn run_workflow_engine(
     let wf_run_id = state.workflow_run_id.clone();
     let is_cancelled = matches!(&body_result, Err(EngineError::Cancelled(_)));
 
-    if let Err(e) = state.flush_metrics() {
-        tracing::warn!(
-            workflow_run_id = %wf_run_id,
-            "flush_metrics failed at finalization (non-fatal, metrics may be missing): {e}"
-        );
-    }
     emit_event(
         state,
         EngineEvent::MetricsUpdated {
@@ -545,7 +518,9 @@ pub fn run_workflow_engine(
 
     Ok(WorkflowResult {
         workflow_run_id: wf_run_id,
-        worktree_id: state.worktree_ctx.worktree_id.clone(),
+        worktree_id: state
+            .run_ctx
+            .get(crate::traits::run_context::keys::WORKTREE_ID),
         workflow_name: workflow.name.clone(),
         all_succeeded: state.all_succeeded,
         total_cost: state.total_cost,
@@ -603,7 +578,7 @@ pub fn execute_nodes(
         if state.cancellation.is_cancelled() {
             return state.cancellation.error_if_cancelled();
         }
-        state.tick_heartbeat_throttled()?;
+        state.check_cancellation_throttled()?;
         execute_single_node(state, node, 0)?;
     }
     Ok(())
@@ -644,28 +619,50 @@ pub fn record_step_skipped(state: &mut ExecutionState, step_key: String, step_la
     state.step_results.insert(step_key, step_result);
 }
 
+/// Parse a metric value from a metadata map, logging a warning on parse failure.
+fn parse_metric_f64(map: &std::collections::HashMap<String, String>, key: &str) -> Option<f64> {
+    map.get(key).and_then(|v| {
+        v.parse::<f64>()
+            .map_err(|e| tracing::warn!("metadata key '{key}' has non-numeric value '{v}': {e}"))
+            .ok()
+    })
+}
+
+/// Parse an integer metric value from a metadata map, logging a warning on parse failure.
+fn parse_metric_i64(map: &std::collections::HashMap<String, String>, key: &str) -> Option<i64> {
+    map.get(key).and_then(|v| {
+        v.parse::<i64>()
+            .map_err(|e| tracing::warn!("metadata key '{key}' has non-integer value '{v}': {e}"))
+            .ok()
+    })
+}
+
 /// Record a successful step: accumulate stats, insert StepResult, push context.
 pub fn record_step_success(
     state: &mut ExecutionState,
     step_key: String,
     success: crate::types::StepSuccess,
 ) {
-    let metrics_changed = state.accumulate_metrics(
-        success.cost_usd,
-        success.num_turns,
-        success.duration_ms,
-        success.input_tokens,
-        success.output_tokens,
-        success.cache_read_input_tokens,
-        success.cache_creation_input_tokens,
+    use crate::constants::metadata_keys;
+    let cost_usd = parse_metric_f64(&success.metadata, metadata_keys::COST_USD);
+    let num_turns = parse_metric_i64(&success.metadata, metadata_keys::NUM_TURNS);
+    let duration_ms = parse_metric_i64(&success.metadata, metadata_keys::DURATION_MS);
+    let input_tokens = parse_metric_i64(&success.metadata, metadata_keys::INPUT_TOKENS);
+    let output_tokens = parse_metric_i64(&success.metadata, metadata_keys::OUTPUT_TOKENS);
+    let cache_read = parse_metric_i64(&success.metadata, metadata_keys::CACHE_READ_INPUT_TOKENS);
+    let cache_creation = parse_metric_i64(
+        &success.metadata,
+        metadata_keys::CACHE_CREATION_INPUT_TOKENS,
     );
-
-    // Best-effort mid-run metrics flush — non-fatal, only if something changed
-    if metrics_changed {
-        if let Err(e) = state.flush_metrics() {
-            tracing::warn!("Failed to flush mid-run metrics: {e}");
-        }
-    }
+    let _metrics_changed = state.accumulate_metrics(
+        cost_usd,
+        num_turns,
+        duration_ms,
+        input_tokens,
+        output_tokens,
+        cache_read,
+        cache_creation,
+    );
 
     let step_result = StepResult::completed(&success);
     state.step_results.insert(step_key, step_result);
@@ -832,17 +829,6 @@ pub fn restore_completed_step(
     let markers = parse_markers_out(step.markers_out.as_deref(), step_key);
     let context = step.context_out.clone().unwrap_or_default();
 
-    // Accumulate costs from the step's joined agent run metrics.
-    state.accumulate_metrics(
-        step.cost_usd,
-        step.num_turns,
-        step.duration_ms,
-        step.input_tokens,
-        step.output_tokens,
-        step.cache_read_input_tokens,
-        step.cache_creation_input_tokens,
-    );
-
     // Restore gate feedback if this was a gate step
     if let Some(ref feedback) = step.gate_feedback {
         state.last_gate_feedback = Some(feedback.clone());
@@ -861,12 +847,29 @@ pub fn restore_completed_step(
     state.contexts.push(success.into());
 }
 
-/// Fetch both the final step output (markers + context) and all completed step
-/// results for a child workflow run in a single DB query.
+/// Returned by [`fetch_child_completion_data`].
+/// `0` — final-step `(markers, context)` of the child workflow.
+/// `1` — bubble-up step-results map keyed by child step name (used by parent
+/// for `if step.marker` checks).
+/// `2` — child step contexts in chronological order (pushed into parent's
+/// `state.contexts` so downstream agents see child step outputs in `prior_contexts`).
+pub type ChildCompletionData = (
+    (Vec<String>, String),
+    HashMap<String, StepResult>,
+    Vec<ContextEntry>,
+);
+
+/// Fetch the final step output, the bubble-up step-results map, AND the
+/// child workflow's context entries — in a single DB query. The context
+/// entries are pushed into the parent's `state.contexts` so that downstream
+/// agents in the parent workflow see child-workflow step outputs via
+/// `prior_contexts` in their prompt templates. Without this third return
+/// value, only `state.step_results` carries child step data and parent-side
+/// agents have no access to child step `context_out` / `structured_output`.
 pub fn fetch_child_completion_data(
     persistence: &dyn WorkflowPersistence,
     workflow_run_id: &str,
-) -> ((Vec<String>, String), HashMap<String, StepResult>) {
+) -> ChildCompletionData {
     let steps = match persistence.get_steps(workflow_run_id) {
         Ok(s) => s,
         Err(e) => {
@@ -874,15 +877,17 @@ pub fn fetch_child_completion_data(
                 "Failed to fetch steps for child workflow run '{}': {e}",
                 workflow_run_id,
             );
-            return ((Vec::new(), String::new()), HashMap::new());
+            return ((Vec::new(), String::new()), HashMap::new(), Vec::new());
         }
     };
 
-    // Collect completed steps once; derive both final output and bubble-up map from it.
-    let completed: Vec<_> = steps
+    // Collect completed steps once, ordered by position so context bubble-up
+    // preserves chronological order in the parent's `state.contexts`.
+    let mut completed: Vec<_> = steps
         .into_iter()
         .filter(|s| s.status == WorkflowStepStatus::Completed)
         .collect();
+    completed.sort_by_key(|s| s.position);
 
     let final_output = match completed.iter().max_by_key(|s| s.position) {
         Some(step) => {
@@ -893,25 +898,29 @@ pub fn fetch_child_completion_data(
         None => (Vec::new(), String::new()),
     };
 
-    // Build bubble-up map from all completed steps.
-    let child_steps = completed
-        .into_iter()
-        .map(|s| {
-            let markers = parse_markers_out(s.markers_out.as_deref(), &s.step_name);
-            let context = s.context_out.clone().unwrap_or_default();
-            let success = crate::types::StepSuccess::from_workflow_run_step(
-                s.step_name.clone(),
-                &s,
-                markers,
-                context,
-                0,
-            );
-            let result = StepResult::completed_without_metrics(&success);
-            (s.step_name, result)
-        })
-        .collect();
+    // Build the bubble-up step-results map AND the contexts list from the
+    // same StepSuccess values. The map is keyed by step name (used for
+    // `if step.marker` checks); the list preserves chronological order
+    // (used as `prior_contexts` in agent prompts).
+    let mut child_steps = HashMap::with_capacity(completed.len());
+    let mut child_contexts = Vec::with_capacity(completed.len());
+    for s in completed {
+        let markers = parse_markers_out(s.markers_out.as_deref(), &s.step_name);
+        let context = s.context_out.clone().unwrap_or_default();
+        let success = crate::types::StepSuccess::from_workflow_run_step(
+            s.step_name.clone(),
+            &s,
+            markers,
+            context,
+            0,
+        );
+        let result = StepResult::completed_without_metrics(&success);
+        let entry: ContextEntry = success.into();
+        child_steps.insert(s.step_name, result);
+        child_contexts.push(entry);
+    }
 
-    (final_output, child_steps)
+    (final_output, child_steps, child_contexts)
 }
 
 /// Check whether the loop is stuck (identical marker sets for `stuck_after` consecutive
@@ -1092,14 +1101,30 @@ mod tests {
             script_env_provider: Arc::new(NoOpScriptEnvProvider),
             workflow_run_id: "run-1".to_string(),
             workflow_name: "wf".to_string(),
-            worktree_ctx: WorktreeContext {
-                worktree_id: Some("wt".to_string()),
-                working_dir: "/tmp".to_string(),
-                repo_path: "/repo".to_string(),
-                ticket_id: Some("TICK-1".to_string()),
-                repo_id: Some("repo-1".to_string()),
-                extra_plugin_dirs: vec!["plugins".to_string()],
+            run_ctx: {
+                let mut vars = std::collections::HashMap::new();
+                vars.insert(
+                    crate::traits::run_context::keys::WORKTREE_ID,
+                    "wt".to_string(),
+                );
+                vars.insert(
+                    crate::traits::run_context::keys::REPO_PATH,
+                    "/repo".to_string(),
+                );
+                vars.insert(
+                    crate::traits::run_context::keys::TICKET_ID,
+                    "TICK-1".to_string(),
+                );
+                vars.insert(
+                    crate::traits::run_context::keys::REPO_ID,
+                    "repo-1".to_string(),
+                );
+                Arc::new(
+                    crate::traits::run_context::NoopRunContext::with_vars(vars)
+                        .with_working_dir("/tmp"),
+                ) as Arc<dyn RunContext>
             },
+            extra_plugin_dirs: vec!["plugins".to_string()],
             model: Some("gpt-4".to_string()),
             exec_config: WorkflowExecConfig::default(),
             inputs: {
@@ -1155,7 +1180,7 @@ mod tests {
         // Shared config cloned
         assert_eq!(child.workflow_run_id, "run-1");
         assert_eq!(child.workflow_name, "wf");
-        assert_eq!(child.worktree_ctx.working_dir, "/tmp");
+        assert_eq!(child.run_ctx.working_dir_str(), "/tmp");
         assert_eq!(child.model, Some("gpt-4".to_string()));
         assert_eq!(child.depth, 3);
         assert_eq!(child.target_label, Some("label".to_string()));
@@ -1198,7 +1223,7 @@ mod tests {
     }
 
     #[test]
-    fn child_workflow_context_projects_all_eight_fields() {
+    fn child_workflow_context_projects_fields() {
         use crate::cancellation::CancellationToken;
         use crate::events::{EngineEventData, EventSink};
         use crate::persistence_memory::InMemoryWorkflowPersistence;
@@ -1234,14 +1259,30 @@ mod tests {
             script_env_provider: Arc::new(NoOpScriptEnvProvider),
             workflow_run_id: "run-projection-test".to_string(),
             workflow_name: "wf-projection".to_string(),
-            worktree_ctx: WorktreeContext {
-                worktree_id: Some("wt-9".to_string()),
-                working_dir: "/tmp/proj".to_string(),
-                repo_path: "/repo/proj".to_string(),
-                ticket_id: Some("TICK-42".to_string()),
-                repo_id: Some("repo-7".to_string()),
-                extra_plugin_dirs: vec!["plugin-a".to_string()],
+            run_ctx: {
+                let mut vars = std::collections::HashMap::new();
+                vars.insert(
+                    crate::traits::run_context::keys::WORKTREE_ID,
+                    "wt-9".to_string(),
+                );
+                vars.insert(
+                    crate::traits::run_context::keys::REPO_PATH,
+                    "/repo/proj".to_string(),
+                );
+                vars.insert(
+                    crate::traits::run_context::keys::TICKET_ID,
+                    "TICK-42".to_string(),
+                );
+                vars.insert(
+                    crate::traits::run_context::keys::REPO_ID,
+                    "repo-7".to_string(),
+                );
+                Arc::new(
+                    crate::traits::run_context::NoopRunContext::with_vars(vars)
+                        .with_working_dir("/tmp/proj"),
+                ) as Arc<dyn RunContext>
             },
+            extra_plugin_dirs: vec!["plugin-a".to_string()],
             model: Some("opus".to_string()),
             exec_config: exec_config.clone(),
             inputs: state_inputs.clone(),
@@ -1278,19 +1319,21 @@ mod tests {
 
         let ctx = parent.child_workflow_context();
 
-        // All eight fields project verbatim.
-        assert_eq!(ctx.worktree_ctx.worktree_id.as_deref(), Some("wt-9"));
-        assert_eq!(ctx.worktree_ctx.working_dir, "/tmp/proj");
-        assert_eq!(ctx.worktree_ctx.repo_path, "/repo/proj");
-        assert_eq!(ctx.worktree_ctx.ticket_id.as_deref(), Some("TICK-42"));
-        assert_eq!(ctx.worktree_ctx.repo_id.as_deref(), Some("repo-7"));
-        assert_eq!(ctx.worktree_ctx.extra_plugin_dirs, vec!["plugin-a"]);
+        // All fields project verbatim.
+        use crate::traits::run_context::keys;
+        assert_eq!(ctx.run_ctx.get(keys::WORKTREE_ID).as_deref(), Some("wt-9"));
+        assert_eq!(ctx.run_ctx.working_dir_str(), "/tmp/proj");
+        assert_eq!(
+            ctx.run_ctx.get(keys::REPO_PATH).as_deref(),
+            Some("/repo/proj")
+        );
+        assert_eq!(ctx.run_ctx.get(keys::TICKET_ID).as_deref(), Some("TICK-42"));
+        assert_eq!(ctx.run_ctx.get(keys::REPO_ID).as_deref(), Some("repo-7"));
+        assert_eq!(ctx.extra_plugin_dirs, vec!["plugin-a"]);
         assert_eq!(ctx.workflow_run_id, "run-projection-test");
         assert_eq!(ctx.model.as_deref(), Some("opus"));
-        assert_eq!(ctx.target_label.as_deref(), Some("proj-label"));
         assert!(ctx.exec_config.dry_run);
         assert_eq!(ctx.inputs, state_inputs);
-        assert!(ctx.triggered_by_hook);
 
         // event_sinks slice is shared, not deep-copied.
         assert_eq!(ctx.event_sinks.len(), 2);
@@ -1313,37 +1356,16 @@ mod tests {
         )
     }
 
-    /// First call must tick (initial state has last_heartbeat_at = 0, far enough
-    /// in the past to clear the 5 s gate). An immediate second call must NOT
-    /// tick — it falls inside the 5 s throttle window.
-    #[test]
-    fn tick_heartbeat_throttled_first_call_ticks_second_call_throttled() {
-        let cp = Arc::new(CountingPersistence::new());
-        let state = make_state_with_counting_persistence(Arc::clone(&cp), "run-1".into());
-
-        assert_eq!(cp.tick_count(), 0);
-        state.tick_heartbeat_throttled().unwrap();
-        assert_eq!(cp.tick_count(), 1, "first call must tick");
-
-        // Immediate second call falls inside the 5 s window.
-        state.tick_heartbeat_throttled().unwrap();
-        assert_eq!(
-            cp.tick_count(),
-            1,
-            "second call within 5s must be throttled, not tick again"
-        );
-    }
-
     /// When persistence reports the run cancelled, the helper sets
     /// `state.cancellation` and returns `Err(Cancelled)`.
     #[test]
-    fn tick_heartbeat_throttled_propagates_external_cancel() {
+    fn check_cancellation_throttled_propagates_external_cancel() {
         let cp = Arc::new(CountingPersistence::new());
         cp.set_cancelled(true);
         let state = make_state_with_counting_persistence(Arc::clone(&cp), "run-1".into());
 
         assert!(!state.cancellation.is_cancelled());
-        let result = state.tick_heartbeat_throttled();
+        let result = state.check_cancellation_throttled();
         assert!(
             matches!(result, Err(EngineError::Cancelled(_))),
             "expected Err(Cancelled), got {result:?}"
@@ -1428,5 +1450,115 @@ mod tests {
                 assert!(res.is_err(), "should detect stuck at iteration {i}");
             }
         }
+    }
+
+    #[test]
+    fn fetch_child_completion_data_bubbles_contexts_in_position_order() {
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use crate::traits::persistence::{NewStep, StepUpdate};
+
+        let p = InMemoryWorkflowPersistence::new();
+        let child_run = "01CHILDRUNID0000000000000";
+        p.seed_run(child_run);
+
+        // Insert two steps in reverse position order to verify the function
+        // sorts before bubbling — without sorting, contexts would land in
+        // insertion order, which doesn't match the chronological order
+        // parent-side agents expect.
+        let step_b = p
+            .insert_step(NewStep {
+                workflow_run_id: child_run.to_string(),
+                step_name: "step-b".to_string(),
+                role: "actor".to_string(),
+                can_commit: false,
+                position: 2,
+                iteration: 0,
+                retry_count: Some(0),
+            })
+            .unwrap();
+        let step_a = p
+            .insert_step(NewStep {
+                workflow_run_id: child_run.to_string(),
+                step_name: "step-a".to_string(),
+                role: "actor".to_string(),
+                can_commit: false,
+                position: 1,
+                iteration: 0,
+                retry_count: Some(0),
+            })
+            .unwrap();
+
+        p.update_step(
+            &step_a,
+            StepUpdate::completed(
+                0,
+                None,
+                Some("a-result".into()),
+                Some("context-from-a".into()),
+                Some(r#"["m-a"]"#.into()),
+                0,
+                Some(r#"{"k":"a"}"#.into()),
+            ),
+        )
+        .unwrap();
+        p.update_step(
+            &step_b,
+            StepUpdate::completed(
+                0,
+                None,
+                Some("b-result".into()),
+                Some("context-from-b".into()),
+                Some(r#"["m-b"]"#.into()),
+                0,
+                Some(r#"{"k":"b"}"#.into()),
+            ),
+        )
+        .unwrap();
+
+        let ((final_markers, final_context), step_results, child_contexts) =
+            fetch_child_completion_data(&p, child_run);
+
+        // Final output is the highest-position step (step-b at position 2).
+        assert_eq!(final_markers, vec!["m-b".to_string()]);
+        assert_eq!(final_context, "context-from-b");
+
+        // Both steps reachable by name in the bubble-up step_results map.
+        assert!(step_results.contains_key("step-a"));
+        assert!(step_results.contains_key("step-b"));
+
+        // Child contexts bubbled in position order regardless of insert order,
+        // and carry the per-step context_out + structured_output so parent
+        // agents downstream of call_workflow can read them via prior_contexts.
+        assert_eq!(child_contexts.len(), 2);
+        assert_eq!(child_contexts[0].step, "step-a");
+        assert_eq!(child_contexts[0].context, "context-from-a");
+        assert_eq!(child_contexts[0].markers, vec!["m-a".to_string()]);
+        assert_eq!(
+            child_contexts[0].structured_output.as_deref(),
+            Some(r#"{"k":"a"}"#)
+        );
+        assert_eq!(child_contexts[1].step, "step-b");
+        assert_eq!(child_contexts[1].context, "context-from-b");
+        assert_eq!(child_contexts[1].markers, vec!["m-b".to_string()]);
+        assert_eq!(
+            child_contexts[1].structured_output.as_deref(),
+            Some(r#"{"k":"b"}"#)
+        );
+    }
+
+    #[test]
+    fn fetch_child_completion_data_returns_empty_contexts_on_persistence_error() {
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+
+        let p = InMemoryWorkflowPersistence::new();
+        p.set_fail_get_steps(true);
+
+        let ((markers, context), step_results, child_contexts) =
+            fetch_child_completion_data(&p, "any-run-id");
+
+        assert!(markers.is_empty());
+        assert!(context.is_empty());
+        assert!(step_results.is_empty());
+        assert!(child_contexts.is_empty());
     }
 }

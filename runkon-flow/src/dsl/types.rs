@@ -545,13 +545,13 @@ fn default_on_fail() -> OnFailAction {
 
 /// Specifies the set of options for a multi-select gate.
 ///
-/// - `Static`: a literal list of option strings defined in the workflow file.
+/// - `Static`: a literal key-value map of option strings defined in the workflow file.
 /// - `StepRef`: a `"step.field"` reference resolved at runtime from a prior step's
-///   structured output (the field must be a JSON array of strings).
+///   structured output (the field must be a JSON object with string values).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum GateOptions {
-    Static(Vec<String>),
+    Static(HashMap<String, String>),
     /// Raw `"step.field"` dotted reference — resolved at execution time.
     StepRef(String),
 }

@@ -9,9 +9,11 @@ use chrono::Utc;
 use crate::cancellation_reason::CancellationReason;
 use crate::engine_error::EngineError;
 use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
+use crate::traits::gate_approval_store::{
+    gate_approval_state_from_fields, GateApprovalState, GateApprovalStore,
+};
 use crate::traits::persistence::{
-    gate_approval_state_from_fields, FanOutItemStatus, FanOutItemUpdate, GateApprovalState, NewRun,
-    NewStep, StepUpdate, WorkflowPersistence,
+    FanOutItemStatus, FanOutItemUpdate, NewRun, NewStep, StepUpdate, WorkflowPersistence,
 };
 use crate::types::{FanOutItemRow, WorkflowRun, WorkflowRunStep};
 
@@ -98,7 +100,6 @@ impl InMemoryWorkflowPersistence {
         let run = crate::types::WorkflowRun {
             id: id.to_string(),
             workflow_name: String::new(),
-            worktree_id: None,
             parent_run_id: String::new(),
             status: crate::status::WorkflowRunStatus::Pending,
             dry_run: false,
@@ -109,11 +110,7 @@ impl InMemoryWorkflowPersistence {
             error: None,
             definition_snapshot: None,
             inputs: std::collections::HashMap::new(),
-            ticket_id: None,
-            repo_id: None,
             parent_workflow_run_id: None,
-            target_label: None,
-            default_bot_name: None,
             iteration: 0,
             blocked_on: None,
             workflow_title: None,
@@ -146,28 +143,6 @@ impl InMemoryWorkflowPersistence {
         }
         self.acquire_lease(run_id, new_token, 3600).unwrap();
     }
-
-    /// Test helper: directly set the metric fields on a step so that
-    /// `restore_completed_step` can be tested with non-None metric values.
-    #[cfg(test)]
-    pub fn set_step_metrics_for_test(
-        &self,
-        step_id: &str,
-        cost_usd: Option<f64>,
-        num_turns: Option<i64>,
-        duration_ms: Option<i64>,
-        input_tokens: Option<i64>,
-        output_tokens: Option<i64>,
-    ) {
-        let mut store = self.store.lock().unwrap();
-        if let Some(step) = store.steps.get_mut(step_id) {
-            step.cost_usd = cost_usd;
-            step.num_turns = num_turns;
-            step.duration_ms = duration_ms;
-            step.input_tokens = input_tokens;
-            step.output_tokens = output_tokens;
-        }
-    }
 }
 
 fn lock_err() -> EngineError {
@@ -196,6 +171,76 @@ impl InMemoryWorkflowPersistence {
     }
 }
 
+impl GateApprovalStore for InMemoryWorkflowPersistence {
+    fn get_gate_approval(&self, step_id: &str) -> Result<GateApprovalState, EngineError> {
+        let store = self.lock()?;
+        let Some(step) = store.steps.get(step_id) else {
+            return Ok(GateApprovalState::Pending);
+        };
+        let selections = step.gate_selections.as_deref().and_then(|s| {
+            serde_json::from_str::<Vec<String>>(s)
+                .map_err(|e| {
+                    tracing::warn!(
+                        "get_gate_approval: malformed gate_selections JSON for step '{step_id}': {e}"
+                    );
+                    e
+                })
+                .ok()
+        });
+        Ok(gate_approval_state_from_fields(
+            step.gate_approved_at.as_deref(),
+            step.status.clone(),
+            step.gate_feedback.clone(),
+            selections,
+        ))
+    }
+
+    fn approve_gate(
+        &self,
+        step_id: &str,
+        approved_by: &str,
+        feedback: Option<&str>,
+        selections: Option<&[String]>,
+    ) -> Result<(), EngineError> {
+        let mut store = self.lock()?;
+        let now = Utc::now().to_rfc3339();
+        let step = store
+            .steps
+            .get_mut(step_id)
+            .ok_or_else(|| EngineError::Persistence(format!("step {step_id} not found")))?;
+        step.gate_approved_at = Some(now.clone());
+        step.gate_approved_by = Some(approved_by.to_string());
+        step.gate_feedback = feedback.map(String::from);
+        step.gate_selections = selections
+            .map(|s| serde_json::to_string(s).expect("Vec<String> serialization is infallible"));
+        if let Some(items) = selections.filter(|s| !s.is_empty()) {
+            step.context_out = Some(format_gate_selection_context(items));
+        }
+        step.status = WorkflowStepStatus::Completed;
+        step.ended_at = Some(now);
+        Ok(())
+    }
+
+    fn reject_gate(
+        &self,
+        step_id: &str,
+        rejected_by: &str,
+        feedback: Option<&str>,
+    ) -> Result<(), EngineError> {
+        let mut store = self.lock()?;
+        let now = Utc::now().to_rfc3339();
+        let step = store
+            .steps
+            .get_mut(step_id)
+            .ok_or_else(|| EngineError::Persistence(format!("step {step_id} not found")))?;
+        step.gate_approved_by = Some(rejected_by.to_string());
+        step.gate_feedback = feedback.map(String::from);
+        step.status = WorkflowStepStatus::Failed;
+        step.ended_at = Some(now);
+        Ok(())
+    }
+}
+
 impl WorkflowPersistence for InMemoryWorkflowPersistence {
     fn create_run(&self, new_run: NewRun) -> Result<WorkflowRun, EngineError> {
         let id = ulid::Ulid::new().to_string();
@@ -203,7 +248,6 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
         let run = WorkflowRun {
             id: id.clone(),
             workflow_name: new_run.workflow_name,
-            worktree_id: new_run.worktree_id,
             parent_run_id: new_run.parent_run_id,
             status: WorkflowRunStatus::Pending,
             dry_run: new_run.dry_run,
@@ -214,11 +258,7 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
             error: None,
             definition_snapshot: new_run.definition_snapshot,
             inputs: HashMap::new(),
-            ticket_id: new_run.ticket_id,
-            repo_id: new_run.repo_id,
             parent_workflow_run_id: new_run.parent_workflow_run_id,
-            target_label: new_run.target_label,
-            default_bot_name: None,
             iteration: 0,
             blocked_on: None,
             workflow_title: None,
@@ -326,13 +366,6 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
             gate_feedback: None,
             gate_options: None,
             gate_selections: None,
-            input_tokens: None,
-            output_tokens: None,
-            cache_read_input_tokens: None,
-            cache_creation_input_tokens: None,
-            cost_usd: None,
-            num_turns: None,
-            duration_ms: None,
             fan_out_total: None,
             fan_out_completed: 0,
             fan_out_failed: 0,
@@ -414,6 +447,7 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
         item_type: &str,
         item_id: &str,
         item_ref: &str,
+        context: &std::collections::HashMap<String, String>,
     ) -> Result<String, EngineError> {
         let mut store = self.lock()?;
         let dedup_key = (item_type.to_string(), item_id.to_string());
@@ -444,6 +478,7 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
                 status: "pending".to_string(),
                 dispatched_at: None,
                 completed_at: None,
+                context: context.clone(),
             },
         );
         Ok(id)
@@ -530,74 +565,6 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
         Ok(items)
     }
 
-    fn get_gate_approval(&self, step_id: &str) -> Result<GateApprovalState, EngineError> {
-        let store = self.lock()?;
-        let Some(step) = store.steps.get(step_id) else {
-            return Ok(GateApprovalState::Pending);
-        };
-        let selections = step.gate_selections.as_deref().and_then(|s| {
-            serde_json::from_str::<Vec<String>>(s)
-                .map_err(|e| {
-                    tracing::warn!(
-                        "get_gate_approval: malformed gate_selections JSON for step '{step_id}': {e}"
-                    );
-                    e
-                })
-                .ok()
-        });
-        Ok(gate_approval_state_from_fields(
-            step.gate_approved_at.as_deref(),
-            step.status.clone(),
-            step.gate_feedback.clone(),
-            selections,
-        ))
-    }
-
-    fn approve_gate(
-        &self,
-        step_id: &str,
-        approved_by: &str,
-        feedback: Option<&str>,
-        selections: Option<&[String]>,
-    ) -> Result<(), EngineError> {
-        let mut store = self.lock()?;
-        let now = Utc::now().to_rfc3339();
-        let step = store
-            .steps
-            .get_mut(step_id)
-            .ok_or_else(|| EngineError::Persistence(format!("step {step_id} not found")))?;
-        step.gate_approved_at = Some(now.clone());
-        step.gate_approved_by = Some(approved_by.to_string());
-        step.gate_feedback = feedback.map(String::from);
-        step.gate_selections = selections
-            .map(|s| serde_json::to_string(s).expect("Vec<String> serialization is infallible"));
-        if let Some(items) = selections.filter(|s| !s.is_empty()) {
-            step.context_out = Some(format_gate_selection_context(items));
-        }
-        step.status = WorkflowStepStatus::Completed;
-        step.ended_at = Some(now);
-        Ok(())
-    }
-
-    fn reject_gate(
-        &self,
-        step_id: &str,
-        rejected_by: &str,
-        feedback: Option<&str>,
-    ) -> Result<(), EngineError> {
-        let mut store = self.lock()?;
-        let now = Utc::now().to_rfc3339();
-        let step = store
-            .steps
-            .get_mut(step_id)
-            .ok_or_else(|| EngineError::Persistence(format!("step {step_id} not found")))?;
-        step.gate_approved_by = Some(rejected_by.to_string());
-        step.gate_feedback = feedback.map(String::from);
-        step.status = WorkflowStepStatus::Failed;
-        step.ended_at = Some(now);
-        Ok(())
-    }
-
     fn is_run_cancelled(&self, run_id: &str) -> Result<bool, EngineError> {
         let store = self.lock()?;
         Ok(store
@@ -654,47 +621,25 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
         run.lease_until = Some((now + chrono::Duration::seconds(ttl_seconds)).to_rfc3339());
         Ok(Some(run.generation))
     }
-
-    fn tick_heartbeat(&self, _run_id: &str) -> Result<(), EngineError> {
-        Ok(())
-    }
-
-    fn persist_metrics(
-        &self,
-        _run_id: &str,
-        _input_tokens: i64,
-        _output_tokens: i64,
-        _cache_read_input_tokens: i64,
-        _cache_creation_input_tokens: i64,
-        _cost_usd: f64,
-        _num_turns: i64,
-        _duration_ms: i64,
-    ) -> Result<(), EngineError> {
-        Ok(())
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
+    use crate::traits::gate_approval_store::GateApprovalState;
     use crate::traits::persistence::{
-        FanOutItemStatus, FanOutItemUpdate, GateApprovalState, NewRun, NewStep, StepUpdate,
-        WorkflowPersistence,
+        FanOutItemStatus, FanOutItemUpdate, NewRun, NewStep, StepUpdate, WorkflowPersistence,
     };
 
     fn make_new_run(name: &str) -> NewRun {
         NewRun {
             workflow_name: name.to_string(),
-            worktree_id: None,
-            ticket_id: None,
-            repo_id: None,
             parent_run_id: "parent-run".to_string(),
             dry_run: false,
             trigger: "test".to_string(),
             definition_snapshot: None,
             parent_workflow_run_id: None,
-            target_label: None,
         }
     }
 
@@ -876,7 +821,7 @@ mod tests {
         let step_id = p.insert_step(make_new_step(&run.id, "foreach")).unwrap();
 
         let item_id = p
-            .insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1")
+            .insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1", &Default::default())
             .unwrap();
         assert!(!item_id.is_empty());
 
@@ -917,9 +862,9 @@ mod tests {
         let run = p.create_run(make_new_run("test")).unwrap();
         let step_id = p.insert_step(make_new_step(&run.id, "s")).unwrap();
 
-        p.insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1")
+        p.insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1", &Default::default())
             .unwrap();
-        p.insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1")
+        p.insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1", &Default::default())
             .unwrap();
 
         let items = p.get_fan_out_items(&step_id, None).unwrap();
@@ -933,9 +878,9 @@ mod tests {
         let step_id = p.insert_step(make_new_step(&run.id, "s")).unwrap();
 
         // same step_run_id + item_id, different item_type → two distinct items
-        p.insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1")
+        p.insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1", &Default::default())
             .unwrap();
-        p.insert_fan_out_item(&step_id, "worktree", "t-1", "ref-2")
+        p.insert_fan_out_item(&step_id, "worktree", "t-1", "ref-2", &Default::default())
             .unwrap();
 
         let items = p.get_fan_out_items(&step_id, None).unwrap();
@@ -946,9 +891,9 @@ mod tests {
         );
 
         // idempotency: re-inserting both should not change count
-        p.insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1")
+        p.insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1", &Default::default())
             .unwrap();
-        p.insert_fan_out_item(&step_id, "worktree", "t-1", "ref-2")
+        p.insert_fan_out_item(&step_id, "worktree", "t-1", "ref-2", &Default::default())
             .unwrap();
 
         let items = p.get_fan_out_items(&step_id, None).unwrap();
@@ -1062,22 +1007,6 @@ mod tests {
     }
 
     #[test]
-    fn test_tick_heartbeat_is_noop() {
-        let p = InMemoryWorkflowPersistence::new();
-        let run = p.create_run(make_new_run("test")).unwrap();
-        assert!(p.tick_heartbeat(&run.id).is_ok());
-    }
-
-    #[test]
-    fn test_persist_metrics_is_noop() {
-        let p = InMemoryWorkflowPersistence::new();
-        let run = p.create_run(make_new_run("test")).unwrap();
-        assert!(p
-            .persist_metrics(&run.id, 100, 200, 50, 25, 0.01, 3, 5000)
-            .is_ok());
-    }
-
-    #[test]
     fn batch_update_fan_out_items_mixed_terminal_statuses() {
         use crate::traits::persistence::{FanOutItemStatus, FanOutItemUpdate};
 
@@ -1086,13 +1015,13 @@ mod tests {
         let step_id = p.insert_step(make_new_step(&run.id, "foreach")).unwrap();
 
         let id1 = p
-            .insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1")
+            .insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1", &Default::default())
             .unwrap();
         let id2 = p
-            .insert_fan_out_item(&step_id, "ticket", "t-2", "ref-2")
+            .insert_fan_out_item(&step_id, "ticket", "t-2", "ref-2", &Default::default())
             .unwrap();
         let id3 = p
-            .insert_fan_out_item(&step_id, "ticket", "t-3", "ref-3")
+            .insert_fan_out_item(&step_id, "ticket", "t-3", "ref-3", &Default::default())
             .unwrap();
 
         let updates = vec![
@@ -1142,7 +1071,7 @@ mod tests {
         let run = p.create_run(make_new_run("test")).unwrap();
         let step_id = p.insert_step(make_new_step(&run.id, "foreach")).unwrap();
         let _id = p
-            .insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1")
+            .insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1", &Default::default())
             .unwrap();
 
         p.batch_update_fan_out_items(&[] as &[(String, FanOutItemUpdate)])
@@ -1160,7 +1089,7 @@ mod tests {
         let run = p.create_run(make_new_run("test")).unwrap();
         let step_id = p.insert_step(make_new_step(&run.id, "foreach")).unwrap();
         let id1 = p
-            .insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1")
+            .insert_fan_out_item(&step_id, "ticket", "t-1", "ref-1", &Default::default())
             .unwrap();
 
         let updates = vec![(

@@ -1,5 +1,4 @@
 use std::io::Read;
-use std::path::Path;
 
 use crate::dsl::ScriptNode;
 use crate::engine::{
@@ -9,7 +8,6 @@ use crate::engine::{
 use crate::engine_error::Result;
 use crate::prompt_builder::build_variable_map;
 use crate::traits::persistence::StepUpdate;
-use crate::traits::run_context::RunContext;
 
 use wait_timeout::ChildExt;
 
@@ -99,39 +97,13 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
     // and other env from the script env provider. Falls back to the
     // workflow-level default bot when the step doesn't specify one.
     {
-        struct ScriptRunCtx<'a> {
-            working_dir: &'a str,
-            repo_path: &'a str,
-        }
-        impl RunContext for ScriptRunCtx<'_> {
-            fn injected_variables(&self) -> std::collections::HashMap<&'static str, String> {
-                std::collections::HashMap::new()
-            }
-            fn working_dir(&self) -> &Path {
-                Path::new(self.working_dir)
-            }
-            fn repo_path(&self) -> &Path {
-                Path::new(self.repo_path)
-            }
-            fn worktree_id(&self) -> Option<&str> {
-                None
-            }
-            fn ticket_id(&self) -> Option<&str> {
-                None
-            }
-            fn repo_id(&self) -> Option<&str> {
-                None
-            }
-        }
-        let run_ctx = ScriptRunCtx {
-            working_dir: &state.worktree_ctx.working_dir,
-            repo_path: &state.worktree_ctx.repo_path,
-        };
         let effective_bot = node
             .bot_name
             .as_deref()
             .or(state.default_bot_name.as_deref());
-        let provider_env = state.script_env_provider.env(&run_ctx, effective_bot);
+        let provider_env = state
+            .script_env_provider
+            .env(state.run_ctx.as_ref(), effective_bot);
         env_vars.extend(provider_env);
     }
 
@@ -189,7 +161,8 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
     }
 
     // Execute the script
-    let working_dir = &state.worktree_ctx.working_dir;
+    let working_dir_owned = state.run_ctx.working_dir_str();
+    let working_dir = &working_dir_owned;
 
     let mut cmd = std::process::Command::new("sh");
     cmd.arg("-c").arg(&script_cmd);
@@ -379,7 +352,10 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
             crate::types::StepSuccess {
                 step_name: node.name.clone(),
                 result_text: Some(format!("Script '{}' completed", node.name)),
-                duration_ms: Some(duration_ms),
+                metadata: std::collections::HashMap::from([(
+                    crate::constants::metadata_keys::DURATION_MS.to_string(),
+                    duration_ms.to_string(),
+                )]),
                 markers,
                 context,
                 iteration,
@@ -425,12 +401,13 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
 mod tests {
     use super::*;
     use crate::dsl::ScriptNode;
-    use crate::engine::{ExecutionState, WorktreeContext};
+    use crate::engine::ExecutionState;
     use crate::persistence_memory::InMemoryWorkflowPersistence;
     use crate::status::WorkflowStepStatus;
     use crate::traits::action_executor::ActionRegistry;
     use crate::traits::item_provider::ItemProviderRegistry;
     use crate::traits::persistence::{NewRun, WorkflowPersistence};
+    use crate::traits::run_context::NoopRunContext;
     use crate::traits::script_env_provider::NoOpScriptEnvProvider;
     use crate::types::WorkflowExecConfig;
     use std::collections::HashMap;
@@ -441,15 +418,11 @@ mod tests {
         let run = p
             .create_run(NewRun {
                 workflow_name: "wf".to_string(),
-                worktree_id: None,
-                ticket_id: None,
-                repo_id: None,
                 parent_run_id: String::new(),
                 dry_run: false,
                 trigger: "manual".to_string(),
                 definition_snapshot: None,
                 parent_workflow_run_id: None,
-                target_label: None,
             })
             .unwrap();
         (p, run.id)
@@ -462,14 +435,9 @@ mod tests {
             script_env_provider: Arc::new(NoOpScriptEnvProvider),
             workflow_run_id: run_id,
             workflow_name: "wf".to_string(),
-            worktree_ctx: WorktreeContext {
-                worktree_id: None,
-                working_dir: std::env::temp_dir().to_string_lossy().to_string(),
-                repo_path: String::new(),
-                ticket_id: None,
-                repo_id: None,
-                extra_plugin_dirs: vec![],
-            },
+            run_ctx: Arc::new(NoopRunContext::default().with_working_dir(std::env::temp_dir()))
+                as Arc<dyn crate::traits::run_context::RunContext>,
+            extra_plugin_dirs: vec![],
             model: None,
             exec_config: WorkflowExecConfig::default(),
             inputs: HashMap::new(),

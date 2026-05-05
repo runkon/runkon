@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use runkon_flow::dsl::OnTimeout;
 use runkon_flow::status::WorkflowStepStatus;
-use runkon_flow::traits::gate_resolver::{GateContext, GateParams, GatePoll, GateResolver};
+use runkon_flow::traits::gate_resolver::{GateParams, GatePoll, GateResolver};
 use runkon_flow::traits::persistence::WorkflowPersistence;
+use runkon_flow::traits::run_context::RunContext;
 use runkon_flow::types::WorkflowExecConfig;
 use runkon_flow::CancellationReason;
 use runkon_flow::FlowEngineBuilder;
@@ -32,7 +33,7 @@ impl GateResolver for StubApprovalResolver {
         &self,
         _run_id: &str,
         _params: &GateParams,
-        _ctx: &GateContext,
+        _ctx: &dyn RunContext,
     ) -> Result<GatePoll, runkon_flow::engine_error::EngineError> {
         Ok(GatePoll::Approved(None))
     }

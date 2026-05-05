@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use runkon_flow::cancellation::CancellationToken;
@@ -8,17 +8,15 @@ use runkon_flow::dsl::{
     ApprovalMode, ForEachNode, GateNode, GateType, OnChildFail, OnCycle, OnTimeout, WorkflowDef,
     WorkflowNode, WorkflowTrigger,
 };
-use runkon_flow::engine::{
-    ChildWorkflowInput, ChildWorkflowRunner, ExecutionState, ResumeContext, WorktreeContext,
-};
+use runkon_flow::engine::{ChildWorkflowInput, ChildWorkflowRunner, ExecutionState, ResumeContext};
 use runkon_flow::engine_error::EngineError;
 use runkon_flow::persistence_memory::InMemoryWorkflowPersistence;
 pub use runkon_flow::traits::action_executor::ActionExecutor;
-use runkon_flow::traits::action_executor::{
-    ActionOutput, ActionParams, ActionRegistry, ExecutionContext,
-};
-use runkon_flow::traits::item_provider::{FanOutItem, ItemProvider, ProviderContext};
+use runkon_flow::traits::action_executor::{ActionOutput, ActionParams, ActionRegistry, StepInfo};
+use runkon_flow::traits::item_provider::{FanOutItem, ItemProvider, ProviderInfo};
 use runkon_flow::traits::persistence::{NewRun, WorkflowPersistence};
+use runkon_flow::traits::run_context::NoopRunContext;
+use runkon_flow::traits::run_context::RunContext;
 use runkon_flow::traits::script_env_provider::NoOpScriptEnvProvider;
 use runkon_flow::types::{WorkflowExecConfig, WorkflowResult};
 use runkon_flow::CancellationReason;
@@ -57,7 +55,8 @@ impl ActionExecutor for MockExecutor {
 
     fn execute(
         &self,
-        _ectx: &ExecutionContext,
+        _ctx: &dyn RunContext,
+        _info: &StepInfo,
         _params: &ActionParams,
     ) -> Result<ActionOutput, EngineError> {
         Ok(ActionOutput {
@@ -77,7 +76,8 @@ impl ActionExecutor for FailingExecutor {
 
     fn execute(
         &self,
-        _ectx: &ExecutionContext,
+        _ctx: &dyn RunContext,
+        _info: &StepInfo,
         _params: &ActionParams,
     ) -> Result<ActionOutput, EngineError> {
         Err(EngineError::Workflow(
@@ -113,15 +113,11 @@ pub fn make_state(
     let run = persistence
         .create_run(NewRun {
             workflow_name: wf_name.to_string(),
-            worktree_id: None,
-            ticket_id: None,
-            repo_id: None,
             parent_run_id: String::new(),
             dry_run: false,
             trigger: "test".to_string(),
             definition_snapshot: None,
             parent_workflow_run_id: None,
-            target_label: None,
         })
         .expect("create_run failed");
 
@@ -131,14 +127,9 @@ pub fn make_state(
         script_env_provider: Arc::new(NoOpScriptEnvProvider),
         workflow_run_id: run.id,
         workflow_name: wf_name.to_string(),
-        worktree_ctx: WorktreeContext {
-            worktree_id: None,
-            working_dir: String::new(),
-            repo_path: String::new(),
-            ticket_id: None,
-            repo_id: None,
-            extra_plugin_dirs: vec![],
-        },
+        run_ctx: Arc::new(NoopRunContext::default())
+            as Arc<dyn runkon_flow::traits::run_context::RunContext>,
+        extra_plugin_dirs: vec![],
         model: None,
         exec_config: WorkflowExecConfig::default(),
         inputs: HashMap::new(),
@@ -358,19 +349,19 @@ impl ItemProvider for MockItemProvider {
 
     fn items(
         &self,
-        _ctx: &ProviderContext,
+        _ctx: &dyn RunContext,
+        _info: &ProviderInfo,
         _scope: Option<&runkon_flow::dsl::ForeachScope>,
         _filter: &HashMap<String, String>,
-        existing_set: &HashSet<String>,
     ) -> Result<Vec<FanOutItem>, EngineError> {
         Ok(self
             .items
             .iter()
-            .filter(|(_, id, _)| !existing_set.contains(id))
             .map(|(t, i, r)| FanOutItem {
                 item_type: t.clone(),
                 item_id: i.clone(),
                 item_ref: r.clone(),
+                context: HashMap::new(),
             })
             .collect())
     }
@@ -493,19 +484,19 @@ impl ItemProvider for MockOrderedItemProvider {
 
     fn items(
         &self,
-        _ctx: &ProviderContext,
+        _ctx: &dyn RunContext,
+        _info: &ProviderInfo,
         _scope: Option<&runkon_flow::dsl::ForeachScope>,
         _filter: &HashMap<String, String>,
-        existing_set: &HashSet<String>,
     ) -> Result<Vec<FanOutItem>, EngineError> {
         Ok(self
             .items
             .iter()
-            .filter(|(_, id, _)| !existing_set.contains(id))
             .map(|(t, i, r)| FanOutItem {
                 item_type: t.clone(),
                 item_id: i.clone(),
                 item_ref: r.clone(),
+                context: HashMap::new(),
             })
             .collect())
     }
@@ -541,12 +532,12 @@ impl ItemProvider for FailingOrderedItemProvider {
 
     fn items(
         &self,
-        ctx: &ProviderContext,
+        ctx: &dyn RunContext,
+        info: &ProviderInfo,
         scope: Option<&runkon_flow::dsl::ForeachScope>,
         filter: &HashMap<String, String>,
-        existing_set: &HashSet<String>,
     ) -> Result<Vec<FanOutItem>, EngineError> {
-        self.inner.items(ctx, scope, filter, existing_set)
+        self.inner.items(ctx, info, scope, filter)
     }
 
     fn dependencies(&self, _step_id: &str) -> Result<Vec<(String, String)>, EngineError> {

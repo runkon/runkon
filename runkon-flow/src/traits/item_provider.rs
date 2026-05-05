@@ -1,19 +1,22 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::dsl::ForeachScope;
 use crate::engine_error::EngineError;
+use crate::traits::run_context::RunContext;
 
 /// An item returned by an `ItemProvider` during fan-out.
+#[derive(Default)]
 pub struct FanOutItem {
     pub item_type: String,
     pub item_id: String,
     pub item_ref: String,
+    /// Arbitrary per-item key/value data injected into child workflow inputs as `item.<key>`.
+    pub context: HashMap<String, String>,
 }
 
-/// Context passed to providers during item collection.
-pub struct ProviderContext {
-    pub run_id: String,
+/// Engine-populated per-call info for a foreach provider invocation.
+pub struct ProviderInfo {
     pub step_id: String,
 }
 
@@ -23,10 +26,10 @@ pub trait ItemProvider: Send + Sync {
 
     fn items(
         &self,
-        ctx: &ProviderContext,
+        ctx: &dyn RunContext,
+        info: &ProviderInfo,
         scope: Option<&ForeachScope>,
         filter: &HashMap<String, String>,
-        existing_set: &HashSet<String>,
     ) -> Result<Vec<FanOutItem>, EngineError>;
 
     fn dependencies(&self, step_id: &str) -> Result<Vec<(String, String)>, EngineError> {
@@ -70,6 +73,7 @@ impl Default for ItemProviderRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::traits::run_context::NoopRunContext;
 
     struct DummyProvider;
     impl ItemProvider for DummyProvider {
@@ -78,15 +82,16 @@ mod tests {
         }
         fn items(
             &self,
-            _ctx: &ProviderContext,
+            _ctx: &dyn RunContext,
+            _info: &ProviderInfo,
             _scope: Option<&ForeachScope>,
             _filter: &HashMap<String, String>,
-            _existing_set: &HashSet<String>,
         ) -> Result<Vec<FanOutItem>, EngineError> {
             Ok(vec![FanOutItem {
                 item_type: "dummy".to_string(),
                 item_id: "d1".to_string(),
                 item_ref: "ref1".to_string(),
+                context: HashMap::new(),
             }])
         }
     }
@@ -113,5 +118,17 @@ mod tests {
         registry.register(DummyProvider);
         let p = registry.get("dummy").unwrap();
         assert_eq!(p.name(), "dummy");
+    }
+
+    #[test]
+    fn test_dummy_provider_returns_items() {
+        let ctx = NoopRunContext::default();
+        let info = ProviderInfo {
+            step_id: "s1".to_string(),
+        };
+        let provider = DummyProvider;
+        let items = provider.items(&ctx, &info, None, &HashMap::new()).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].item_id, "d1");
     }
 }

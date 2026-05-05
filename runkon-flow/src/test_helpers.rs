@@ -1,26 +1,24 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::dsl::{AgentRef, CallNode, WorkflowDef, WorkflowNode, WorkflowTrigger};
 use crate::events::{EngineEventData, EventSink};
-use crate::traits::action_executor::{ActionParams, ExecutionContext};
+use crate::traits::action_executor::{ActionParams, StepInfo};
+use crate::traits::run_context::{NoopRunContext, RunContext};
 
-pub fn make_ectx() -> ExecutionContext {
-    ExecutionContext {
-        run_id: "r1".to_string(),
-        working_dir: PathBuf::from("/tmp"),
-        repo_path: "/tmp/repo".to_string(),
-        step_timeout: Duration::from_secs(60),
-        shutdown: None,
-        model: None,
-        bot_name: None,
-        plugin_dirs: vec![],
-        workflow_name: "wf".to_string(),
-        worktree_id: None,
-        parent_run_id: "parent-run-1".to_string(),
+pub fn make_run_ctx() -> Arc<dyn RunContext> {
+    Arc::new(
+        NoopRunContext::default()
+            .with_run_id("r1")
+            .with_workflow_name("wf"),
+    )
+}
+
+pub fn make_step_info() -> StepInfo {
+    StepInfo {
         step_id: "step-1".to_string(),
+        step_timeout: Duration::from_secs(60),
     }
 }
 
@@ -33,7 +31,10 @@ pub fn make_params(name: &str) -> ActionParams {
         snippets: vec![],
         dry_run: false,
         gate_feedback: None,
-        schema: None,
+        extensions: crate::extensions::Extensions::default(),
+        model: None,
+        bot_name: None,
+        plugin_dirs: vec![],
     }
 }
 
@@ -108,9 +109,10 @@ pub fn make_test_execution_state(
     workflow_run_id: String,
 ) -> crate::engine::ExecutionState {
     use crate::cancellation::CancellationToken;
-    use crate::engine::{ExecutionState, WorktreeContext};
+    use crate::engine::ExecutionState;
     use crate::traits::action_executor::ActionRegistry;
     use crate::traits::item_provider::ItemProviderRegistry;
+    use crate::traits::run_context::NoopRunContext;
     use crate::traits::script_env_provider::NoOpScriptEnvProvider;
     use crate::types::WorkflowExecConfig;
 
@@ -120,14 +122,9 @@ pub fn make_test_execution_state(
         script_env_provider: Arc::new(NoOpScriptEnvProvider),
         workflow_run_id,
         workflow_name: "wf".into(),
-        worktree_ctx: WorktreeContext {
-            worktree_id: None,
-            working_dir: String::new(),
-            repo_path: String::new(),
-            ticket_id: None,
-            repo_id: None,
-            extra_plugin_dirs: vec![],
-        },
+        run_ctx: Arc::new(NoopRunContext::default())
+            as Arc<dyn crate::traits::run_context::RunContext>,
+        extra_plugin_dirs: vec![],
         model: None,
         exec_config: WorkflowExecConfig::default(),
         inputs: HashMap::new(),
@@ -166,15 +163,9 @@ pub fn make_test_execution_state(
 }
 
 /// `WorkflowPersistence` decorator that delegates to `InMemoryWorkflowPersistence`
-/// and counts every call to `tick_heartbeat`. Also lets tests force
-/// `is_run_cancelled` to return true at will.
-///
-/// Built for the regression coverage in #2731: wait loops in `parallel` and
-/// `foreach` must keep `tick_heartbeat` firing while children are running so
-/// the watchdog reaper does not race the engine.
+/// and lets tests force `is_run_cancelled` to return true at will.
 pub struct CountingPersistence {
     inner: crate::persistence_memory::InMemoryWorkflowPersistence,
-    tick_count: std::sync::atomic::AtomicUsize,
     cancelled: std::sync::atomic::AtomicBool,
 }
 
@@ -188,16 +179,42 @@ impl CountingPersistence {
     pub fn new() -> Self {
         Self {
             inner: crate::persistence_memory::InMemoryWorkflowPersistence::new(),
-            tick_count: std::sync::atomic::AtomicUsize::new(0),
             cancelled: std::sync::atomic::AtomicBool::new(false),
         }
-    }
-    pub fn tick_count(&self) -> usize {
-        self.tick_count.load(std::sync::atomic::Ordering::Relaxed)
     }
     pub fn set_cancelled(&self, v: bool) {
         self.cancelled
             .store(v, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+impl crate::traits::gate_approval_store::GateApprovalStore for CountingPersistence {
+    fn get_gate_approval(
+        &self,
+        step_id: &str,
+    ) -> Result<
+        crate::traits::gate_approval_store::GateApprovalState,
+        crate::engine_error::EngineError,
+    > {
+        self.inner.get_gate_approval(step_id)
+    }
+    fn approve_gate(
+        &self,
+        step_id: &str,
+        approved_by: &str,
+        feedback: Option<&str>,
+        selections: Option<&[String]>,
+    ) -> Result<(), crate::engine_error::EngineError> {
+        self.inner
+            .approve_gate(step_id, approved_by, feedback, selections)
+    }
+    fn reject_gate(
+        &self,
+        step_id: &str,
+        rejected_by: &str,
+        feedback: Option<&str>,
+    ) -> Result<(), crate::engine_error::EngineError> {
+        self.inner.reject_gate(step_id, rejected_by, feedback)
     }
 }
 
@@ -215,11 +232,6 @@ impl crate::traits::persistence::WorkflowPersistence for CountingPersistence {
             return Ok(true);
         }
         self.inner.is_run_cancelled(run_id)
-    }
-    fn tick_heartbeat(&self, run_id: &str) -> Result<(), crate::engine_error::EngineError> {
-        self.tick_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.inner.tick_heartbeat(run_id)
     }
     fn create_run(
         &self,
@@ -273,9 +285,10 @@ impl crate::traits::persistence::WorkflowPersistence for CountingPersistence {
         item_type: &str,
         item_id: &str,
         item_ref: &str,
+        context: &std::collections::HashMap<String, String>,
     ) -> Result<String, crate::engine_error::EngineError> {
         self.inner
-            .insert_fan_out_item(step_run_id, item_type, item_id, item_ref)
+            .insert_fan_out_item(step_run_id, item_type, item_id, item_ref, context)
     }
     fn update_fan_out_item(
         &self,
@@ -296,52 +309,5 @@ impl crate::traits::persistence::WorkflowPersistence for CountingPersistence {
         f: Option<crate::traits::persistence::FanOutItemStatus>,
     ) -> Result<Vec<crate::types::FanOutItemRow>, crate::engine_error::EngineError> {
         self.inner.get_fan_out_items(step_run_id, f)
-    }
-    fn get_gate_approval(
-        &self,
-        step_id: &str,
-    ) -> Result<crate::traits::persistence::GateApprovalState, crate::engine_error::EngineError>
-    {
-        self.inner.get_gate_approval(step_id)
-    }
-    fn approve_gate(
-        &self,
-        step_id: &str,
-        approved_by: &str,
-        feedback: Option<&str>,
-        selections: Option<&[String]>,
-    ) -> Result<(), crate::engine_error::EngineError> {
-        self.inner
-            .approve_gate(step_id, approved_by, feedback, selections)
-    }
-    fn reject_gate(
-        &self,
-        step_id: &str,
-        rejected_by: &str,
-        feedback: Option<&str>,
-    ) -> Result<(), crate::engine_error::EngineError> {
-        self.inner.reject_gate(step_id, rejected_by, feedback)
-    }
-    fn persist_metrics(
-        &self,
-        run_id: &str,
-        input_tokens: i64,
-        output_tokens: i64,
-        cache_read_input_tokens: i64,
-        cache_creation_input_tokens: i64,
-        cost_usd: f64,
-        num_turns: i64,
-        duration_ms: i64,
-    ) -> Result<(), crate::engine_error::EngineError> {
-        self.inner.persist_metrics(
-            run_id,
-            input_tokens,
-            output_tokens,
-            cache_read_input_tokens,
-            cache_creation_input_tokens,
-            cost_usd,
-            num_turns,
-            duration_ms,
-        )
     }
 }

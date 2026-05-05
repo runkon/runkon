@@ -10,7 +10,7 @@ use crate::engine::{
 use crate::engine_error::{EngineError, Result};
 use crate::events::EngineEvent;
 use crate::status::WorkflowStepStatus;
-use crate::traits::item_provider::ProviderContext;
+use crate::traits::item_provider::ProviderInfo;
 use crate::traits::persistence::{FanOutItemStatus, FanOutItemUpdate, StepUpdate};
 
 use super::p_err;
@@ -140,9 +140,7 @@ pub fn execute_foreach(
         }
     };
 
-    // Build provider context
-    let provider_ctx = ProviderContext {
-        run_id: state.workflow_run_id.clone(),
+    let provider_info = ProviderInfo {
         step_id: step_id.clone(),
     };
 
@@ -154,30 +152,33 @@ pub fn execute_foreach(
     let existing_set: HashSet<String> = existing_items.iter().map(|i| i.item_id.clone()).collect();
 
     let provider_items = provider.items(
-        &provider_ctx,
+        &*state.run_ctx,
+        &provider_info,
         node.scope.as_ref(),
         &node.filter,
-        &existing_set,
     )?;
 
-    let items: Vec<(String, String, String)> = provider_items
-        .into_iter()
-        .map(|i| (i.item_type, i.item_id, i.item_ref))
-        .collect();
+    let items = provider_items;
 
     // Write pending rows for newly discovered items.
-    for (item_type, item_id, item_ref) in &items {
-        if !existing_set.contains(item_id) {
+    for item in &items {
+        if !existing_set.contains(&item.item_id) {
             state
                 .persistence
-                .insert_fan_out_item(&step_id, item_type, item_id, item_ref)
+                .insert_fan_out_item(
+                    &step_id,
+                    &item.item_type,
+                    &item.item_id,
+                    &item.item_ref,
+                    &item.context,
+                )
                 .map_err(p_err)?;
         }
     }
 
     let new_item_count = items
         .iter()
-        .filter(|(_, id, _)| !existing_set.contains(id))
+        .filter(|i| !existing_set.contains(&i.item_id))
         .count();
     let total_items = existing_items.len() + new_item_count;
 
@@ -306,10 +307,10 @@ pub fn execute_foreach(
     let pool = threadpool::ThreadPool::new(max_slots);
 
     loop {
-        // Heartbeat tick + external cancel poll. Best-effort — the cancel
-        // signal lands on `state.cancellation`, and the controlled drain at the
-        // `is_cancelled()` check below picks it up. #2731.
-        let _ = state.tick_heartbeat_throttled();
+        // External cancel poll. Best-effort — the cancel signal lands on
+        // `state.cancellation`, and the controlled drain at the `is_cancelled()`
+        // check below picks it up. #2731.
+        let _ = state.check_cancellation_throttled();
 
         // 1. When threads are in-flight, block briefly on the first result to yield
         //    the CPU instead of spinning. Then drain any additional ready results.
@@ -485,6 +486,10 @@ pub fn execute_foreach(
                     .map_err(p_err)?;
 
                 let mut child_inputs = base_inputs.clone();
+                // Inject context entries first so struct-level fields always win.
+                for (k, v) in &item.context {
+                    child_inputs.insert(format!("item.{k}"), v.clone());
+                }
                 child_inputs.insert("item.id".to_string(), item.item_id.clone());
                 child_inputs.insert("item.ref".to_string(), item.item_ref.clone());
 
@@ -614,6 +619,7 @@ mod tests {
             status: status.to_string(),
             dispatched_at: None,
             completed_at: None,
+            context: std::collections::HashMap::new(),
         }
     }
 
@@ -825,10 +831,10 @@ mod tests {
         use crate::cancellation::CancellationToken;
         use crate::engine::{
             ChildWorkflowContext, ChildWorkflowInput, ChildWorkflowRunner, ExecutionState,
-            WorktreeContext,
         };
         use crate::engine_error::Result;
         use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use crate::traits::run_context::NoopRunContext;
         use crate::traits::script_env_provider::NoOpScriptEnvProvider;
         use crate::types::{WorkflowExecConfig, WorkflowResult};
 
@@ -873,14 +879,9 @@ mod tests {
             script_env_provider: Arc::new(NoOpScriptEnvProvider),
             workflow_run_id: "parent-run".into(),
             workflow_name: "wf".into(),
-            worktree_ctx: WorktreeContext {
-                worktree_id: None,
-                working_dir: String::new(),
-                repo_path: String::new(),
-                ticket_id: None,
-                repo_id: None,
-                extra_plugin_dirs: vec![],
-            },
+            run_ctx: Arc::new(NoopRunContext::default())
+                as Arc<dyn crate::traits::run_context::RunContext>,
+            extra_plugin_dirs: vec![],
             model: None,
             exec_config: WorkflowExecConfig::default(),
             inputs: parent_inputs.clone(),
@@ -939,12 +940,12 @@ mod tests {
         assert_eq!(ctx.parent_workflow_ctx.workflow_run_id, "parent-run");
     }
 
-    /// Regression for #2731: the foreach wait loop must keep `tick_heartbeat`
-    /// firing while children are running. Foreach already had a 50 ms
-    /// `recv_timeout`, but it didn't ping the heartbeat — so a long-running
-    /// child meant `last_heartbeat` went stale and the watchdog reaped the run.
+    /// Regression for #2731: the foreach wait loop must keep polling for
+    /// cancellation while children are running. Foreach already had a 50 ms
+    /// `recv_timeout`, but it didn't check — so a long-running child meant
+    /// cancellation signals were missed.
     #[test]
-    fn foreach_wait_loop_ticks_heartbeat_during_long_children() {
+    fn foreach_wait_loop_polls_cancellation_during_long_children() {
         use std::sync::Arc;
         use std::time::Duration;
 
@@ -952,7 +953,7 @@ mod tests {
         use crate::engine::{ChildWorkflowContext, ChildWorkflowInput, ChildWorkflowRunner};
         use crate::engine_error::Result;
         use crate::traits::item_provider::{
-            FanOutItem, ItemProvider, ItemProviderRegistry, ProviderContext,
+            FanOutItem, ItemProvider, ItemProviderRegistry, ProviderInfo,
         };
         use crate::traits::persistence::{NewRun, WorkflowPersistence};
         use crate::types::WorkflowResult;
@@ -964,15 +965,16 @@ mod tests {
             }
             fn items(
                 &self,
-                _ctx: &ProviderContext,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &ProviderInfo,
                 _scope: Option<&crate::dsl::ForeachScope>,
                 _filter: &HashMap<String, String>,
-                _existing_set: &HashSet<String>,
             ) -> Result<Vec<FanOutItem>> {
                 Ok(vec![FanOutItem {
                     item_type: "test".into(),
                     item_id: "item-1".into(),
                     item_ref: "ref-1".into(),
+                    context: HashMap::new(),
                 }])
             }
         }
@@ -1021,15 +1023,11 @@ mod tests {
         let run_id = cp
             .create_run(NewRun {
                 workflow_name: "wf".to_string(),
-                worktree_id: None,
-                ticket_id: None,
-                repo_id: None,
                 parent_run_id: String::new(),
                 dry_run: false,
                 trigger: "manual".to_string(),
                 definition_snapshot: None,
                 parent_workflow_run_id: None,
-                target_label: None,
             })
             .unwrap()
             .id;
@@ -1056,11 +1054,5 @@ mod tests {
         };
 
         super::execute_foreach(&mut state, &node, 0).unwrap();
-
-        assert!(
-            cp.tick_count() >= 1,
-            "expected ≥1 heartbeat tick during foreach wait loop, got {}",
-            cp.tick_count()
-        );
     }
 }

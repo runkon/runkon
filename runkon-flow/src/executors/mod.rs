@@ -121,30 +121,16 @@ pub(super) fn build_inputs_map(
     )
 }
 
-/// Construct an `ExecutionContext` from shared state fields.
+/// Construct a `StepInfo` from shared state fields.
 ///
-/// Centralises the repeated struct-literal initialisation in `call.rs` and
-/// `parallel.rs`.  Both sites differ only in `bot_name` and `plugin_dirs`;
-/// all other fields come directly from `state`.
-pub(super) fn build_execution_context(
+/// Centralises the repeated initialisation in `call.rs` and `parallel.rs`.
+pub(super) fn build_step_info(
     state: &crate::engine::ExecutionState,
     step_id: &str,
-    bot_name: Option<String>,
-    plugin_dirs: Vec<String>,
-) -> crate::traits::action_executor::ExecutionContext {
-    crate::traits::action_executor::ExecutionContext {
-        run_id: step_id.to_string(),
-        working_dir: std::path::PathBuf::from(&state.worktree_ctx.working_dir),
-        repo_path: state.worktree_ctx.repo_path.clone(),
-        step_timeout: state.exec_config.step_timeout,
-        shutdown: state.exec_config.shutdown.clone(),
-        model: state.model.clone(),
-        bot_name,
-        plugin_dirs,
-        workflow_name: state.workflow_name.clone(),
-        worktree_id: state.worktree_ctx.worktree_id.clone(),
-        parent_run_id: state.parent_run_id.clone(),
+) -> crate::traits::action_executor::StepInfo {
+    crate::traits::action_executor::StepInfo {
         step_id: step_id.to_string(),
+        step_timeout: state.exec_config.step_timeout,
     }
 }
 
@@ -190,7 +176,14 @@ pub(super) fn build_action_params(
     schema: Option<crate::output_schema::OutputSchema>,
     retries_remaining: u32,
     retry_error: Option<String>,
+    model: Option<String>,
+    bot_name: Option<String>,
+    plugin_dirs: Vec<String>,
 ) -> crate::traits::action_executor::ActionParams {
+    let mut extensions = crate::extensions::Extensions::default();
+    if let Some(s) = schema {
+        extensions.insert(s);
+    }
     crate::traits::action_executor::ActionParams {
         name: name.to_string(),
         inputs,
@@ -199,7 +192,10 @@ pub(super) fn build_action_params(
         snippets,
         dry_run,
         gate_feedback,
-        schema,
+        extensions,
+        model,
+        bot_name,
+        plugin_dirs,
     }
 }
 

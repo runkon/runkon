@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::dsl::ApprovalMode;
 use crate::engine_error::EngineError;
+use crate::traits::run_context::RunContext;
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -23,16 +24,10 @@ pub struct GateParams {
     pub prompt: Option<String>,
     pub min_approvals: u32,
     pub approval_mode: ApprovalMode,
-    /// Resolved options list (StepRef already expanded by the dispatcher).
-    pub options: Vec<String>,
+    /// Resolved options map (StepRef already expanded by the dispatcher).
+    pub options: HashMap<String, String>,
     pub timeout_secs: u64,
     pub bot_name: Option<String>,
-    pub step_id: String,
-}
-
-/// Transient context passed to each `GateResolver::poll` call.
-pub struct GateContext {
-    pub run_id: String,
     pub step_id: String,
 }
 
@@ -46,7 +41,7 @@ pub trait GateResolver: Send + Sync {
         &self,
         run_id: &str,
         params: &GateParams,
-        ctx: &GateContext,
+        ctx: &dyn RunContext,
     ) -> Result<GatePoll, EngineError>;
 }
 
@@ -111,7 +106,7 @@ mod tests {
             &self,
             _run_id: &str,
             _params: &GateParams,
-            _ctx: &GateContext,
+            _ctx: &dyn RunContext,
         ) -> Result<GatePoll, EngineError> {
             Ok(GatePoll::Approved(None))
         }

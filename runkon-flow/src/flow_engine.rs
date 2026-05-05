@@ -752,10 +752,12 @@ mod tests {
         OnTimeout,
     };
     use crate::engine_error::EngineError;
-    use crate::test_helpers::{call_node, make_def, make_ectx, make_params, ForwardSink, VecSink};
-    use crate::traits::action_executor::{ActionOutput, ActionParams, ExecutionContext};
-    use crate::traits::gate_resolver::{GateContext, GateParams, GatePoll};
-    use crate::traits::item_provider::{FanOutItem, ProviderContext};
+    use crate::test_helpers::{
+        call_node, make_def, make_params, make_run_ctx, make_step_info, ForwardSink, VecSink,
+    };
+    use crate::traits::action_executor::{ActionOutput, ActionParams, StepInfo};
+    use crate::traits::gate_resolver::{GateParams, GatePoll};
+    use crate::traits::item_provider::{FanOutItem, ProviderInfo};
     use crate::traits::run_context::RunContext;
     use crate::workflow_resolver_memory::InMemoryWorkflowResolver;
     use std::collections::HashMap;
@@ -769,7 +771,8 @@ mod tests {
         }
         fn execute(
             &self,
-            _ectx: &ExecutionContext,
+            _ctx: &dyn RunContext,
+            _info: &StepInfo,
             _params: &ActionParams,
         ) -> Result<ActionOutput, EngineError> {
             Ok(ActionOutput {
@@ -786,7 +789,8 @@ mod tests {
         }
         fn execute(
             &self,
-            _ectx: &ExecutionContext,
+            _ctx: &dyn RunContext,
+            _info: &StepInfo,
             _params: &ActionParams,
         ) -> Result<ActionOutput, EngineError> {
             Ok(ActionOutput {
@@ -806,7 +810,8 @@ mod tests {
         }
         fn execute(
             &self,
-            _: &ExecutionContext,
+            _: &dyn RunContext,
+            _: &StepInfo,
             _: &ActionParams,
         ) -> Result<ActionOutput, EngineError> {
             self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -820,15 +825,11 @@ mod tests {
         use crate::traits::persistence::{NewRun, WorkflowPersistence};
         p.create_run(NewRun {
             workflow_name: "wf".to_string(),
-            worktree_id: None,
-            ticket_id: None,
-            repo_id: None,
             parent_run_id: String::new(),
             dry_run: false,
             trigger: "manual".to_string(),
             definition_snapshot: None,
             parent_workflow_run_id: None,
-            target_label: None,
         })
         .unwrap()
     }
@@ -874,10 +875,10 @@ mod tests {
         }
         fn items(
             &self,
-            _ctx: &ProviderContext,
+            _ctx: &dyn RunContext,
+            _info: &ProviderInfo,
             _scope: Option<&crate::dsl::ForeachScope>,
             _filter: &HashMap<String, String>,
-            _existing_set: &std::collections::HashSet<String>,
         ) -> Result<Vec<FanOutItem>, EngineError> {
             Ok(vec![])
         }
@@ -892,7 +893,7 @@ mod tests {
             &self,
             _run_id: &str,
             _params: &GateParams,
-            _ctx: &GateContext,
+            _ctx: &dyn RunContext,
         ) -> Result<GatePoll, EngineError> {
             Ok(GatePoll::Approved(None))
         }
@@ -938,9 +939,11 @@ mod tests {
             .action(Box::new(AlphaExecutor))
             .build()
             .unwrap();
+        let ctx = make_run_ctx();
+        let info = make_step_info();
         let output = engine
             .action_registry
-            .dispatch("alpha", &make_ectx(), &make_params("alpha"))
+            .dispatch("alpha", ctx.as_ref(), &info, &make_params("alpha"))
             .unwrap();
         assert_eq!(output.markers, vec!["alpha"]);
     }
@@ -952,9 +955,11 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
+        let ctx = make_run_ctx();
+        let info = make_step_info();
         let output = engine
             .action_registry
-            .dispatch("anything", &make_ectx(), &make_params("anything"))
+            .dispatch("anything", ctx.as_ref(), &info, &make_params("anything"))
             .unwrap();
         assert_eq!(output.markers, vec!["beta"]);
     }
@@ -967,9 +972,11 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
+        let ctx = make_run_ctx();
+        let info = make_step_info();
         let output = engine
             .action_registry
-            .dispatch("alpha", &make_ectx(), &make_params("alpha"))
+            .dispatch("alpha", ctx.as_ref(), &info, &make_params("alpha"))
             .unwrap();
         assert_eq!(output.markers, vec!["alpha"]);
     }
@@ -998,25 +1005,14 @@ mod tests {
             }
         }
 
-        struct NoopCtx;
-        impl RunContext for NoopCtx {
-            fn injected_variables(&self) -> HashMap<&'static str, String> {
-                HashMap::new()
-            }
-            fn working_dir(&self) -> &std::path::Path {
-                std::path::Path::new("/tmp")
-            }
-            fn repo_path(&self) -> &std::path::Path {
-                std::path::Path::new("/tmp")
-            }
-        }
-
         let engine = FlowEngineBuilder::new()
             .script_env_provider(Box::new(FixedEnvProvider))
             .build()
             .unwrap();
 
-        let env = engine.script_env_provider.env(&NoopCtx, None);
+        let env = engine
+            .script_env_provider
+            .env(&crate::traits::run_context::NoopRunContext::default(), None);
         assert_eq!(env.get("CUSTOM_VAR").map(String::as_str), Some("42"));
     }
 
@@ -1259,8 +1255,9 @@ mod tests {
     // Builds a minimal ExecutionState with empty registries for run() tests.
     fn make_bare_state(wf_name: &str) -> crate::engine::ExecutionState {
         use crate::cancellation::CancellationToken;
-        use crate::engine::{ExecutionState, WorktreeContext};
+        use crate::engine::ExecutionState;
         use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use crate::traits::run_context::NoopRunContext;
         use crate::traits::script_env_provider::NoOpScriptEnvProvider;
         use crate::types::WorkflowExecConfig;
         let persistence = InMemoryWorkflowPersistence::new();
@@ -1271,14 +1268,9 @@ mod tests {
             script_env_provider: Arc::new(NoOpScriptEnvProvider),
             workflow_run_id: "test-run".to_string(),
             workflow_name: wf_name.to_string(),
-            worktree_ctx: WorktreeContext {
-                worktree_id: None,
-                working_dir: String::new(),
-                repo_path: String::new(),
-                ticket_id: None,
-                repo_id: None,
-                extra_plugin_dirs: vec![],
-            },
+            run_ctx: Arc::new(NoopRunContext::default())
+                as Arc<dyn crate::traits::run_context::RunContext>,
+            extra_plugin_dirs: vec![],
             model: None,
             exec_config: WorkflowExecConfig::default(),
             inputs: HashMap::new(),
@@ -1421,15 +1413,11 @@ mod tests {
         let run = persistence
             .create_run(NewRun {
                 workflow_name: wf_name.to_string(),
-                worktree_id: None,
-                ticket_id: None,
-                repo_id: None,
                 parent_run_id: String::new(),
                 dry_run: false,
                 trigger: "manual".to_string(),
                 definition_snapshot: None,
                 parent_workflow_run_id: None,
-                target_label: None,
             })
             .unwrap();
 
@@ -1668,7 +1656,8 @@ mod tests {
         }
         fn execute(
             &self,
-            _ectx: &ExecutionContext,
+            _ctx: &dyn RunContext,
+            _info: &StepInfo,
             _params: &ActionParams,
         ) -> Result<ActionOutput, EngineError> {
             Err(EngineError::Workflow("intentional failure".to_string()))
@@ -1837,7 +1826,8 @@ mod tests {
             }
             fn execute(
                 &self,
-                _ectx: &ExecutionContext,
+                _ctx: &dyn RunContext,
+                _info: &StepInfo,
                 _params: &ActionParams,
             ) -> Result<ActionOutput, EngineError> {
                 std::thread::sleep(std::time::Duration::from_millis(100));
@@ -1953,9 +1943,11 @@ mod tests {
         );
     }
 
-    // AC: resume() accumulates metrics from pre-completed steps into WorkflowResult totals.
+    // AC: resume() skips pre-completed steps and runs remaining steps.
+    // Metrics from pre-completed steps are sourced via agent_runs JOIN (conductor-side),
+    // not from the removed WorkflowRunStep metric fields.
     #[test]
-    fn resume_accumulates_metrics_from_completed_steps() {
+    fn resume_skips_pre_completed_steps() {
         use crate::persistence_memory::InMemoryWorkflowPersistence;
         use crate::status::WorkflowStepStatus;
         use crate::traits::persistence::{NewStep, StepUpdate, WorkflowPersistence};
@@ -1963,7 +1955,7 @@ mod tests {
         let persistence = Arc::new(InMemoryWorkflowPersistence::new());
         let run = make_test_run(&persistence);
 
-        // Pre-seed alpha as a completed step with non-zero metrics.
+        // Pre-seed alpha as a completed step.
         let step_id = persistence
             .insert_step(NewStep {
                 workflow_run_id: run.id.clone(),
@@ -1991,34 +1983,23 @@ mod tests {
                 },
             )
             .unwrap();
-        // Inject non-zero cost and turn metrics directly into the step record.
-        persistence.set_step_metrics_for_test(
-            &step_id,
-            Some(1.23),
-            Some(5),
-            Some(4000),
-            Some(100),
-            Some(200),
-        );
 
-        let (_, _, mut state) = make_counting_state(Arc::clone(&persistence), run.id);
+        let (alpha_count, beta_count, mut state) =
+            make_counting_state(Arc::clone(&persistence), run.id);
 
         let engine = FlowEngineBuilder::new().build().unwrap();
         let def = make_def("wf", vec![call_node("alpha"), call_node("beta")]);
-        let result = engine.resume(&def, &mut state).unwrap();
+        engine.resume(&def, &mut state).unwrap();
 
-        assert!(
-            (result.total_cost - 1.23).abs() < 1e-9,
-            "total_cost should include alpha's pre-completed cost; got {}",
-            result.total_cost
+        assert_eq!(
+            alpha_count.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "alpha was pre-completed and should be skipped"
         );
         assert_eq!(
-            result.total_turns, 5,
-            "total_turns should include alpha's pre-completed turns"
-        );
-        assert_eq!(
-            result.total_input_tokens, 100,
-            "total_input_tokens should include alpha's pre-completed tokens"
+            beta_count.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "beta should execute once"
         );
     }
 
@@ -2419,7 +2400,7 @@ mod tests {
     #[test]
     fn refresh_db_error_causes_lease_lost_abort() {
         use crate::persistence_memory::InMemoryWorkflowPersistence;
-        use crate::traits::action_executor::{ActionOutput, ActionParams, ExecutionContext};
+        use crate::traits::action_executor::{ActionOutput, ActionParams};
         use crate::traits::persistence::WorkflowPersistence;
         use std::sync::atomic::Ordering;
         use std::thread;
@@ -2427,6 +2408,7 @@ mod tests {
 
         struct BlockingExecutor {
             started: Arc<AtomicBool>,
+            shutdown: Arc<AtomicBool>,
         }
         impl ActionExecutor for BlockingExecutor {
             fn name(&self) -> &str {
@@ -2434,17 +2416,14 @@ mod tests {
             }
             fn execute(
                 &self,
-                ectx: &ExecutionContext,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &crate::traits::action_executor::StepInfo,
                 _: &ActionParams,
             ) -> Result<ActionOutput, EngineError> {
                 self.started.store(true, Ordering::SeqCst);
                 // Spin until the engine's shutdown flag is set by signal_lease_abort.
                 loop {
-                    if ectx
-                        .shutdown
-                        .as_ref()
-                        .is_some_and(|s| s.load(Ordering::Relaxed))
-                    {
+                    if self.shutdown.load(Ordering::Relaxed) {
                         return Ok(ActionOutput::default());
                     }
                     std::thread::sleep(Duration::from_millis(1));
@@ -2468,17 +2447,24 @@ mod tests {
             persistence_clone.set_fail_acquire_lease(true);
         });
 
+        // Pre-set the shutdown arc so the refresh thread's signal_lease_abort sets the
+        // same instance we hand to BlockingExecutor — FlowEngine::run() reuses it when
+        // exec_config.shutdown is already populated.
+        let shared_shutdown = Arc::new(AtomicBool::new(false));
+
         let mut m = HashMap::new();
         m.insert(
             "alpha".to_string(),
             Box::new(BlockingExecutor {
                 started: Arc::clone(&started),
+                shutdown: Arc::clone(&shared_shutdown),
             }) as Box<dyn crate::traits::action_executor::ActionExecutor>,
         );
         let mut state = make_bare_state("wf");
         state.persistence = Arc::clone(&persistence) as Arc<dyn WorkflowPersistence>;
         state.action_registry = Arc::new(ActionRegistry::new(m, None));
         state.workflow_run_id = run.id.clone();
+        state.exec_config.shutdown = Some(Arc::clone(&shared_shutdown));
         // Short refresh interval so the error is detected quickly.
         state.exec_config.lease_refresh_interval = Duration::from_millis(15);
 
@@ -2503,7 +2489,7 @@ mod tests {
     #[test]
     fn stale_generation_on_step_write_aborts_with_lease_lost() {
         use crate::persistence_memory::InMemoryWorkflowPersistence;
-        use crate::traits::action_executor::{ActionOutput, ActionParams, ExecutionContext};
+        use crate::traits::action_executor::{ActionOutput, ActionParams};
         use crate::traits::persistence::WorkflowPersistence;
         use std::sync::atomic::Ordering;
         use std::thread;
@@ -2522,7 +2508,8 @@ mod tests {
             }
             fn execute(
                 &self,
-                _ectx: &ExecutionContext,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &crate::traits::action_executor::StepInfo,
                 _: &ActionParams,
             ) -> Result<ActionOutput, EngineError> {
                 self.started.store(true, Ordering::SeqCst);

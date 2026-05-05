@@ -8,10 +8,9 @@ use std::time::Duration;
 use runkon_flow::cancellation_reason::CancellationReason;
 use runkon_flow::engine_error::EngineError;
 use runkon_flow::persistence_memory::InMemoryWorkflowPersistence;
-use runkon_flow::traits::action_executor::{
-    ActionExecutor, ActionOutput, ActionParams, ExecutionContext,
-};
+use runkon_flow::traits::action_executor::{ActionExecutor, ActionOutput, ActionParams, StepInfo};
 use runkon_flow::traits::persistence::{NewRun, WorkflowPersistence};
+use runkon_flow::traits::run_context::RunContext;
 use runkon_flow::types::WorkflowExecConfig;
 use runkon_flow::FlowEngineBuilder;
 
@@ -25,15 +24,11 @@ fn make_run(persistence: &Arc<InMemoryWorkflowPersistence>) -> String {
     persistence
         .create_run(NewRun {
             workflow_name: "wf".to_string(),
-            worktree_id: None,
-            ticket_id: None,
-            repo_id: None,
             parent_run_id: String::new(),
             dry_run: false,
             trigger: "test".to_string(),
             definition_snapshot: None,
             parent_workflow_run_id: None,
-            target_label: None,
         })
         .unwrap()
         .id
@@ -61,7 +56,8 @@ impl ActionExecutor for SleepExecutor {
 
     fn execute(
         &self,
-        _ectx: &ExecutionContext,
+        _ctx: &dyn RunContext,
+        _info: &StepInfo,
         _params: &ActionParams,
     ) -> Result<ActionOutput, EngineError> {
         std::thread::sleep(Duration::from_millis(self.sleep_ms));
@@ -91,7 +87,8 @@ impl ActionExecutor for CountingExecutor {
 
     fn execute(
         &self,
-        _ectx: &ExecutionContext,
+        _ctx: &dyn RunContext,
+        _info: &StepInfo,
         _params: &ActionParams,
     ) -> Result<ActionOutput, EngineError> {
         self.count.fetch_add(1, Ordering::SeqCst);
@@ -121,7 +118,8 @@ impl ActionExecutor for LeaseStealingExecutor {
 
     fn execute(
         &self,
-        _ectx: &ExecutionContext,
+        _ctx: &dyn RunContext,
+        _info: &StepInfo,
         _params: &ActionParams,
     ) -> Result<ActionOutput, EngineError> {
         std::thread::sleep(Duration::from_millis(self.steal_after_ms));

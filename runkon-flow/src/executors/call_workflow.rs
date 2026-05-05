@@ -40,14 +40,14 @@ pub fn execute_call_workflow(
     let step_key = node.workflow.clone();
     let mut last_error = String::new();
 
-    // Helper: persist success and bubble up child step results.
+    // Helper: persist success and bubble up child step results + contexts.
     // Used by both the resume-success path and the fresh-success path.
     let record_child_success = |state: &mut ExecutionState,
                                 step_id: &str,
                                 result: &crate::types::WorkflowResult,
                                 attempt: u32|
      -> Result<()> {
-        let ((markers, context), child_steps) =
+        let ((markers, context), child_steps, child_contexts) =
             fetch_child_completion_data(state.persistence.as_ref(), &result.workflow_run_id);
 
         let markers_json = crate::helpers::serialize_or_empty_array(
@@ -66,6 +66,14 @@ pub fn execute_call_workflow(
             None,
         )?;
 
+        // Bubble up child contexts BEFORE the call_workflow's own success
+        // entry so prior_contexts preserves chronological order: child steps
+        // happened first, then the call_workflow summary entry. Without this,
+        // parent-side agents downstream of the call_workflow have no access to
+        // child step `context_out` / `structured_output` (only markers bubble
+        // up via state.step_results below).
+        state.contexts.extend(child_contexts);
+
         record_step_success(
             state,
             step_key.clone(),
@@ -75,13 +83,39 @@ pub fn execute_call_workflow(
                     "Sub-workflow '{}' completed successfully",
                     node.workflow
                 )),
-                cost_usd: Some(result.total_cost),
-                num_turns: Some(result.total_turns),
-                duration_ms: Some(result.total_duration_ms),
-                input_tokens: Some(result.total_input_tokens),
-                output_tokens: Some(result.total_output_tokens),
-                cache_read_input_tokens: Some(result.total_cache_read_input_tokens),
-                cache_creation_input_tokens: Some(result.total_cache_creation_input_tokens),
+                metadata: {
+                    use crate::constants::metadata_keys;
+                    std::collections::HashMap::from([
+                        (
+                            metadata_keys::COST_USD.to_string(),
+                            result.total_cost.to_string(),
+                        ),
+                        (
+                            metadata_keys::NUM_TURNS.to_string(),
+                            result.total_turns.to_string(),
+                        ),
+                        (
+                            metadata_keys::DURATION_MS.to_string(),
+                            result.total_duration_ms.to_string(),
+                        ),
+                        (
+                            metadata_keys::INPUT_TOKENS.to_string(),
+                            result.total_input_tokens.to_string(),
+                        ),
+                        (
+                            metadata_keys::OUTPUT_TOKENS.to_string(),
+                            result.total_output_tokens.to_string(),
+                        ),
+                        (
+                            metadata_keys::CACHE_READ_INPUT_TOKENS.to_string(),
+                            result.total_cache_read_input_tokens.to_string(),
+                        ),
+                        (
+                            metadata_keys::CACHE_CREATION_INPUT_TOKENS.to_string(),
+                            result.total_cache_creation_input_tokens.to_string(),
+                        ),
+                    ])
+                },
                 markers,
                 context,
                 child_run_id: Some(result.workflow_run_id.clone()),

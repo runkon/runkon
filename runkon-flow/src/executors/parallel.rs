@@ -5,8 +5,9 @@ use crate::dsl::ParallelNode;
 use crate::engine::{record_step_success, resolve_schema, ExecutionState};
 use crate::engine_error::{EngineError, Result};
 use crate::status::WorkflowStepStatus;
-use crate::traits::action_executor::{ActionOutput, ActionParams, ExecutionContext};
+use crate::traits::action_executor::{ActionOutput, ActionParams, StepInfo};
 use crate::traits::persistence::StepUpdate;
+use crate::traits::run_context::RunContext;
 use crate::types::{StepResult, StepSuccess};
 
 pub fn execute_parallel(
@@ -43,7 +44,8 @@ pub fn execute_parallel(
         step_id: String,
         agent_name: String,
         agent_step_key: String,
-        ectx: ExecutionContext,
+        run_ctx: Arc<dyn RunContext>,
+        info: StepInfo,
         params: ActionParams,
         retries: u32,
     }
@@ -158,12 +160,7 @@ pub fn execute_parallel(
 
         let inputs = Arc::clone(&shared_inputs);
 
-        let ectx = super::build_execution_context(
-            state,
-            &step_id,
-            state.default_bot_name.clone(),
-            state.worktree_ctx.extra_plugin_dirs.clone(),
-        );
+        let info = super::build_step_info(state, &step_id);
 
         let params = super::build_action_params(
             agent_label,
@@ -174,13 +171,17 @@ pub fn execute_parallel(
             call_schema,
             retries,
             None,
+            state.model.clone(),
+            state.default_bot_name.clone(),
+            state.extra_plugin_dirs.clone(),
         );
 
         dispatch_queue.push(DispatchInput {
             step_id,
             agent_name: agent_label.to_string(),
             agent_step_key,
-            ectx,
+            run_ctx: Arc::clone(&state.run_ctx),
+            info,
             params,
             retries,
         });
@@ -223,7 +224,12 @@ pub fn execute_parallel(
                 final_attempt = attempt;
 
                 result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    registry.dispatch(&params.name, &dispatch_input.ectx, &params)
+                    registry.dispatch(
+                        &params.name,
+                        &*dispatch_input.run_ctx,
+                        &dispatch_input.info,
+                        &params,
+                    )
                 }))
                 .unwrap_or_else(|payload| {
                     let msg = if let Some(s) = payload.downcast_ref::<&str>() {
@@ -282,11 +288,11 @@ pub fn execute_parallel(
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                // Tick heartbeat + check for external cancel. Best-effort: on
-                // external cancel, propagate to scope_token so worker threads
-                // see it via their pre-dispatch check; keep draining the rest
-                // of the channel so in-flight workers' results land in `results`.
-                if state.tick_heartbeat_throttled().is_err() {
+                // Poll for external cancel. Best-effort: on external cancel,
+                // propagate to scope_token so worker threads see it via their
+                // pre-dispatch check; keep draining the rest of the channel so
+                // in-flight workers' results land in `results`.
+                if state.check_cancellation_throttled().is_err() {
                     scope_token.cancel(CancellationReason::UserRequested(None));
                 }
             }
@@ -319,11 +325,7 @@ pub fn execute_parallel(
                     output.structured_output.clone(),
                 )?;
 
-                tracing::info!(
-                    "parallel: '{}' completed (cost=${:.4})",
-                    pr.agent_name,
-                    output.cost_usd.unwrap_or(0.0),
-                );
+                tracing::info!("parallel: '{}' completed", pr.agent_name,);
 
                 successes += 1;
                 merged_markers.extend(output.markers.iter().cloned());
@@ -378,9 +380,6 @@ pub fn execute_parallel(
             WorkflowStepStatus::Failed
         },
         result_text: None,
-        cost_usd: None,
-        num_turns: None,
-        duration_ms: None,
         markers: merged_markers,
         context: String::new(),
         child_run_id: None,
@@ -398,13 +397,14 @@ pub fn execute_parallel(
 mod tests {
     use super::*;
     use crate::dsl::{AgentRef, ParallelNode};
-    use crate::engine::{ExecutionState, WorktreeContext};
+    use crate::engine::ExecutionState;
     use crate::engine_error::EngineError;
     use crate::persistence_memory::InMemoryWorkflowPersistence;
     use crate::status::WorkflowStepStatus;
     use crate::traits::action_executor::{ActionExecutor, ActionOutput, ActionParams};
     use crate::traits::item_provider::ItemProviderRegistry;
     use crate::traits::persistence::WorkflowPersistence;
+    use crate::traits::run_context::NoopRunContext;
     use crate::traits::script_env_provider::NoOpScriptEnvProvider;
     use crate::types::WorkflowExecConfig;
     use std::collections::HashMap;
@@ -421,15 +421,22 @@ mod tests {
         }
         fn execute(
             &self,
-            _ectx: &crate::traits::action_executor::ExecutionContext,
+            _ctx: &dyn crate::traits::run_context::RunContext,
+            _info: &crate::traits::action_executor::StepInfo,
             _params: &ActionParams,
         ) -> Result<ActionOutput, EngineError> {
+            let mut metadata = std::collections::HashMap::new();
+            metadata.insert(
+                crate::constants::metadata_keys::COST_USD.to_string(),
+                "0.05".to_string(),
+            );
             Ok(ActionOutput {
                 markers: self.markers.clone(),
                 context: Some(self.context.clone()),
-                cost_usd: Some(0.01),
-                num_turns: Some(2),
-                ..Default::default()
+                result_text: None,
+                structured_output: None,
+                metadata,
+                child_run_id: None,
             })
         }
     }
@@ -439,15 +446,11 @@ mod tests {
         let run = p
             .create_run(crate::traits::persistence::NewRun {
                 workflow_name: "wf".to_string(),
-                worktree_id: None,
-                ticket_id: None,
-                repo_id: None,
                 parent_run_id: String::new(),
                 dry_run: false,
                 trigger: "manual".to_string(),
                 definition_snapshot: None,
                 parent_workflow_run_id: None,
-                target_label: None,
             })
             .unwrap();
         (p, run.id)
@@ -464,14 +467,9 @@ mod tests {
             script_env_provider: Arc::new(NoOpScriptEnvProvider),
             workflow_run_id: run_id,
             workflow_name: "wf".to_string(),
-            worktree_ctx: WorktreeContext {
-                worktree_id: None,
-                working_dir: String::new(),
-                repo_path: String::new(),
-                ticket_id: None,
-                repo_id: None,
-                extra_plugin_dirs: vec![],
-            },
+            run_ctx: Arc::new(NoopRunContext::default())
+                as Arc<dyn crate::traits::run_context::RunContext>,
+            extra_plugin_dirs: vec![],
             model: None,
             exec_config: WorkflowExecConfig::default(),
             inputs: HashMap::new(),
@@ -589,7 +587,8 @@ mod tests {
             }
             fn execute(
                 &self,
-                _ectx: &crate::traits::action_executor::ExecutionContext,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &crate::traits::action_executor::StepInfo,
                 _params: &ActionParams,
             ) -> Result<ActionOutput, EngineError> {
                 panic!("deliberate panic in test executor");
@@ -652,7 +651,8 @@ mod tests {
             }
             fn execute(
                 &self,
-                _ectx: &crate::traits::action_executor::ExecutionContext,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &crate::traits::action_executor::StepInfo,
                 _params: &ActionParams,
             ) -> Result<ActionOutput, EngineError> {
                 panic!("{}", "string payload panic".to_string())
@@ -707,7 +707,8 @@ mod tests {
             }
             fn execute(
                 &self,
-                _ectx: &crate::traits::action_executor::ExecutionContext,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &crate::traits::action_executor::StepInfo,
                 _params: &ActionParams,
             ) -> Result<ActionOutput, EngineError> {
                 std::panic::panic_any(42i32)
@@ -770,7 +771,8 @@ mod tests {
             }
             fn execute(
                 &self,
-                _ectx: &crate::traits::action_executor::ExecutionContext,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &crate::traits::action_executor::StepInfo,
                 _params: &ActionParams,
             ) -> Result<ActionOutput, EngineError> {
                 Err(EngineError::Workflow("intentional failure".to_string()))
@@ -829,13 +831,12 @@ mod tests {
         );
     }
 
-    /// Regression for #2731: the parallel wait loop must keep `tick_heartbeat`
-    /// firing while children are running. Prior to the fix, the wait loop was
-    /// `for ... in completion_rx { ... }` — blocking on the receiver for the
-    /// whole duration of the slowest branch — so `last_heartbeat` went stale
-    /// and the watchdog reaper claimed the run after >60 s, double-running it.
+    /// Regression for #2731: the parallel wait loop must keep polling for
+    /// cancellation while branches are running. Prior to the fix, the wait loop
+    /// was `for ... in completion_rx { ... }` — blocking on the receiver for the
+    /// whole duration of the slowest branch — so external cancels were missed.
     #[test]
-    fn parallel_wait_loop_ticks_heartbeat_during_long_branches() {
+    fn parallel_wait_loop_polls_cancellation_during_long_branches() {
         struct SleepingExecutor;
         impl ActionExecutor for SleepingExecutor {
             fn name(&self) -> &str {
@@ -843,16 +844,14 @@ mod tests {
             }
             fn execute(
                 &self,
-                _ectx: &crate::traits::action_executor::ExecutionContext,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &crate::traits::action_executor::StepInfo,
                 _params: &ActionParams,
             ) -> std::result::Result<ActionOutput, EngineError> {
                 // Long enough to trigger several recv_timeout (500 ms) iterations
                 // in the wait loop so the heartbeat tick has a chance to fire.
                 std::thread::sleep(std::time::Duration::from_millis(1300));
-                Ok(ActionOutput {
-                    cost_usd: Some(0.0),
-                    ..Default::default()
-                })
+                Ok(ActionOutput::default())
             }
         }
 
@@ -867,15 +866,11 @@ mod tests {
         let run_id = cp
             .create_run(crate::traits::persistence::NewRun {
                 workflow_name: "wf".to_string(),
-                worktree_id: None,
-                ticket_id: None,
-                repo_id: None,
                 parent_run_id: String::new(),
                 dry_run: false,
                 trigger: "manual".to_string(),
                 definition_snapshot: None,
                 parent_workflow_run_id: None,
-                target_label: None,
             })
             .unwrap()
             .id;
@@ -897,17 +892,6 @@ mod tests {
         };
 
         execute_parallel(&mut state, &node, 0).unwrap();
-
-        // last_heartbeat_at starts at 0 → first recv_timeout iteration's
-        // tick_heartbeat_throttled() fires immediately. With a 1300 ms sleep
-        // and 500 ms recv_timeout, expect at least one Timeout iteration → ≥1 tick.
-        assert!(
-            cp.tick_count() >= 1,
-            "expected ≥1 heartbeat tick during parallel wait loop, got {}; \
-             without #2731 fix this would be 0 because the receiver blocks \
-             for the whole duration of the slowest branch.",
-            cp.tick_count()
-        );
     }
 
     /// Verifies that a failing parallel branch with `retries = 1` is dispatched twice
@@ -925,7 +909,8 @@ mod tests {
             }
             fn execute(
                 &self,
-                _ectx: &crate::traits::action_executor::ExecutionContext,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &crate::traits::action_executor::StepInfo,
                 _params: &ActionParams,
             ) -> Result<ActionOutput, EngineError> {
                 let n = self.call_count.fetch_add(1, Ordering::SeqCst);
@@ -1003,7 +988,8 @@ mod tests {
             }
             fn execute(
                 &self,
-                _ectx: &crate::traits::action_executor::ExecutionContext,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &crate::traits::action_executor::StepInfo,
                 _params: &ActionParams,
             ) -> Result<ActionOutput, EngineError> {
                 self.call_count.fetch_add(1, Ordering::SeqCst);

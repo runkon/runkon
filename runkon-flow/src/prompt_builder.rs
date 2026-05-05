@@ -75,22 +75,17 @@ pub fn build_variable_map(state: &ExecutionState) -> HashMap<String, String> {
     // prevent user shadowing of engine values, but the engine only re-injects
     // 4 of the 11 names (`ticket_id`, `repo_id`, `repo_path`, `workflow_run_id`)
     // explicitly below — so the other 7 ended up empty in the variable map.
-    // See #2636. Those 4 still get re-asserted below from `worktree_ctx`,
+    // See #2636. Those keys get re-asserted below from `run_ctx`,
     // which preserves the "engine wins on conflict" property for the keys
     // the engine actually owns.
     for (k, v) in &state.inputs {
         vars.insert(k.clone(), v.clone());
     }
 
-    // Engine-injected variables from the worktree context
-    let wt = &state.worktree_ctx;
-    if let Some(ref tid) = wt.ticket_id {
-        vars.insert("ticket_id".into(), tid.clone());
+    // Engine-injected variables from the run context
+    for (k, v) in state.run_ctx.injected_variables() {
+        vars.insert(k.to_string(), v);
     }
-    if let Some(ref rid) = wt.repo_id {
-        vars.insert("repo_id".into(), rid.clone());
-    }
-    vars.insert("repo_path".into(), wt.repo_path.clone());
     vars.insert("workflow_run_id".into(), state.workflow_run_id.clone());
 
     let prior_context = state
@@ -405,8 +400,19 @@ mod tests {
             cp as Arc<dyn crate::traits::persistence::WorkflowPersistence>,
             "run-real".into(),
         );
-        state.worktree_ctx.repo_path = "/repo/real".into();
-        state.worktree_ctx.ticket_id = Some("TICK-real".into());
+        {
+            let mut vars = std::collections::HashMap::new();
+            vars.insert(
+                crate::traits::run_context::keys::REPO_PATH,
+                "/repo/real".to_string(),
+            );
+            vars.insert(
+                crate::traits::run_context::keys::TICKET_ID,
+                "TICK-real".to_string(),
+            );
+            state.run_ctx = Arc::new(crate::traits::run_context::NoopRunContext::with_vars(vars))
+                as Arc<dyn crate::traits::run_context::RunContext>;
+        }
 
         // Script tries to override every engine-injected key it can find.
         // Prefer ENGINE_INJECTED_KEYS as the source of truth so this test
@@ -517,7 +523,7 @@ mod tests {
     /// (`ticket_url` etc., set by conductor-core's `inject_ticket_variables`)
     /// must reach the variable map. Previously the loop filtered every key in
     /// `ENGINE_INJECTED_KEYS` and only 4 of the 11 names were re-injected from
-    /// `worktree_ctx`, so the other 7 ended up empty.
+    /// `run_ctx`, so the other 7 ended up empty.
     #[test]
     fn build_variable_map_injects_ticket_url_and_friends_from_state_inputs() {
         use crate::test_helpers::CountingPersistence;
@@ -582,9 +588,9 @@ mod tests {
         );
     }
 
-    /// `worktree_ctx` values still win for the 4 keys the engine injects
+    /// `run_ctx` values still win for the 4 keys the engine injects
     /// explicitly — protects against stale `state.inputs` values diverging
-    /// from the actual run's worktree (e.g. on resume).
+    /// from the actual run's context (e.g. on resume).
     #[test]
     fn build_variable_map_worktree_ctx_overrides_state_inputs_for_owned_keys() {
         use crate::test_helpers::CountingPersistence;
@@ -595,10 +601,24 @@ mod tests {
             cp as Arc<dyn crate::traits::persistence::WorkflowPersistence>,
             "run-real".into(),
         );
-        // worktree_ctx is the source of truth for these.
-        state.worktree_ctx.ticket_id = Some("TICK-real".into());
-        state.worktree_ctx.repo_id = Some("repo-real".into());
-        state.worktree_ctx.repo_path = "/real".into();
+        // run_ctx is the source of truth for these.
+        {
+            let mut vars = std::collections::HashMap::new();
+            vars.insert(
+                crate::traits::run_context::keys::TICKET_ID,
+                "TICK-real".to_string(),
+            );
+            vars.insert(
+                crate::traits::run_context::keys::REPO_ID,
+                "repo-real".to_string(),
+            );
+            vars.insert(
+                crate::traits::run_context::keys::REPO_PATH,
+                "/real".to_string(),
+            );
+            state.run_ctx = Arc::new(crate::traits::run_context::NoopRunContext::with_vars(vars))
+                as Arc<dyn crate::traits::run_context::RunContext>;
+        }
         // state.inputs has stale values that would otherwise win after the
         // filter was removed in #2636.
         state.inputs.insert("ticket_id".into(), "TICK-stale".into());

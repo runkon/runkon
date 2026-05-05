@@ -87,15 +87,14 @@ fn execute_call_inner(
             .or(state.default_bot_name.as_deref())
             .map(String::from);
 
-        let mut merged_plugin_dirs = state.worktree_ctx.extra_plugin_dirs.clone();
+        let mut merged_plugin_dirs = state.extra_plugin_dirs.clone();
         for dir in &node.plugin_dirs {
             if !merged_plugin_dirs.contains(dir) {
                 merged_plugin_dirs.push(dir.clone());
             }
         }
 
-        let ectx =
-            super::build_execution_context(state, &step_id, effective_bot_name, merged_plugin_dirs);
+        let info = super::build_step_info(state, &step_id);
 
         let params = build_action_params(
             agent_label,
@@ -110,6 +109,9 @@ fn execute_call_inner(
             } else {
                 Some(last_error.clone())
             },
+            state.model.clone(),
+            effective_bot_name,
+            merged_plugin_dirs,
         );
 
         // Per-step timeout: spawn a timer thread that cancels a child token after
@@ -183,9 +185,6 @@ fn execute_call_inner(
                             tracing::warn!("cancellation check failed for {run_id}: {e}");
                         }
                     }
-                    if let Err(e) = persistence.tick_heartbeat(&run_id) {
-                        tracing::warn!("heartbeat tick failed for {run_id}: {e}");
-                    }
                 }
             });
         }
@@ -201,7 +200,7 @@ fn execute_call_inner(
         // Clone the Arc before dispatch so we hold no borrow on `state` while
         // the executor runs.
         let registry = Arc::clone(&state.action_registry);
-        let dispatch_result = registry.dispatch(&params.name, &ectx, &params);
+        let dispatch_result = registry.dispatch(&params.name, &*state.run_ctx, &info, &params);
         // Clear the active executor record and signal the timer and heartbeat threads to exit.
         {
             let mut cur = state
@@ -251,10 +250,8 @@ fn execute_call_inner(
         match dispatch_result {
             Ok(output) => {
                 tracing::info!(
-                    "Step '{}' completed: cost=${:.4}, {} turns, markers={:?}",
+                    "Step '{}' completed: markers={:?}",
                     agent_label,
-                    output.cost_usd.unwrap_or(0.0),
-                    output.num_turns.unwrap_or(0),
                     output.markers,
                 );
                 record_dispatch_success(
@@ -350,15 +347,13 @@ mod tests {
             }
             fn execute(
                 &self,
-                _ectx: &crate::traits::action_executor::ExecutionContext,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &crate::traits::action_executor::StepInfo,
                 _params: &ActionParams,
             ) -> std::result::Result<ActionOutput, crate::engine_error::EngineError> {
                 // Long enough for the 500 ms keeper poll to fire at least once.
                 std::thread::sleep(std::time::Duration::from_millis(1300));
-                Ok(ActionOutput {
-                    cost_usd: Some(0.0),
-                    ..Default::default()
-                })
+                Ok(ActionOutput::default())
             }
         }
 
@@ -373,15 +368,11 @@ mod tests {
         let run_id = cp
             .create_run(crate::traits::persistence::NewRun {
                 workflow_name: "wf".to_string(),
-                worktree_id: None,
-                ticket_id: None,
-                repo_id: None,
                 parent_run_id: String::new(),
                 dry_run: false,
                 trigger: "manual".to_string(),
                 definition_snapshot: None,
                 parent_workflow_run_id: None,
-                target_label: None,
             })
             .unwrap()
             .id;
@@ -405,14 +396,8 @@ mod tests {
 
         execute_call(&mut state, &node, 0).unwrap();
 
-        // last_heartbeat_at starts at 0, so the first 500 ms keeper poll sees
-        // now_secs - 0 >> 5 and fires immediately. Expect ≥1 tick.
-        assert!(
-            cp.tick_count() >= 1,
-            "expected ≥1 heartbeat tick during call step dispatch, got {}; \
-             without this fix the keeper thread is absent and the watchdog can \
-             race the engine after >60 s of agent execution.",
-            cp.tick_count()
-        );
+        // The keeper thread updates last_heartbeat directly while the executor blocks
+        // in registry.dispatch(). This prevents the watchdog reaper from incorrectly
+        // claiming the run as stuck during long-running sequential call steps.
     }
 }

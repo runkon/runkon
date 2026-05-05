@@ -43,7 +43,6 @@ pub enum BlockedOn {
 pub struct WorkflowRun {
     pub id: String,
     pub workflow_name: String,
-    pub worktree_id: Option<String>,
     pub parent_run_id: String,
     pub status: WorkflowRunStatus,
     pub dry_run: bool,
@@ -54,11 +53,7 @@ pub struct WorkflowRun {
     pub error: Option<String>,
     pub definition_snapshot: Option<String>,
     pub inputs: HashMap<String, String>,
-    pub ticket_id: Option<String>,
-    pub repo_id: Option<String>,
     pub parent_workflow_run_id: Option<String>,
-    pub target_label: Option<String>,
-    pub default_bot_name: Option<String>,
     pub iteration: i64,
     pub blocked_on: Option<BlockedOn>,
     pub workflow_title: Option<String>,
@@ -139,16 +134,6 @@ pub struct WorkflowRunStep {
     pub output_file: Option<String>,
     pub gate_options: Option<String>,
     pub gate_selections: Option<String>,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub cache_read_input_tokens: Option<i64>,
-    pub cache_creation_input_tokens: Option<i64>,
-    /// Cost of the child agent run, populated from the persistence layer.
-    pub cost_usd: Option<f64>,
-    /// Turn count from the child agent run, populated from the persistence layer.
-    pub num_turns: Option<i64>,
-    /// Wall-clock duration of the child agent run in ms, populated from the persistence layer.
-    pub duration_ms: Option<i64>,
     pub fan_out_total: Option<i64>,
     pub fan_out_completed: i64,
     pub fan_out_failed: i64,
@@ -243,13 +228,8 @@ pub struct WorkflowResult {
 pub struct StepSuccess {
     pub step_name: String,
     pub result_text: Option<String>,
-    pub cost_usd: Option<f64>,
-    pub num_turns: Option<i64>,
-    pub duration_ms: Option<i64>,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub cache_read_input_tokens: Option<i64>,
-    pub cache_creation_input_tokens: Option<i64>,
+    /// Executor-provided metric metadata (keys from `runkon_flow::constants::metadata_keys`).
+    pub metadata: HashMap<String, String>,
     pub markers: Vec<String>,
     pub context: String,
     pub child_run_id: Option<String>,
@@ -270,13 +250,7 @@ impl StepSuccess {
         Self {
             step_name,
             result_text: output.result_text.clone(),
-            cost_usd: output.cost_usd,
-            num_turns: output.num_turns,
-            duration_ms: output.duration_ms,
-            input_tokens: output.input_tokens,
-            output_tokens: output.output_tokens,
-            cache_read_input_tokens: output.cache_read_input_tokens,
-            cache_creation_input_tokens: output.cache_creation_input_tokens,
+            metadata: output.metadata.clone(),
             markers: output.markers.clone(),
             context,
             child_run_id: output.child_run_id.clone(),
@@ -303,7 +277,7 @@ impl StepSuccess {
             structured_output: step.structured_output.clone(),
             output_file: step.output_file.clone(),
             iteration,
-            ..Self::default()
+            metadata: HashMap::new(),
         }
     }
 }
@@ -314,9 +288,6 @@ pub struct StepResult {
     pub step_name: String,
     pub status: WorkflowStepStatus,
     pub result_text: Option<String>,
-    pub cost_usd: Option<f64>,
-    pub num_turns: Option<i64>,
-    pub duration_ms: Option<i64>,
     pub markers: Vec<String>,
     pub context: String,
     pub child_run_id: Option<String>,
@@ -344,17 +315,9 @@ impl StepResult {
         }
     }
 
-    /// Create a completed StepResult without per-step metrics.
-    ///
-    /// Convenience wrapper for the common case where cost/turns/duration are
-    /// not available (e.g. restored from a prior run or bubble-up from a child
-    /// workflow). Metric fields on `success` are ignored.
+    /// Create a completed StepResult without per-step metrics (for resume paths).
     pub fn completed_without_metrics(success: &StepSuccess) -> Self {
-        let mut s = Self::completed(success);
-        s.cost_usd = None;
-        s.num_turns = None;
-        s.duration_ms = None;
-        s
+        Self::completed(success)
     }
 
     /// Create a completed StepResult from a [`StepSuccess`] description.
@@ -363,9 +326,6 @@ impl StepResult {
             step_name: success.step_name.clone(),
             status: WorkflowStepStatus::Completed,
             result_text: success.result_text.clone(),
-            cost_usd: success.cost_usd,
-            num_turns: success.num_turns,
-            duration_ms: success.duration_ms,
             markers: success.markers.clone(),
             context: success.context.clone(),
             child_run_id: success.child_run_id.clone(),
@@ -415,10 +375,15 @@ pub struct FanOutItemRow {
     pub status: String,
     pub dispatched_at: Option<String>,
     pub completed_at: Option<String>,
+    /// Per-item context map, merged into child workflow inputs as `item.<key>`.
+    #[serde(default)]
+    pub context: std::collections::HashMap<String, String>,
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::{StepResult, StepSuccess, WorkflowRunStep};
     use crate::status::WorkflowStepStatus;
 
@@ -447,9 +412,6 @@ mod tests {
         let success = StepSuccess {
             step_name: "review".to_string(),
             result_text: Some("looks good".to_string()),
-            cost_usd: Some(0.05),
-            num_turns: Some(3),
-            duration_ms: Some(1200),
             markers: vec!["approved".to_string()],
             context: "ctx".to_string(),
             child_run_id: Some("child-1".to_string()),
@@ -461,9 +423,6 @@ mod tests {
         assert_eq!(r.step_name, "review");
         assert_eq!(r.status, WorkflowStepStatus::Completed);
         assert_eq!(r.result_text, Some("looks good".to_string()));
-        assert_eq!(r.cost_usd, Some(0.05));
-        assert_eq!(r.num_turns, Some(3));
-        assert_eq!(r.duration_ms, Some(1200));
         assert_eq!(r.markers, vec!["approved"]);
         assert_eq!(r.context, "ctx");
         assert_eq!(r.child_run_id, Some("child-1".to_string()));
@@ -472,13 +431,10 @@ mod tests {
     }
 
     #[test]
-    fn completed_without_metrics_ignores_metric_fields() {
+    fn completed_without_metrics_delegates_to_completed() {
         let success = StepSuccess {
             step_name: "restore".to_string(),
             result_text: Some("ok".to_string()),
-            cost_usd: Some(0.10),
-            num_turns: Some(5),
-            duration_ms: Some(3000),
             markers: vec!["done".to_string()],
             context: "restored".to_string(),
             ..StepSuccess::default()
@@ -487,9 +443,6 @@ mod tests {
         assert_eq!(r.step_name, "restore");
         assert_eq!(r.status, WorkflowStepStatus::Completed);
         assert_eq!(r.result_text, Some("ok".to_string()));
-        assert!(r.cost_usd.is_none(), "cost_usd should be None");
-        assert!(r.num_turns.is_none(), "num_turns should be None");
-        assert!(r.duration_ms.is_none(), "duration_ms should be None");
         assert_eq!(r.markers, vec!["done"]);
         assert_eq!(r.context, "restored");
     }
@@ -503,17 +456,9 @@ mod tests {
             markers: vec!["m1".to_string(), "m2".to_string()],
             structured_output: Some(r#"{"k":"v"}"#.to_string()),
             output_file: Some("/tmp/out".to_string()),
-            // Fields not mapped into ContextEntry should be distinct so we
-            // would catch an accidental mapping.
             result_text: Some("rt".to_string()),
-            cost_usd: Some(1.23),
-            num_turns: Some(42),
-            duration_ms: Some(999),
-            input_tokens: Some(100),
-            output_tokens: Some(200),
-            cache_read_input_tokens: Some(50),
-            cache_creation_input_tokens: Some(25),
             child_run_id: Some("child-1".to_string()),
+            ..StepSuccess::default()
         };
         let entry: super::ContextEntry = success.into();
         assert_eq!(entry.step, "my-step", "step should come from step_name");
@@ -551,29 +496,31 @@ mod tests {
         );
         assert_eq!(success.output_file, Some("/tmp/out".to_string()));
         assert_eq!(success.iteration, 7);
-        // Metric fields should default to None
-        assert!(success.cost_usd.is_none());
-        assert!(success.num_turns.is_none());
-        assert!(success.duration_ms.is_none());
-        assert!(success.input_tokens.is_none());
-        assert!(success.output_tokens.is_none());
-        assert!(success.cache_read_input_tokens.is_none());
-        assert!(success.cache_creation_input_tokens.is_none());
+        assert!(success.metadata.is_empty());
     }
 
     #[test]
     fn from_action_output_maps_all_fields() {
+        use crate::constants::metadata_keys;
+        let mut metadata = HashMap::new();
+        metadata.insert(metadata_keys::COST_USD.to_string(), "0.05".to_string());
+        metadata.insert(metadata_keys::NUM_TURNS.to_string(), "3".to_string());
+        metadata.insert(metadata_keys::DURATION_MS.to_string(), "1200".to_string());
+        metadata.insert(metadata_keys::INPUT_TOKENS.to_string(), "100".to_string());
+        metadata.insert(metadata_keys::OUTPUT_TOKENS.to_string(), "200".to_string());
+        metadata.insert(
+            metadata_keys::CACHE_READ_INPUT_TOKENS.to_string(),
+            "50".to_string(),
+        );
+        metadata.insert(
+            metadata_keys::CACHE_CREATION_INPUT_TOKENS.to_string(),
+            "25".to_string(),
+        );
         let output = crate::traits::action_executor::ActionOutput {
             markers: vec!["m1".to_string()],
             context: Some("ctx".to_string()),
             result_text: Some("rt".to_string()),
-            cost_usd: Some(0.05),
-            num_turns: Some(3),
-            duration_ms: Some(1200),
-            input_tokens: Some(100),
-            output_tokens: Some(200),
-            cache_read_input_tokens: Some(50),
-            cache_creation_input_tokens: Some(25),
+            metadata: metadata.clone(),
             child_run_id: Some("child-1".to_string()),
             structured_output: Some(r#"{"ok":true}"#.to_string()),
         };
@@ -586,13 +533,18 @@ mod tests {
         );
         assert_eq!(success.step_name, "review");
         assert_eq!(success.result_text, Some("rt".to_string()));
-        assert_eq!(success.cost_usd, Some(0.05));
-        assert_eq!(success.num_turns, Some(3));
-        assert_eq!(success.duration_ms, Some(1200));
-        assert_eq!(success.input_tokens, Some(100));
-        assert_eq!(success.output_tokens, Some(200));
-        assert_eq!(success.cache_read_input_tokens, Some(50));
-        assert_eq!(success.cache_creation_input_tokens, Some(25));
+        assert_eq!(
+            success.metadata.get(metadata_keys::COST_USD),
+            Some(&"0.05".to_string())
+        );
+        assert_eq!(
+            success.metadata.get(metadata_keys::NUM_TURNS),
+            Some(&"3".to_string())
+        );
+        assert_eq!(
+            success.metadata.get(metadata_keys::DURATION_MS),
+            Some(&"1200".to_string())
+        );
         assert_eq!(success.markers, vec!["m1"]);
         assert_eq!(success.context, "ctx");
         assert_eq!(success.child_run_id, Some("child-1".to_string()));

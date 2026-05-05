@@ -6,10 +6,9 @@ pub const STEP_ROLE_AGENT: &str = "agent";
 /// Column list for `workflow_runs` SELECT queries (used by row mappers in both
 /// conductor-core and runkon-flow). Single source of truth — importers use
 /// `runkon_flow::constants::RUN_COLUMNS` or `pub use` re-export.
-pub const RUN_COLUMNS: &str =
-    "id, workflow_name, worktree_id, parent_run_id, status, dry_run, trigger, \
-     started_at, ended_at, result_summary, definition_snapshot, inputs, ticket_id, repo_id, \
-     parent_workflow_run_id, target_label, default_bot_name, iteration, blocked_on, \
+pub const RUN_COLUMNS: &str = "id, workflow_name, parent_run_id, status, dry_run, trigger, \
+     started_at, ended_at, result_summary, definition_snapshot, inputs, \
+     parent_workflow_run_id, iteration, blocked_on, \
      total_input_tokens, total_output_tokens, total_cache_read_input_tokens, \
      total_cache_creation_input_tokens, total_turns, total_cost_usd, total_duration_ms, model, \
      error, dismissed, workflow_title, owner_token, lease_until, generation";
@@ -26,9 +25,20 @@ pub const STEP_COLUMNS: &str =
      iteration, parallel_group_id, context_out, markers_out, retry_count, \
      gate_type, gate_prompt, gate_timeout, gate_approved_by, gate_approved_at, gate_feedback, \
      structured_output, output_file, gate_options, gate_selections, \
-     fan_out_total, fan_out_completed, fan_out_failed, fan_out_skipped, step_error, \
-     input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens, \
-     cost_usd, num_turns, duration_ms";
+     fan_out_total, fan_out_completed, fan_out_failed, fan_out_skipped, step_error";
+
+/// Canonical metadata key strings for the seven Claude-SDK metric fields.
+/// Writers (`ClaudeAgentExecutor`) and readers (`record_step_success`) must
+/// use these constants so key names never diverge silently.
+pub mod metadata_keys {
+    pub const COST_USD: &str = "cost_usd";
+    pub const NUM_TURNS: &str = "num_turns";
+    pub const DURATION_MS: &str = "duration_ms";
+    pub const INPUT_TOKENS: &str = "input_tokens";
+    pub const OUTPUT_TOKENS: &str = "output_tokens";
+    pub const CACHE_READ_INPUT_TOKENS: &str = "cache_read_input_tokens";
+    pub const CACHE_CREATION_INPUT_TOKENS: &str = "cache_creation_input_tokens";
+}
 
 pub const FLOW_OUTPUT_INSTRUCTION: &str = r#"
 When you have finished your work, output the following block exactly as the

@@ -1,10 +1,9 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::engine_error::EngineError;
-use crate::output_schema::OutputSchema;
+use crate::traits::run_context::RunContext;
 
 /// Trait for pluggable action execution.
 pub trait ActionExecutor: Send + Sync {
@@ -12,7 +11,8 @@ pub trait ActionExecutor: Send + Sync {
     fn name(&self) -> &str;
     fn execute(
         &self,
-        ectx: &ExecutionContext,
+        ctx: &dyn RunContext,
+        info: &StepInfo,
         params: &ActionParams,
     ) -> Result<ActionOutput, EngineError>;
     #[allow(dead_code)]
@@ -20,6 +20,12 @@ pub trait ActionExecutor: Send + Sync {
         let _ = execution_id;
         Ok(())
     }
+}
+
+/// Engine-populated per-call info for a workflow step.
+pub struct StepInfo {
+    pub step_id: String,
+    pub step_timeout: Duration,
 }
 
 /// Per-invocation inputs passed to an `ActionExecutor`.
@@ -33,7 +39,10 @@ pub struct ActionParams {
     pub dry_run: bool,
     #[allow(dead_code)]
     pub gate_feedback: Option<String>,
-    pub schema: Option<OutputSchema>,
+    pub extensions: crate::extensions::Extensions,
+    pub model: Option<String>,
+    pub bot_name: Option<String>,
+    pub plugin_dirs: Vec<String>,
 }
 
 /// Output produced by an `ActionExecutor` on success.
@@ -43,42 +52,10 @@ pub struct ActionOutput {
     pub context: Option<String>,
     pub result_text: Option<String>,
     pub structured_output: Option<String>,
-    pub cost_usd: Option<f64>,
-    pub num_turns: Option<i64>,
-    pub duration_ms: Option<i64>,
-    pub input_tokens: Option<i64>,
-    pub output_tokens: Option<i64>,
-    pub cache_read_input_tokens: Option<i64>,
-    pub cache_creation_input_tokens: Option<i64>,
+    /// Executor-specific key/value metadata. Claude executors populate the seven
+    /// metric keys defined in `runkon_flow::constants::metadata_keys`.
+    pub metadata: HashMap<String, String>,
     pub child_run_id: Option<String>,
-}
-
-/// Conductor-specific execution context passed to every `ActionExecutor::execute` call.
-pub struct ExecutionContext {
-    /// Pre-created `agent_runs` row ID for this invocation.
-    pub run_id: String,
-    /// Absolute path to the worktree root.
-    pub working_dir: PathBuf,
-    /// Absolute path to the repository root.
-    pub repo_path: String,
-    /// Per-step timeout (from `WorkflowExecConfig`).
-    pub step_timeout: Duration,
-    /// Shutdown signal shared with the workflow engine.
-    pub shutdown: Option<Arc<AtomicBool>>,
-    /// Resolved model override for this step.
-    pub model: Option<String>,
-    /// Bot identity name for this step, if any.
-    pub bot_name: Option<String>,
-    /// Extra plugin directories to search for agent definitions.
-    pub plugin_dirs: Vec<String>,
-    /// Name of the parent workflow (used for workflow-local agent resolution).
-    pub workflow_name: String,
-    /// Worktree ID for this invocation, if any.
-    pub worktree_id: Option<String>,
-    /// Parent workflow run ID.
-    pub parent_run_id: String,
-    /// Step ID for this invocation.
-    pub step_id: String,
 }
 
 /// Holds named and fallback `ActionExecutor` implementations.
@@ -125,11 +102,12 @@ impl ActionRegistry {
     pub fn dispatch(
         &self,
         name: &str,
-        ectx: &ExecutionContext,
+        ctx: &dyn RunContext,
+        info: &StepInfo,
         params: &ActionParams,
     ) -> Result<ActionOutput, EngineError> {
         match self.find_executor(name) {
-            Some(e) => e.execute(ectx, params),
+            Some(e) => e.execute(ctx, info, params),
             None => Err(EngineError::Workflow(format!(
                 "no registered ActionExecutor for '{}' and no fallback configured",
                 name
@@ -150,7 +128,7 @@ impl ActionRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::{make_ectx, make_params};
+    use crate::test_helpers::{make_params, make_run_ctx, make_step_info};
 
     struct NoopExecutor;
 
@@ -160,7 +138,8 @@ mod tests {
         }
         fn execute(
             &self,
-            _ectx: &ExecutionContext,
+            _ctx: &dyn RunContext,
+            _info: &StepInfo,
             _params: &ActionParams,
         ) -> Result<ActionOutput, EngineError> {
             Ok(ActionOutput {
@@ -182,9 +161,12 @@ mod tests {
             .collect(),
             None,
         );
-        let ectx = make_ectx();
+        let ctx = make_run_ctx();
+        let info = make_step_info();
         let params = make_params("noop");
-        let output = registry.dispatch("noop", &ectx, &params).unwrap();
+        let output = registry
+            .dispatch("noop", ctx.as_ref(), &info, &params)
+            .unwrap();
         assert_eq!(output.markers, vec!["done"]);
     }
 
@@ -194,18 +176,24 @@ mod tests {
             std::collections::HashMap::new(),
             Some(Box::new(NoopExecutor)),
         );
-        let ectx = make_ectx();
+        let ctx = make_run_ctx();
+        let info = make_step_info();
         let params = make_params("anything");
-        let output = registry.dispatch("anything", &ectx, &params).unwrap();
+        let output = registry
+            .dispatch("anything", ctx.as_ref(), &info, &params)
+            .unwrap();
         assert_eq!(output.markers, vec!["done"]);
     }
 
     #[test]
     fn dispatch_error_when_no_executor_or_fallback() {
         let registry = ActionRegistry::new(std::collections::HashMap::new(), None);
-        let ectx = make_ectx();
+        let ctx = make_run_ctx();
+        let info = make_step_info();
         let params = make_params("missing");
-        let err = registry.dispatch("missing", &ectx, &params).unwrap_err();
+        let err = registry
+            .dispatch("missing", ctx.as_ref(), &info, &params)
+            .unwrap_err();
         assert!(
             err.to_string()
                 .contains("no registered ActionExecutor for 'missing'"),

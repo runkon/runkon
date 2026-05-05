@@ -440,6 +440,160 @@ fn test_foreach_persistence_error_propagates() {
 // Test 10: ordered execution with failing dependencies() propagates as Err
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Test 11: item context fields are injected as item.* keys into child inputs
+// ---------------------------------------------------------------------------
+
+/// Item provider that returns items with a pre-populated context HashMap.
+/// Stores items as (item_type, item_id, item_ref, context) tuples so that
+/// `FanOutItem` — which does not implement `Clone` — can be freshly created on each call.
+struct ContextItemProvider {
+    name: String,
+    items: Vec<(String, String, String, HashMap<String, String>)>,
+}
+
+impl runkon_flow::traits::item_provider::ItemProvider for ContextItemProvider {
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn items(
+        &self,
+        _ctx: &dyn runkon_flow::traits::run_context::RunContext,
+        _info: &runkon_flow::traits::item_provider::ProviderInfo,
+        _scope: Option<&runkon_flow::dsl::ForeachScope>,
+        _filter: &HashMap<String, String>,
+    ) -> Result<
+        Vec<runkon_flow::traits::item_provider::FanOutItem>,
+        runkon_flow::engine_error::EngineError,
+    > {
+        use runkon_flow::traits::item_provider::FanOutItem;
+        Ok(self
+            .items
+            .iter()
+            .map(|(t, i, r, ctx)| FanOutItem {
+                item_type: t.clone(),
+                item_id: i.clone(),
+                item_ref: r.clone(),
+                context: ctx.clone(),
+            })
+            .collect())
+    }
+}
+
+/// Child runner that records the full `inputs` map for each call.
+struct InputCapturingRunner {
+    captured: std::sync::Mutex<Vec<HashMap<String, String>>>,
+}
+
+impl InputCapturingRunner {
+    fn new() -> Self {
+        Self {
+            captured: std::sync::Mutex::new(vec![]),
+        }
+    }
+
+    fn captured_inputs(&self) -> Vec<HashMap<String, String>> {
+        self.captured.lock().unwrap().clone()
+    }
+}
+
+impl runkon_flow::engine::ChildWorkflowRunner for InputCapturingRunner {
+    fn execute_child(
+        &self,
+        workflow_name: &str,
+        _parent_ctx: &runkon_flow::engine::ChildWorkflowContext,
+        params: runkon_flow::engine::ChildWorkflowInput,
+    ) -> runkon_flow::engine_error::Result<runkon_flow::types::WorkflowResult> {
+        self.captured.lock().unwrap().push(params.inputs.clone());
+        let item_id = params.inputs.get("item.id").cloned().unwrap_or_default();
+        Ok(runkon_flow::types::WorkflowResult {
+            workflow_run_id: format!("mock-run-{item_id}"),
+            worktree_id: None,
+            workflow_name: workflow_name.to_string(),
+            all_succeeded: true,
+            total_cost: 0.0,
+            total_turns: 0,
+            total_duration_ms: 0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cache_read_input_tokens: 0,
+            total_cache_creation_input_tokens: 0,
+        })
+    }
+
+    fn resume_child(
+        &self,
+        _workflow_run_id: &str,
+        _model: Option<&str>,
+        _parent_ctx: &runkon_flow::engine::ChildWorkflowContext,
+    ) -> runkon_flow::engine_error::Result<runkon_flow::types::WorkflowResult> {
+        unimplemented!()
+    }
+
+    fn find_resumable_child(
+        &self,
+        _parent_run_id: &str,
+        _workflow_name: &str,
+    ) -> runkon_flow::engine_error::Result<Option<runkon_flow::types::WorkflowRun>> {
+        Ok(None)
+    }
+}
+
+#[test]
+fn test_foreach_item_context_injected_into_child_inputs() {
+    use runkon_flow::ItemProviderRegistry;
+
+    let mut ctx = HashMap::new();
+    ctx.insert("title".to_string(), "Fix the bug".to_string());
+    ctx.insert("state".to_string(), "open".to_string());
+
+    let provider = ContextItemProvider {
+        name: "tickets".to_string(),
+        items: vec![(
+            "ticket".to_string(),
+            "t1".to_string(),
+            "T-1".to_string(),
+            ctx,
+        )],
+    };
+
+    let runner = Arc::new(InputCapturingRunner::new());
+    let persistence = make_persistence();
+
+    let mut state = common::make_state("ctx-inject-test", Arc::clone(&persistence), HashMap::new());
+    state.child_runner =
+        Some(Arc::clone(&runner) as Arc<dyn runkon_flow::engine::ChildWorkflowRunner>);
+    state.exec_config.fail_fast = false;
+    let mut registry = ItemProviderRegistry::new();
+    registry.register(provider);
+    state.registry = Arc::new(registry);
+
+    let node = foreach_node("fan-out", "tickets", "child-wf", 1, OnChildFail::Halt);
+    let result = execute_foreach(&mut state, &node, 0);
+    assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+
+    let inputs_list = runner.captured_inputs();
+    assert_eq!(inputs_list.len(), 1, "one child run expected");
+    let inputs = &inputs_list[0];
+
+    // Struct-level fields are always present.
+    assert_eq!(inputs.get("item.id").map(String::as_str), Some("t1"));
+    assert_eq!(inputs.get("item.ref").map(String::as_str), Some("T-1"));
+
+    // Context keys are injected as item.* variables.
+    assert_eq!(
+        inputs.get("item.title").map(String::as_str),
+        Some("Fix the bug"),
+        "item.title should be injected from context"
+    );
+    assert_eq!(
+        inputs.get("item.state").map(String::as_str),
+        Some("open"),
+        "item.state should be injected from context"
+    );
+}
+
 #[test]
 fn test_foreach_ordered_dependencies_error_propagates() {
     let persistence = make_persistence();
