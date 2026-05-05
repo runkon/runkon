@@ -1,42 +1,9 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use super::parser::parse_workflow_file;
 use super::types::{collect_workflow_refs, WorkflowDef, WorkflowWarning};
-
-// ---------------------------------------------------------------------------
-// Inlined text_util helpers
-// ---------------------------------------------------------------------------
-
-fn filename_is_safe(filename: &str) -> bool {
-    !filename.contains('/')
-        && !filename.contains('\\')
-        && !filename.contains("..")
-        && !filename.is_empty()
-}
-
-fn resolve_conductor_subdir_for_file(
-    worktree_path: &str,
-    repo_path: &str,
-    subdir: &str,
-    filename: &str,
-) -> Option<PathBuf> {
-    if !filename_is_safe(filename) {
-        return None;
-    }
-    if !worktree_path.is_empty() {
-        let dir = PathBuf::from(worktree_path).join(".conductor").join(subdir);
-        if dir.join(filename).exists() {
-            return Some(dir);
-        }
-    }
-    let dir = PathBuf::from(repo_path).join(".conductor").join(subdir);
-    if dir.join(filename).exists() {
-        return Some(dir);
-    }
-    None
-}
 
 // ---------------------------------------------------------------------------
 // Public API / loaders
@@ -55,31 +22,21 @@ fn deduplicate_warnings(warnings: Vec<WorkflowWarning>) -> HashMap<String, Workf
     map
 }
 
-/// Load all workflow definitions from `.conductor/workflows/*.wf`.
+/// Load all workflow definitions from the given directories.
+///
+/// Each directory is scanned for `*.wf` files. Later-listed directories
+/// override earlier ones on name collision (highest-priority last), so
+/// callers should pass lower-priority directories first
+/// (e.g. `[repo_dir, worktree_dir]` to give the worktree priority).
 pub fn load_workflow_defs(
-    worktree_path: &str,
-    repo_path: &str,
+    workflow_dirs: &[&Path],
 ) -> Result<(Vec<WorkflowDef>, Vec<WorkflowWarning>), String> {
     let mut map: HashMap<String, WorkflowDef> = HashMap::new();
     let mut warnings_map: HashMap<String, WorkflowWarning> = HashMap::new();
 
-    if !repo_path.is_empty() {
-        let repo_dir = Path::new(repo_path).join(".conductor").join("workflows");
-        if repo_dir.is_dir() {
-            let (defs, warnings) = scan_wf_dir(&repo_dir)?;
-            for def in defs {
-                map.insert(def.name.clone(), def);
-            }
-            warnings_map.extend(deduplicate_warnings(warnings));
-        }
-    }
-
-    if !worktree_path.is_empty() && worktree_path != repo_path {
-        let wt_dir = Path::new(worktree_path)
-            .join(".conductor")
-            .join("workflows");
-        if wt_dir.is_dir() {
-            let (defs, warnings) = scan_wf_dir(&wt_dir)?;
+    for dir in workflow_dirs {
+        if dir.is_dir() {
+            let (defs, warnings) = scan_wf_dir(dir)?;
             for def in defs {
                 map.insert(def.name.clone(), def);
             }
@@ -162,17 +119,20 @@ pub fn validate_workflow_name(name: &str) -> Result<(), String> {
 }
 
 /// Load a single workflow definition by name.
-pub fn load_workflow_by_name(
-    worktree_path: &str,
-    repo_path: &str,
-    name: &str,
-) -> Result<WorkflowDef, String> {
+///
+/// Searches `workflow_dirs` in reverse order (highest-priority first), returning
+/// the first directory that contains `<name>.wf`.
+pub fn load_workflow_by_name(workflow_dirs: &[&Path], name: &str) -> Result<WorkflowDef, String> {
     validate_workflow_name(name)?;
 
     let filename = format!("{name}.wf");
-    let workflows_dir =
-        resolve_conductor_subdir_for_file(worktree_path, repo_path, "workflows", &filename)
-            .ok_or_else(|| format!("Workflow '{name}' not found in .conductor/workflows/"))?;
+    let workflows_dir = workflow_dirs
+        .iter()
+        .rev()
+        .find(|d| d.join(&filename).exists())
+        .ok_or_else(|| {
+            format!("Workflow '{name}' not found in any of the configured workflow directories")
+        })?;
 
     parse_workflow_file(&workflows_dir.join(&filename))
 }

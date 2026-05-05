@@ -877,7 +877,7 @@ mod tests {
             &self,
             _ctx: &dyn RunContext,
             _info: &ProviderInfo,
-            _scope: Option<&crate::dsl::ForeachScope>,
+            _scope: Option<&dyn std::any::Any>,
             _filter: &HashMap<String, String>,
         ) -> Result<Vec<FanOutItem>, EngineError> {
             Ok(vec![])

@@ -4,6 +4,7 @@ use std::fmt;
 use super::types::{
     Condition, GateType, InputType, OnChildFail, ScriptNode, WorkflowDef, WorkflowNode,
 };
+use crate::traits::item_provider::ItemProviderRegistry;
 
 // ---------------------------------------------------------------------------
 // Semantic validation
@@ -38,7 +39,19 @@ impl ValidationReport {
     }
 }
 
-pub fn validate_workflow_semantics<F>(def: &WorkflowDef, loader: &F) -> ValidationReport
+/// Context supplied by the host to parameterise semantic validation.
+pub struct ValidationContext<'a> {
+    /// Registry of registered item providers — used to validate `foreach` nodes.
+    pub registry: &'a ItemProviderRegistry,
+    /// Valid target labels for workflows. Empty slice means target validation is skipped.
+    pub valid_targets: &'a [&'a str],
+}
+
+pub fn validate_workflow_semantics<F>(
+    def: &WorkflowDef,
+    loader: &F,
+    ctx: &ValidationContext<'_>,
+) -> ValidationReport
 where
     F: Fn(&str) -> std::result::Result<WorkflowDef, String>,
 {
@@ -60,6 +73,7 @@ where
         &mut warnings,
         loader,
         &bool_inputs,
+        ctx,
     );
 
     let mut always_produced = produced.clone();
@@ -70,24 +84,26 @@ where
         &mut warnings,
         loader,
         &bool_inputs,
+        ctx,
     );
 
-    const VALID_TARGETS: &[&str] = &["worktree", "ticket", "repo", "pr", "workflow_run"];
-    for target in &def.targets {
-        if !VALID_TARGETS.contains(&target.as_str()) {
-            errors.push(ValidationError {
-                message: format!(
-                    "Unknown target '{}' in workflow '{}'. Valid targets: {}",
-                    target,
-                    def.name,
-                    VALID_TARGETS.join(", ")
-                ),
-                hint: Some(format!(
-                    "Change '{}' to one of: {}",
-                    target,
-                    VALID_TARGETS.join(", ")
-                )),
-            });
+    if !ctx.valid_targets.is_empty() {
+        for target in &def.targets {
+            if !ctx.valid_targets.contains(&target.as_str()) {
+                errors.push(ValidationError {
+                    message: format!(
+                        "Unknown target '{}' in workflow '{}'. Valid targets: {}",
+                        target,
+                        def.name,
+                        ctx.valid_targets.join(", ")
+                    ),
+                    hint: Some(format!(
+                        "Change '{}' to one of: {}",
+                        target,
+                        ctx.valid_targets.join(", ")
+                    )),
+                });
+            }
         }
     }
 
@@ -101,6 +117,7 @@ fn validate_nodes<F>(
     warnings: &mut Vec<String>,
     loader: &F,
     bool_inputs: &HashSet<String>,
+    ctx: &ValidationContext<'_>,
 ) where
     F: Fn(&str) -> std::result::Result<WorkflowDef, String>,
 {
@@ -159,6 +176,7 @@ fn validate_nodes<F>(
                     warnings,
                     loader,
                     bool_inputs,
+                    ctx,
                 );
             }
             WorkflowNode::Unless(n) => {
@@ -170,6 +188,7 @@ fn validate_nodes<F>(
                     warnings,
                     loader,
                     bool_inputs,
+                    ctx,
                 );
             }
             WorkflowNode::While(n) => {
@@ -182,15 +201,32 @@ fn validate_nodes<F>(
                     warnings,
                     loader,
                     bool_inputs,
+                    ctx,
                 );
                 produced.extend(body_produced);
             }
             WorkflowNode::DoWhile(n) => {
-                validate_nodes(&n.body, produced, errors, warnings, loader, bool_inputs);
+                validate_nodes(
+                    &n.body,
+                    produced,
+                    errors,
+                    warnings,
+                    loader,
+                    bool_inputs,
+                    ctx,
+                );
                 check_condition_reachable(&n.step, produced, errors);
             }
             WorkflowNode::Do(n) => {
-                validate_nodes(&n.body, produced, errors, warnings, loader, bool_inputs);
+                validate_nodes(
+                    &n.body,
+                    produced,
+                    errors,
+                    warnings,
+                    loader,
+                    bool_inputs,
+                    ctx,
+                );
             }
             WorkflowNode::Gate(n) => {
                 if n.gate_type == GateType::QualityGate && n.quality_gate.is_none() {
@@ -221,10 +257,18 @@ fn validate_nodes<F>(
                 produced.insert(n.name.clone());
             }
             WorkflowNode::Always(n) => {
-                validate_nodes(&n.body, produced, errors, warnings, loader, bool_inputs);
+                validate_nodes(
+                    &n.body,
+                    produced,
+                    errors,
+                    warnings,
+                    loader,
+                    bool_inputs,
+                    ctx,
+                );
             }
             WorkflowNode::ForEach(n) => {
-                validate_foreach_node(n, errors, warnings, loader);
+                validate_foreach_node(n, errors, warnings, loader, ctx);
                 produced.insert(format!("foreach:{}", n.name));
             }
         }
@@ -236,6 +280,7 @@ fn validate_foreach_node<F>(
     errors: &mut Vec<ValidationError>,
     warnings: &mut Vec<String>,
     loader: &F,
+    ctx: &ValidationContext<'_>,
 ) where
     F: Fn(&str) -> std::result::Result<WorkflowDef, String>,
 {
@@ -268,39 +313,55 @@ fn validate_foreach_node<F>(
         }
     }
 
-    if n.scope.is_none() {
-        match n.over.as_str() {
-            "tickets" => {
-                errors.push(ValidationError {
-                    message: format!(
-                        "foreach '{}': `scope` is required when over = tickets",
-                        n.name
-                    ),
-                    hint: Some(
-                        "Add `scope = { ticket_id = \"...\" }`, `scope = { label = \"...\" }`, or `scope = { unlabeled = true }`"
-                            .to_string(),
-                    ),
-                });
-            }
-            "worktrees" => {
-                warnings.push(format!(
-                    "foreach '{}': no scope specified; base_branch will be inferred from the execution context worktree at runtime",
-                    n.name
-                ));
-            }
-            _ => {}
+    let provider = match ctx.registry.get(&n.over) {
+        Some(p) => p,
+        None => {
+            errors.push(ValidationError {
+                message: format!(
+                    "foreach '{}': unknown provider '{}' — no ItemProvider registered for this name",
+                    n.name, n.over
+                ),
+                hint: None,
+            });
+            return;
         }
+    };
+
+    // Scope validation
+    if let Err(e) = provider.parse_scope(n.scope.as_ref()) {
+        errors.push(ValidationError {
+            message: format!("foreach '{}': {e}", n.name),
+            hint: None,
+        });
     }
 
-    if n.ordered && n.over != "tickets" && n.over != "worktrees" {
+    // Scope warnings (e.g. worktrees with no scope falls back to context)
+    for w in provider.scope_warnings(n.scope.as_ref()) {
+        warnings.push(format!("foreach '{}': {w}", n.name));
+    }
+
+    // Ordered check
+    if n.ordered && !provider.supports_ordered() {
+        let ordered_names: Vec<String> = ctx
+            .registry
+            .iter()
+            .filter(|p| p.supports_ordered())
+            .map(|p| p.name().to_string())
+            .collect();
+        let hint = if ordered_names.is_empty() {
+            "Remove `ordered = true`".to_string()
+        } else {
+            format!(
+                "Remove `ordered = true` or change `over` to one of: {}",
+                ordered_names.join(", ")
+            )
+        };
         errors.push(ValidationError {
             message: format!(
-                "foreach '{}': ordered = true is only valid when over = tickets or over = worktrees",
-                n.name
+                "foreach '{}': ordered = true is not supported by provider '{}'",
+                n.name, n.over
             ),
-            hint: Some(
-                "Remove `ordered = true` or change `over` to `tickets` or `worktrees`".to_string(),
-            ),
+            hint: Some(hint),
         });
     }
 
@@ -316,11 +377,12 @@ fn validate_foreach_node<F>(
         });
     }
 
-    if n.over == "workflow_runs" && n.filter.is_empty() {
+    // Filter requirements
+    if provider.requires_filter() && n.filter.is_empty() {
         errors.push(ValidationError {
             message: format!(
-                "foreach '{}': `filter` is required when over = workflow_runs",
-                n.name
+                "foreach '{}': `filter` is required when over = {}",
+                n.name, n.over
             ),
             hint: Some(
                 "Add `filter = { status = \"failed\" }` (or another terminal status)".to_string(),
@@ -328,41 +390,13 @@ fn validate_foreach_node<F>(
         });
     }
 
-    if n.over == "workflow_runs" {
-        if let Some(status) = n.filter.get("status") {
-            if status == "running" || status == "paused" {
-                errors.push(ValidationError {
-                    message: format!(
-                        "foreach '{}': filter.status = '{}' is not a terminal status — \
-                         only completed, failed, or cancelled are allowed",
-                        n.name, status
-                    ),
-                    hint: Some(
-                        "Change to `status = \"failed\"` or `status = \"completed\"`".to_string(),
-                    ),
-                });
-            }
+    if !n.filter.is_empty() {
+        if let Err(e) = provider.validate_filter(&n.filter) {
+            errors.push(ValidationError {
+                message: format!("foreach '{}': {e}", n.name),
+                hint: None,
+            });
         }
-    }
-
-    if n.over == "repos" && !n.filter.is_empty() {
-        errors.push(ValidationError {
-            message: format!(
-                "foreach '{}': filter has no effect when over = repos (not implemented in v1)",
-                n.name
-            ),
-            hint: Some("Remove the `filter` block for repo fan-outs".to_string()),
-        });
-    }
-
-    if n.over == "worktrees" && !n.filter.is_empty() {
-        errors.push(ValidationError {
-            message: format!(
-                "foreach '{}': filter has no effect when over = worktrees (use scope = {{ base_branch = \"...\" }} instead)",
-                n.name
-            ),
-            hint: Some("Remove the `filter` block for worktree fan-outs".to_string()),
-        });
     }
 }
 
@@ -412,6 +446,7 @@ fn check_bool_input_declared(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_conditional_branch<F>(
     condition: &Condition,
     body: &[WorkflowNode],
@@ -420,6 +455,7 @@ fn validate_conditional_branch<F>(
     warnings: &mut Vec<String>,
     loader: &F,
     bool_inputs: &HashSet<String>,
+    ctx: &ValidationContext<'_>,
 ) where
     F: Fn(&str) -> std::result::Result<WorkflowDef, String>,
 {
@@ -439,6 +475,7 @@ fn validate_conditional_branch<F>(
         warnings,
         loader,
         bool_inputs,
+        ctx,
     );
     produced.extend(branch_produced);
 }
@@ -548,8 +585,9 @@ fn collect_script_nodes(nodes: &[WorkflowNode]) -> Vec<&ScriptNode> {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_script_steps, validate_workflow_semantics};
+    use super::{validate_script_steps, validate_workflow_semantics, ValidationContext};
     use crate::dsl::parse_workflow_str;
+    use crate::traits::item_provider::ItemProviderRegistry;
 
     fn no_loader(name: &str) -> Result<crate::dsl::WorkflowDef, String> {
         Err(format!("sub-workflow '{}' not found", name))
@@ -563,6 +601,15 @@ mod tests {
         Err(format!("not found: {run}"))
     }
 
+    const CONDUCTOR_TARGETS: &[&str] = &["worktree", "ticket", "repo", "pr", "workflow_run"];
+
+    fn empty_ctx(registry: &ItemProviderRegistry) -> ValidationContext<'_> {
+        ValidationContext {
+            registry,
+            valid_targets: CONDUCTOR_TARGETS,
+        }
+    }
+
     // ---- validate_workflow_semantics ----
 
     #[test]
@@ -573,7 +620,9 @@ workflow simple {
 }
 "#;
         let def = parse_workflow_str(src, "test.wf").unwrap();
-        let report = validate_workflow_semantics(&def, &no_loader);
+        let registry = ItemProviderRegistry::new();
+        let ctx = empty_ctx(&registry);
+        let report = validate_workflow_semantics(&def, &no_loader, &ctx);
         assert!(
             report.is_ok(),
             "expected no errors, got: {:?}",
@@ -591,7 +640,9 @@ workflow wf {
 }
 "#;
         let def = parse_workflow_str(src, "test.wf").unwrap();
-        let report = validate_workflow_semantics(&def, &no_loader);
+        let registry = ItemProviderRegistry::new();
+        let ctx = empty_ctx(&registry);
+        let report = validate_workflow_semantics(&def, &no_loader, &ctx);
         assert!(
             !report.is_ok(),
             "expected validation error for unknown step reference"
@@ -617,7 +668,9 @@ workflow wf {
 }
 "#;
         let def = parse_workflow_str(src, "test.wf").unwrap();
-        let report = validate_workflow_semantics(&def, &no_loader);
+        let registry = ItemProviderRegistry::new();
+        let ctx = empty_ctx(&registry);
+        let report = validate_workflow_semantics(&def, &no_loader, &ctx);
         assert!(
             report.is_ok(),
             "step1 is produced before the if, so no error expected; got: {:?}",
@@ -635,7 +688,9 @@ workflow wf {
 }
 "#;
         let def = parse_workflow_str(src, "test.wf").unwrap();
-        let report = validate_workflow_semantics(&def, &no_loader);
+        let registry = ItemProviderRegistry::new();
+        let ctx = empty_ctx(&registry);
+        let report = validate_workflow_semantics(&def, &no_loader, &ctx);
         assert!(
             !report.is_ok(),
             "undeclared bool input should be flagged as an error"
@@ -663,7 +718,9 @@ workflow wf {
 }
 "#;
         let def = parse_workflow_str(src, "test.wf").unwrap();
-        let report = validate_workflow_semantics(&def, &no_loader);
+        let registry = ItemProviderRegistry::new();
+        let ctx = empty_ctx(&registry);
+        let report = validate_workflow_semantics(&def, &no_loader, &ctx);
         assert!(
             report.is_ok(),
             "declared boolean input in if condition should be valid; got: {:?}",
@@ -682,7 +739,9 @@ workflow wf {
 }
 "#;
         let def = parse_workflow_str(src, "test.wf").unwrap();
-        let report = validate_workflow_semantics(&def, &no_loader);
+        let registry = ItemProviderRegistry::new();
+        let ctx = empty_ctx(&registry);
+        let report = validate_workflow_semantics(&def, &no_loader, &ctx);
         assert!(!report.is_ok(), "invalid target should produce an error");
         assert!(
             report
@@ -701,7 +760,9 @@ workflow empty {
 }
 "#;
         let def = parse_workflow_str(src, "test.wf").unwrap();
-        let report = validate_workflow_semantics(&def, &no_loader);
+        let registry = ItemProviderRegistry::new();
+        let ctx = empty_ctx(&registry);
+        let report = validate_workflow_semantics(&def, &no_loader, &ctx);
         assert!(
             report.is_ok(),
             "empty workflow body should be valid; got: {:?}",

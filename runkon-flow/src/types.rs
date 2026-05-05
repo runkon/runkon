@@ -206,7 +206,6 @@ impl Default for WorkflowExecConfig {
 #[derive(Debug, Clone)]
 pub struct WorkflowResult {
     pub workflow_run_id: String,
-    pub worktree_id: Option<String>,
     pub workflow_name: String,
     pub all_succeeded: bool,
     pub total_cost: f64,

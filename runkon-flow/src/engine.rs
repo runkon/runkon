@@ -65,10 +65,10 @@ pub struct ExecutionState {
     pub resume_ctx: Option<ResumeContext>,
     pub default_bot_name: Option<String>,
     pub triggered_by_hook: bool,
-    /// Schema resolver callback — (working_dir, repo_path, schema_name) → OutputSchema
+    /// Schema resolver callback — (schema_name) → OutputSchema.
+    /// The host closes over working_dir and repo_path at construction time.
     #[allow(clippy::type_complexity)]
-    pub schema_resolver:
-        Option<Arc<dyn Fn(&str, &str, &str) -> Result<OutputSchema> + Send + Sync>>,
+    pub schema_resolver: Option<Arc<dyn Fn(&str) -> Result<OutputSchema> + Send + Sync>>,
     /// Runner for child workflows (call workflow nodes).
     pub child_runner: Option<Arc<dyn ChildWorkflowRunner>>,
     pub last_heartbeat_at: Arc<AtomicI64>,
@@ -315,14 +315,7 @@ impl ExecutionState {
 /// Resolve a schema by name using the schema_resolver callback.
 pub fn resolve_schema(state: &ExecutionState, name: &str) -> Result<OutputSchema> {
     match &state.schema_resolver {
-        Some(resolver) => {
-            let working_dir = state.run_ctx.working_dir_str();
-            let repo_path = state
-                .run_ctx
-                .get(crate::traits::run_context::keys::REPO_PATH)
-                .unwrap_or_default();
-            resolver(&working_dir, &repo_path, name)
-        }
+        Some(resolver) => resolver(name),
         None => Err(EngineError::Workflow(format!(
             "No schema resolver configured — cannot load schema '{name}'"
         ))),
@@ -336,24 +329,6 @@ pub fn resolve_schema(state: &ExecutionState, name: &str) -> Result<OutputSchema
 pub fn emit_event(state: &ExecutionState, event: EngineEvent) {
     crate::events::emit_to_sinks(&state.workflow_run_id, event, &state.event_sinks);
 }
-
-/// Input keys that the workflow engine injects automatically from the run context.
-///
-/// These keys are populated from the run context at execution time; callers
-/// should treat them as read-only and avoid defining workflow inputs with these names.
-pub const ENGINE_INJECTED_KEYS: &[&str] = &[
-    "ticket_id",
-    "ticket_source_id",
-    "ticket_source_type",
-    "ticket_title",
-    "ticket_body",
-    "ticket_url",
-    "ticket_raw_json",
-    "repo_id",
-    "repo_path",
-    "repo_name",
-    "workflow_run_id",
-];
 
 /// Extract completed step keys from a slice of step records.
 pub fn completed_keys_from_steps(steps: &[WorkflowRunStep]) -> HashSet<StepKey> {
@@ -518,9 +493,6 @@ pub fn run_workflow_engine(
 
     Ok(WorkflowResult {
         workflow_run_id: wf_run_id,
-        worktree_id: state
-            .run_ctx
-            .get(crate::traits::run_context::keys::WORKTREE_ID),
         workflow_name: workflow.name.clone(),
         all_succeeded: state.all_succeeded,
         total_cost: state.total_cost,
@@ -1103,22 +1075,10 @@ mod tests {
             workflow_name: "wf".to_string(),
             run_ctx: {
                 let mut vars = std::collections::HashMap::new();
-                vars.insert(
-                    crate::traits::run_context::keys::WORKTREE_ID,
-                    "wt".to_string(),
-                );
-                vars.insert(
-                    crate::traits::run_context::keys::REPO_PATH,
-                    "/repo".to_string(),
-                );
-                vars.insert(
-                    crate::traits::run_context::keys::TICKET_ID,
-                    "TICK-1".to_string(),
-                );
-                vars.insert(
-                    crate::traits::run_context::keys::REPO_ID,
-                    "repo-1".to_string(),
-                );
+                vars.insert("worktree_id", "wt".to_string());
+                vars.insert("repo_path", "/repo".to_string());
+                vars.insert("ticket_id", "TICK-1".to_string());
+                vars.insert("repo_id", "repo-1".to_string());
                 Arc::new(
                     crate::traits::run_context::NoopRunContext::with_vars(vars)
                         .with_working_dir("/tmp"),
@@ -1261,22 +1221,10 @@ mod tests {
             workflow_name: "wf-projection".to_string(),
             run_ctx: {
                 let mut vars = std::collections::HashMap::new();
-                vars.insert(
-                    crate::traits::run_context::keys::WORKTREE_ID,
-                    "wt-9".to_string(),
-                );
-                vars.insert(
-                    crate::traits::run_context::keys::REPO_PATH,
-                    "/repo/proj".to_string(),
-                );
-                vars.insert(
-                    crate::traits::run_context::keys::TICKET_ID,
-                    "TICK-42".to_string(),
-                );
-                vars.insert(
-                    crate::traits::run_context::keys::REPO_ID,
-                    "repo-7".to_string(),
-                );
+                vars.insert("worktree_id", "wt-9".to_string());
+                vars.insert("repo_path", "/repo/proj".to_string());
+                vars.insert("ticket_id", "TICK-42".to_string());
+                vars.insert("repo_id", "repo-7".to_string());
                 Arc::new(
                     crate::traits::run_context::NoopRunContext::with_vars(vars)
                         .with_working_dir("/tmp/proj"),
@@ -1320,15 +1268,11 @@ mod tests {
         let ctx = parent.child_workflow_context();
 
         // All fields project verbatim.
-        use crate::traits::run_context::keys;
-        assert_eq!(ctx.run_ctx.get(keys::WORKTREE_ID).as_deref(), Some("wt-9"));
+        assert_eq!(ctx.run_ctx.get("worktree_id").as_deref(), Some("wt-9"));
         assert_eq!(ctx.run_ctx.working_dir_str(), "/tmp/proj");
-        assert_eq!(
-            ctx.run_ctx.get(keys::REPO_PATH).as_deref(),
-            Some("/repo/proj")
-        );
-        assert_eq!(ctx.run_ctx.get(keys::TICKET_ID).as_deref(), Some("TICK-42"));
-        assert_eq!(ctx.run_ctx.get(keys::REPO_ID).as_deref(), Some("repo-7"));
+        assert_eq!(ctx.run_ctx.get("repo_path").as_deref(), Some("/repo/proj"));
+        assert_eq!(ctx.run_ctx.get("ticket_id").as_deref(), Some("TICK-42"));
+        assert_eq!(ctx.run_ctx.get("repo_id").as_deref(), Some("repo-7"));
         assert_eq!(ctx.extra_plugin_dirs, vec!["plugin-a"]);
         assert_eq!(ctx.workflow_run_id, "run-projection-test");
         assert_eq!(ctx.model.as_deref(), Some("opus"));

@@ -51,19 +51,6 @@ pub trait RunContext: Send + Sync {
     }
 }
 
-/// Conventional key constants for values injected by the workflow engine.
-///
-/// Use these instead of bare string literals so that typos are caught at compile
-/// time and renaming a key produces a single diff rather than a grep-and-replace.
-pub mod keys {
-    pub const REPO_PATH: &str = "repo_path";
-    pub const WORKTREE_ID: &str = "worktree_id";
-    pub const TICKET_ID: &str = "ticket_id";
-    pub const REPO_ID: &str = "repo_id";
-    pub const WORKING_DIR: &str = "working_dir";
-    pub const WORKFLOW_RUN_ID: &str = "workflow_run_id";
-}
-
 /// No-op `RunContext` implementation for tests.
 ///
 /// Returns an empty injected-variables map and `/tmp` as the working directory

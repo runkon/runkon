@@ -257,7 +257,6 @@ pub fn named_executors(
 fn mock_workflow_result(item_id: &str, wf_name: &str, succeeded: bool) -> WorkflowResult {
     WorkflowResult {
         workflow_run_id: format!("mock-run-{}", item_id),
-        worktree_id: None,
         workflow_name: wf_name.to_string(),
         all_succeeded: succeeded,
         total_cost: 0.0,
@@ -351,7 +350,7 @@ impl ItemProvider for MockItemProvider {
         &self,
         _ctx: &dyn RunContext,
         _info: &ProviderInfo,
-        _scope: Option<&runkon_flow::dsl::ForeachScope>,
+        _scope: Option<&dyn std::any::Any>,
         _filter: &HashMap<String, String>,
     ) -> Result<Vec<FanOutItem>, EngineError> {
         Ok(self
@@ -486,7 +485,7 @@ impl ItemProvider for MockOrderedItemProvider {
         &self,
         _ctx: &dyn RunContext,
         _info: &ProviderInfo,
-        _scope: Option<&runkon_flow::dsl::ForeachScope>,
+        _scope: Option<&dyn std::any::Any>,
         _filter: &HashMap<String, String>,
     ) -> Result<Vec<FanOutItem>, EngineError> {
         Ok(self
@@ -534,7 +533,7 @@ impl ItemProvider for FailingOrderedItemProvider {
         &self,
         ctx: &dyn RunContext,
         info: &ProviderInfo,
-        scope: Option<&runkon_flow::dsl::ForeachScope>,
+        scope: Option<&dyn std::any::Any>,
         filter: &HashMap<String, String>,
     ) -> Result<Vec<FanOutItem>, EngineError> {
         self.inner.items(ctx, info, scope, filter)

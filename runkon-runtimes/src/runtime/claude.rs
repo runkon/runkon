@@ -5,7 +5,7 @@ use std::sync::{atomic::AtomicBool, Arc, Mutex};
 use std::time::Duration;
 
 use crate::error::{Result, RuntimeError};
-use crate::headless::{DrainOutcome, SpawnHeadlessParams};
+use crate::headless::DrainOutcome;
 use crate::permission::PermissionMode;
 use crate::process_utils;
 use crate::run::RunHandle;
@@ -13,25 +13,45 @@ use crate::tracker::{RunEventSink, RunTracker};
 
 use super::{AgentRuntime, PollError, RuntimeRequest};
 
+/// Per-spawn data passed to the injected argv builder.
+pub struct ClaudeArgvRequest<'a> {
+    pub run_id: &'a str,
+    pub working_dir: &'a str,
+    pub prompt: &'a str,
+    pub resume_session_id: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub extra_cli_args: &'a [(
+        std::borrow::Cow<'static, str>,
+        std::borrow::Cow<'static, str>,
+    )],
+    pub permission_mode: Option<&'a PermissionMode>,
+    pub plugin_dirs: &'a [String],
+}
+
+/// Injectable argv builder for [`ClaudeRuntime`].
+pub type ArgvBuilder = Arc<
+    dyn for<'a> Fn(
+            &'a ClaudeArgvRequest<'a>,
+        ) -> std::result::Result<
+            (
+                Vec<std::borrow::Cow<'static, str>>,
+                Option<std::path::PathBuf>,
+            ),
+            String,
+        > + Send
+        + Sync,
+>;
+
 /// Claude-specific configuration captured at construction time.
 #[derive(Clone)]
 pub struct ClaudeRuntimeOptions {
     pub permission_mode: PermissionMode,
     pub binary_path: PathBuf,
     pub log_path_for_run: Arc<dyn Fn(&str) -> PathBuf + Send + Sync>,
+    pub argv_builder: ArgvBuilder,
 }
 
-impl Default for ClaudeRuntimeOptions {
-    fn default() -> Self {
-        Self {
-            permission_mode: PermissionMode::default(),
-            binary_path: PathBuf::from(crate::headless::resolve_conductor_bin()),
-            log_path_for_run: Arc::new(|run_id| std::env::temp_dir().join(format!("{run_id}.log"))),
-        }
-    }
-}
-
-/// Runtime that spawns a `conductor agent run` subprocess (headless mode).
+/// Runtime that spawns a headless agent subprocess via the injected argv builder.
 pub struct ClaudeRuntime {
     options: ClaudeRuntimeOptions,
     #[cfg(unix)]
@@ -54,19 +74,14 @@ impl ClaudeRuntime {
     }
 }
 
-impl Default for ClaudeRuntime {
-    fn default() -> Self {
-        Self::new(ClaudeRuntimeOptions::default())
-    }
-}
-
 impl AgentRuntime for ClaudeRuntime {
     fn spawn_impl(&self, request: &RuntimeRequest, _seal: super::private::Seal) -> Result<()> {
         #[cfg(unix)]
         {
-            let params = SpawnHeadlessParams {
+            let wd = request.working_dir.to_str().unwrap_or(".");
+            let argv_req = ClaudeArgvRequest {
                 run_id: &request.run_id,
-                working_dir: request.working_dir.to_str().unwrap_or("."),
+                working_dir: wd,
                 prompt: &request.prompt,
                 resume_session_id: request.resume_session_id.as_deref(),
                 model: request.resolved_model(),
@@ -74,13 +89,24 @@ impl AgentRuntime for ClaudeRuntime {
                 permission_mode: Some(&self.options.permission_mode),
                 plugin_dirs: &request.plugin_dirs,
             };
-            let (h, pf) = crate::headless::try_spawn_headless_run(
-                &params,
+            let (args, prompt_file) =
+                (self.options.argv_builder)(&argv_req).map_err(RuntimeError::Workflow)?;
+            let h = crate::headless::spawn_headless(
+                &args,
+                std::path::Path::new(wd),
                 &self.options.binary_path.to_string_lossy(),
             )
-            .map_err(RuntimeError::Workflow)?;
+            .map_err(|e| {
+                if let Some(ref pf) = prompt_file {
+                    let _ = std::fs::remove_file(pf);
+                }
+                RuntimeError::Workflow(format!(
+                    "spawn failed for run {} (working_dir={}): {e}",
+                    &request.run_id, wd
+                ))
+            })?;
             *self.handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(h);
-            *self.prompt_file.lock().unwrap_or_else(|e| e.into_inner()) = Some(pf);
+            *self.prompt_file.lock().unwrap_or_else(|e| e.into_inner()) = prompt_file;
             *self.tracker.lock().unwrap_or_else(|e| e.into_inner()) = Some(request.tracker.clone());
             *self.event_sink.lock().unwrap_or_else(|e| e.into_inner()) =
                 Some(request.event_sink.clone());
@@ -196,7 +222,7 @@ fn poll_unix(
         let reader = BufReader::new(stderr_pipe);
         for line in reader.lines() {
             match line {
-                Ok(l) => tracing::trace!(target: "conductor::agent::stderr", "{l}"),
+                Ok(l) => tracing::trace!(target: "runkon::agent::stderr", "{l}"),
                 Err(e) => {
                     tracing::warn!(
                         "ClaudeRuntime: stderr read failed for run {stderr_run_id}, ending stderr drain: {e}"
@@ -282,6 +308,15 @@ mod tests {
     use crate::runtime::test_util::{make_test_run, NoopTracker};
     use crate::tracker::NoopEventSink;
 
+    fn make_test_runtime() -> ClaudeRuntime {
+        ClaudeRuntime::new(ClaudeRuntimeOptions {
+            permission_mode: PermissionMode::default(),
+            binary_path: std::path::PathBuf::from("/nonexistent/agent-bin"),
+            log_path_for_run: Arc::new(|run_id| std::env::temp_dir().join(format!("{run_id}.log"))),
+            argv_builder: Arc::new(|_| Err("test stub: no argv_builder configured".to_string())),
+        })
+    }
+
     fn make_request(run_id: &str) -> RuntimeRequest {
         RuntimeRequest {
             run_id: run_id.to_string(),
@@ -306,7 +341,7 @@ mod tests {
 
     #[test]
     fn spawn_rejects_path_traversal_run_id() {
-        let runtime = ClaudeRuntime::default();
+        let runtime = make_test_runtime();
         let request = make_request("../../etc/cron.d/payload");
         let err = runtime
             .spawn_validated(&request)
@@ -319,7 +354,7 @@ mod tests {
 
     #[test]
     fn spawn_rejects_slash_in_run_id() {
-        let runtime = ClaudeRuntime::default();
+        let runtime = make_test_runtime();
         let request = make_request("run/id");
         assert!(runtime.spawn_validated(&request).is_err());
     }
@@ -327,7 +362,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn poll_before_spawn_returns_failed() {
-        let runtime = ClaudeRuntime::default();
+        let runtime = make_test_runtime();
         let result = runtime.poll("some-run-id", None, Duration::from_millis(10));
         assert!(
             matches!(result, Err(PollError::Failed(_))),
@@ -338,7 +373,7 @@ mod tests {
     #[cfg(not(unix))]
     #[test]
     fn poll_fails_on_non_unix() {
-        let runtime = ClaudeRuntime::default();
+        let runtime = make_test_runtime();
         let result = runtime.poll("some-run-id", None, Duration::from_millis(10));
         assert!(
             matches!(result, Err(PollError::Failed(_))),
@@ -348,7 +383,7 @@ mod tests {
 
     #[test]
     fn is_alive_returns_false_when_no_pid() {
-        let runtime = ClaudeRuntime::default();
+        let runtime = make_test_runtime();
         let run = make_test_run("claude", None);
         assert!(!runtime.is_alive(&run));
     }
@@ -356,7 +391,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn is_alive_returns_true_for_self() {
-        let runtime = ClaudeRuntime::default();
+        let runtime = make_test_runtime();
         let run = make_test_run("claude", Some(std::process::id() as i64));
         assert!(runtime.is_alive(&run));
     }
@@ -367,14 +402,14 @@ mod tests {
         let mut child = std::process::Command::new("true").spawn().unwrap();
         child.wait().unwrap();
         let dead_pid = child.id() as i64;
-        let runtime = ClaudeRuntime::default();
+        let runtime = make_test_runtime();
         let run = make_test_run("claude", Some(dead_pid));
         assert!(!runtime.is_alive(&run));
     }
 
     #[test]
     fn cancel_with_no_handle_and_no_pid() {
-        let runtime = ClaudeRuntime::default();
+        let runtime = make_test_runtime();
         let run = make_test_run("claude", None);
         assert!(runtime.cancel(&run).is_ok());
     }
@@ -385,7 +420,7 @@ mod tests {
         let mut child = std::process::Command::new("true").spawn().unwrap();
         child.wait().unwrap();
         let dead_pid = child.id() as i64;
-        let runtime = ClaudeRuntime::default();
+        let runtime = make_test_runtime();
         let run = make_test_run("claude", Some(dead_pid));
         assert!(runtime.cancel(&run).is_ok());
     }
@@ -425,7 +460,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn poll_kills_leaked_grandchildren_after_result() {
-        let runtime = ClaudeRuntime::default();
+        let runtime = make_test_runtime();
         let (pgid, _script) = inject_script_child(&runtime);
 
         // poll returns Err::Failed because NoopTracker.get_run returns None;
@@ -470,7 +505,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn poll_timeout_returns_no_result() {
-        let runtime = ClaudeRuntime::default();
+        let runtime = make_test_runtime();
         let _pid = inject_sleep_child(&runtime, 60);
         let result = runtime.poll("timeout-run", None, Duration::from_millis(100));
         assert!(
@@ -482,7 +517,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn poll_shutdown_flag_returns_cancelled() {
-        let runtime = ClaudeRuntime::default();
+        let runtime = make_test_runtime();
         let _pid = inject_sleep_child(&runtime, 60);
         let flag = Arc::new(AtomicBool::new(true));
         let result = runtime.poll("shutdown-run", Some(&flag), Duration::from_secs(300));

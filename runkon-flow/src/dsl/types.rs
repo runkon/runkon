@@ -226,8 +226,8 @@ pub struct ForEachNode {
     pub name: String,
     /// The collection type to fan out over.
     pub over: ForeachOver,
-    /// Scope filter for ticket or worktree fan-outs.
-    pub scope: Option<ForeachScope>,
+    /// Raw scope key-value map passed to the provider's `parse_scope` method.
+    pub scope: Option<HashMap<String, String>>,
     /// Generic filter map (required for workflow_run fan-outs, reserved for repos).
     #[serde(default)]
     pub filter: HashMap<String, String>,
@@ -249,35 +249,6 @@ pub struct ForEachNode {
 
 /// The collection type for a foreach step — the registered provider name.
 pub type ForeachOver = String;
-
-/// Unified scope for foreach fan-outs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "scope_type", content = "scope_value", rename_all = "snake_case")]
-pub enum ForeachScope {
-    Ticket(TicketScope),
-    Worktree(WorktreeScope),
-}
-
-/// Scope selector for ticket fan-outs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
-pub enum TicketScope {
-    /// All direct children (parent_of edges) of the given ticket.
-    TicketId(String),
-    /// All open tickets with the given label in the repo.
-    Label(String),
-    /// All open tickets with no entries in ticket_labels.
-    Unlabeled,
-}
-
-/// Scope selector for worktree fan-outs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorktreeScope {
-    #[serde(default)]
-    pub base_branch: Option<String>,
-    #[serde(default)]
-    pub has_open_pr: Option<bool>,
-}
 
 /// What to do when a child workflow fails.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

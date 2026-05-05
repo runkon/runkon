@@ -461,7 +461,7 @@ impl runkon_flow::traits::item_provider::ItemProvider for ContextItemProvider {
         &self,
         _ctx: &dyn runkon_flow::traits::run_context::RunContext,
         _info: &runkon_flow::traits::item_provider::ProviderInfo,
-        _scope: Option<&runkon_flow::dsl::ForeachScope>,
+        _scope: Option<&dyn std::any::Any>,
         _filter: &HashMap<String, String>,
     ) -> Result<
         Vec<runkon_flow::traits::item_provider::FanOutItem>,
@@ -509,7 +509,6 @@ impl runkon_flow::engine::ChildWorkflowRunner for InputCapturingRunner {
         let item_id = params.inputs.get("item.id").cloned().unwrap_or_default();
         Ok(runkon_flow::types::WorkflowResult {
             workflow_run_id: format!("mock-run-{item_id}"),
-            worktree_id: None,
             workflow_name: workflow_name.to_string(),
             all_succeeded: true,
             total_cost: 0.0,

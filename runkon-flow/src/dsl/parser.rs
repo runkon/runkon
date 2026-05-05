@@ -5,10 +5,9 @@ use std::path::Path;
 use super::lexer::{Lexer, Token};
 use super::types::{
     AgentRef, AlwaysNode, CallNode, CallWorkflowNode, Condition, DoNode, DoWhileNode, ForEachNode,
-    ForeachScope, GateNode, GateOptions, GateType, IfNode, InputDecl, InputType, OnChildFail,
-    OnCycle, OnFail, OnFailAction, OnMaxIter, OnTimeout, ParallelNode, QualityGateConfig,
-    ScriptNode, TicketScope, UnlessNode, WhileNode, WorkflowDef, WorkflowNode, WorkflowTrigger,
-    WorktreeScope,
+    GateNode, GateOptions, GateType, IfNode, InputDecl, InputType, OnChildFail, OnCycle, OnFail,
+    OnFailAction, OnMaxIter, OnTimeout, ParallelNode, QualityGateConfig, ScriptNode, UnlessNode,
+    WhileNode, WorkflowDef, WorkflowNode, WorkflowTrigger,
 };
 
 // ---------------------------------------------------------------------------
@@ -929,51 +928,7 @@ impl Parser {
 
         let scope = if let Some(s) = kvs.remove("scope") {
             match s {
-                KvValue::Map(m) => match over.as_str() {
-                    "worktrees" => {
-                        let base_branch = m.get("base_branch").cloned();
-                        let has_open_pr = match m.get("has_open_pr").map(|s| s.as_str()) {
-                            None => None,
-                            Some("true") => Some(true),
-                            Some("false") => Some(false),
-                            Some(v) => {
-                                return Err(format!(
-                                    "foreach '{name}': scope.has_open_pr must be true or false, got '{v}'"
-                                ))
-                            }
-                        };
-                        Some(ForeachScope::Worktree(WorktreeScope {
-                            base_branch,
-                            has_open_pr,
-                        }))
-                    }
-                    "tickets" => {
-                        if let Some(ticket_id) = m.get("ticket_id") {
-                            Some(ForeachScope::Ticket(TicketScope::TicketId(
-                                ticket_id.clone(),
-                            )))
-                        } else if let Some(label) = m.get("label") {
-                            Some(ForeachScope::Ticket(TicketScope::Label(label.clone())))
-                        } else if let Some(v) = m.get("unlabeled") {
-                            if v == "true" {
-                                Some(ForeachScope::Ticket(TicketScope::Unlabeled))
-                            } else {
-                                return Err(format!(
-                                    "foreach '{name}': scope.unlabeled must be true"
-                                ));
-                            }
-                        } else {
-                            return Err(format!(
-                                "foreach '{name}': scope must contain ticket_id, label, or unlabeled"
-                            ));
-                        }
-                    }
-                    _ => {
-                        return Err(format!(
-                            "foreach '{name}': scope is not applicable for over = '{over}'"
-                        ))
-                    }
-                },
+                KvValue::Map(m) => Some(m),
                 _ => return Err(format!("foreach '{name}': scope must be a map")),
             }
         } else {

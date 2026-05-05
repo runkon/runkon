@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::engine::{ExecutionState, ENGINE_INJECTED_KEYS};
+use crate::engine::ExecutionState;
 
 fn substitute_variables_impl(
     template: &str,
@@ -141,13 +141,14 @@ pub fn build_variable_map(state: &ExecutionState) -> HashMap<String, String> {
     // it lands in named-field land automatically rather than leaking through
     // a manual `markers`/`context` guard.
     //
-    // Shadowing guard: keys present in `ENGINE_INJECTED_KEYS` cannot be
-    // overwritten by a script — those are reserved for engine-controlled
-    // state (workflow_run_id, ticket_id, repo_path, etc.). A script that
+    // Shadowing guard: keys present in the host's injected-variables map (plus
+    // the engine-owned `workflow_run_id`) cannot be overwritten by a script —
+    // those are reserved for engine/host-controlled state. A script that
     // tries to export one of these gets a warning and is ignored.
     //
     // Iteration order: walk forward (oldest first); later writes from
     // non-reserved names overwrite earlier ones.
+    let reserved: HashSet<&str> = state.run_ctx.injected_variables().into_keys().collect();
     for c in &state.contexts {
         let json = match &c.structured_output {
             Some(j) => j,
@@ -171,7 +172,7 @@ pub fn build_variable_map(state: &ExecutionState) -> HashMap<String, String> {
             }
         };
         for (key, value) in &flow_output.extras {
-            if ENGINE_INJECTED_KEYS.contains(&key.as_str()) {
+            if reserved.contains(key.as_str()) || key == "workflow_run_id" {
                 tracing::warn!(
                     step = %c.step,
                     var = %key,
@@ -402,27 +403,27 @@ mod tests {
         );
         {
             let mut vars = std::collections::HashMap::new();
-            vars.insert(
-                crate::traits::run_context::keys::REPO_PATH,
-                "/repo/real".to_string(),
-            );
-            vars.insert(
-                crate::traits::run_context::keys::TICKET_ID,
-                "TICK-real".to_string(),
-            );
+            vars.insert("repo_path", "/repo/real".to_string());
+            vars.insert("ticket_id", "TICK-real".to_string());
             state.run_ctx = Arc::new(crate::traits::run_context::NoopRunContext::with_vars(vars))
                 as Arc<dyn crate::traits::run_context::RunContext>;
         }
 
-        // Script tries to override every engine-injected key it can find.
-        // Prefer ENGINE_INJECTED_KEYS as the source of truth so this test
-        // stays correct as that list evolves.
+        // Script tries to override every host-injected key plus the engine-owned
+        // workflow_run_id. The reserved set mirrors exactly what production code
+        // guards: run_ctx.injected_variables().keys() + "workflow_run_id".
+        let injected_keys: Vec<&'static str> =
+            state.run_ctx.injected_variables().into_keys().collect();
         let mut malicious = serde_json::Map::new();
         malicious.insert("markers".into(), serde_json::Value::Array(vec![]));
         malicious.insert("context".into(), serde_json::Value::String("evil".into()));
-        for key in ENGINE_INJECTED_KEYS {
+        for key in injected_keys
+            .iter()
+            .copied()
+            .chain(std::iter::once("workflow_run_id"))
+        {
             malicious.insert(
-                (*key).into(),
+                key.into(),
                 serde_json::Value::String(format!("HIJACKED:{key}")),
             );
         }
@@ -455,10 +456,15 @@ mod tests {
             "ticket_id must not be hijacked"
         );
 
-        // Sanity: every engine-injected key is non-hijacked, regardless of
-        // whether it was set on the state we constructed.
-        for key in ENGINE_INJECTED_KEYS {
-            if let Some(v) = vars.get(*key) {
+        // Sanity: every host-injected key and workflow_run_id is non-hijacked.
+        let injected_keys: Vec<&'static str> =
+            state.run_ctx.injected_variables().into_keys().collect();
+        for key in injected_keys
+            .iter()
+            .copied()
+            .chain(std::iter::once("workflow_run_id"))
+        {
+            if let Some(v) = vars.get(key) {
                 assert!(
                     !v.starts_with("HIJACKED:"),
                     "engine-injected key '{key}' was overridden by script export"
@@ -604,18 +610,9 @@ mod tests {
         // run_ctx is the source of truth for these.
         {
             let mut vars = std::collections::HashMap::new();
-            vars.insert(
-                crate::traits::run_context::keys::TICKET_ID,
-                "TICK-real".to_string(),
-            );
-            vars.insert(
-                crate::traits::run_context::keys::REPO_ID,
-                "repo-real".to_string(),
-            );
-            vars.insert(
-                crate::traits::run_context::keys::REPO_PATH,
-                "/real".to_string(),
-            );
+            vars.insert("ticket_id", "TICK-real".to_string());
+            vars.insert("repo_id", "repo-real".to_string());
+            vars.insert("repo_path", "/real".to_string());
             state.run_ctx = Arc::new(crate::traits::run_context::NoopRunContext::with_vars(vars))
                 as Arc<dyn crate::traits::run_context::RunContext>;
         }
