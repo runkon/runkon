@@ -174,6 +174,7 @@ pub fn execute_parallel(
             state.model.clone(),
             state.default_bot_name.clone(),
             state.extra_plugin_dirs.clone(),
+            None,
         );
 
         dispatch_queue.push(DispatchInput {

@@ -118,16 +118,39 @@ pub enum DrainOutcome {
     /// EOF before any `result` event (SIGTERM path or unexpected crash).
     /// Caller must mark the run as cancelled/failed in the DB.
     NoResult,
+    /// No output received for longer than `stall_threshold`.
+    /// The subprocess was NOT killed here; the caller is responsible.
+    StalledOut(std::time::Duration),
+    /// The host-enforced turn cap was reached. `u32` is the number of turns counted.
+    /// The subprocess was NOT killed here; the caller is responsible.
+    TurnCapReached(u32),
 }
 
 /// Drain the stdout of a headless subprocess, persisting events to the DB.
+///
+/// When `stall_threshold` is `Some(t)`, returns `DrainOutcome::StalledOut` if
+/// no output is received for longer than `t`. The caller must then kill the
+/// subprocess; passing `None` disables stall detection and behaves as before.
+///
+/// When `max_turns` is `Some(n)`, returns `DrainOutcome::TurnCapReached(n)` after
+/// counting `n` `"assistant"` events. The caller must then kill the subprocess;
+/// passing `None` disables turn-cap enforcement.
+///
+/// `stdout` must be `Send + 'static` because it is moved into an inner reader
+/// thread so that the blocking `BufReader::lines()` loop can be interrupted by
+/// a `recv_timeout` in the outer loop.
 pub fn drain_stream_json<S: EventSink + ?Sized>(
-    stdout: impl std::io::Read,
+    stdout: impl std::io::Read + Send + 'static,
     run_id: &str,
     log_file: &std::path::Path,
     sink: &S,
+    stall_threshold: Option<std::time::Duration>,
+    max_turns: Option<u32>,
 ) -> DrainOutcome {
     use std::io::{BufRead, BufReader, Write};
+    use std::sync::mpsc;
+    use std::sync::mpsc::RecvTimeoutError;
+    use std::time::Instant;
 
     let mut log_writer = std::fs::OpenOptions::new()
         .create(true)
@@ -141,15 +164,40 @@ pub fn drain_stream_json<S: EventSink + ?Sized>(
         })
         .ok();
 
-    let reader = BufReader::new(stdout);
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(e) => {
+    // Spawn an inner thread that drives the blocking BufReader::lines() iterator.
+    // The outer loop uses recv_timeout so it can detect stalls without being
+    // stuck in a blocking read() that cannot be interrupted from outside.
+    let (line_tx, line_rx) = mpsc::channel::<std::io::Result<String>>();
+    std::thread::spawn(move || {
+        let reader = BufReader::new(stdout);
+        for line in reader.lines() {
+            if line_tx.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let mut last_event_at = Instant::now();
+    let mut turn_count = 0u32;
+    loop {
+        let recv_result = match stall_threshold {
+            Some(t) => line_rx.recv_timeout(t),
+            None => line_rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        let line = match recv_result {
+            Ok(Ok(l)) => {
+                last_event_at = Instant::now();
+                l
+            }
+            Ok(Err(e)) => {
                 tracing::warn!(
                     "[drain_stream_json] stdout read failed for run {run_id}, ending drain: {e}"
                 );
                 break;
+            }
+            Err(RecvTimeoutError::Disconnected) => break,
+            Err(RecvTimeoutError::Timeout) => {
+                return DrainOutcome::StalledOut(last_event_at.elapsed());
             }
         };
 
@@ -214,6 +262,12 @@ pub fn drain_stream_json<S: EventSink + ?Sized>(
                             cache_create,
                         },
                     );
+                }
+                turn_count += 1;
+                if let Some(cap) = max_turns {
+                    if turn_count >= cap {
+                        return DrainOutcome::TurnCapReached(turn_count);
+                    }
                 }
             }
             "result" => {
@@ -305,7 +359,14 @@ mod tests {
         let log_file =
             std::env::temp_dir().join(format!("test-drain-{:?}.log", std::thread::current().id()));
         let sink = RecordingSink::default();
-        let outcome = super::drain_stream_json(input.as_bytes(), "run-1", &log_file, &sink);
+        let outcome = super::drain_stream_json(
+            std::io::Cursor::new(input.into_bytes()),
+            "run-1",
+            &log_file,
+            &sink,
+            None,
+            None,
+        );
         let _ = std::fs::remove_file(&log_file);
         (outcome, sink)
     }
@@ -381,7 +442,7 @@ mod tests {
             std::thread::current().id()
         ));
         let sink = RecordingSink::default();
-        let outcome = super::drain_stream_json(reader, "run-err", &log_file, &sink);
+        let outcome = super::drain_stream_json(reader, "run-err", &log_file, &sink, None, None);
         let _ = std::fs::remove_file(&log_file);
         assert_eq!(outcome, super::DrainOutcome::NoResult);
         // The init event from before the error should still have been emitted.
@@ -436,5 +497,144 @@ mod tests {
             }
             other => panic!("expected Completed event, got: {other:?}"),
         }
+    }
+
+    /// A `Read` impl that blocks forever: simulates a stalled subprocess stdout.
+    struct BlockingReader {
+        _rx: std::sync::mpsc::Receiver<()>,
+    }
+
+    impl std::io::Read for BlockingReader {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            let _ = self._rx.recv(); // blocks until sender dropped (never in this test)
+            Ok(0)
+        }
+    }
+
+    #[test]
+    fn drain_stream_json_stalls_when_threshold_exceeded() {
+        let (_tx, rx) = std::sync::mpsc::channel::<()>();
+        let reader = BlockingReader { _rx: rx };
+        let log_file = std::env::temp_dir().join(format!(
+            "test-drain-stall-{:?}.log",
+            std::thread::current().id()
+        ));
+        let sink = RecordingSink::default();
+        let start = std::time::Instant::now();
+        let outcome = super::drain_stream_json(
+            reader,
+            "stall-run",
+            &log_file,
+            &sink,
+            Some(std::time::Duration::from_millis(100)),
+            None,
+        );
+        let elapsed = start.elapsed();
+        let _ = std::fs::remove_file(&log_file);
+        assert!(
+            matches!(outcome, super::DrainOutcome::StalledOut(_)),
+            "expected StalledOut, got: {outcome:?}"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "stall detection took too long: {elapsed:?}"
+        );
+    }
+
+    /// A `Read` impl that returns chunks from a channel with controlled timing.
+    /// Each `recv()` blocks until the sender pushes data, simulating a live stream.
+    struct ChunkedReader {
+        rx: std::sync::mpsc::Receiver<Vec<u8>>,
+        current: Vec<u8>,
+        pos: usize,
+    }
+
+    impl std::io::Read for ChunkedReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.pos >= self.current.len() {
+                match self.rx.recv() {
+                    Ok(chunk) => {
+                        self.current = chunk;
+                        self.pos = 0;
+                    }
+                    Err(_) => return Ok(0), // sender dropped → EOF
+                }
+            }
+            let n = buf.len().min(self.current.len() - self.pos);
+            buf[..n].copy_from_slice(&self.current[self.pos..self.pos + n]);
+            self.pos += n;
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn drain_stream_json_does_not_stall_with_steady_events() {
+        let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let reader = ChunkedReader {
+            rx,
+            current: vec![],
+            pos: 0,
+        };
+        let log_file = std::env::temp_dir().join(format!(
+            "test-drain-steady-{:?}.log",
+            std::thread::current().id()
+        ));
+        let sink = RecordingSink::default();
+
+        // Writer thread: send lines every ~20ms, then a result event to EOF.
+        std::thread::spawn(move || {
+            for _ in 0..5 {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                let _ = tx.send(b"{\"type\":\"system\",\"subtype\":\"init\"}\n".to_vec());
+            }
+            let _ = tx.send(b"{\"type\":\"result\",\"result\":\"steady done\"}\n".to_vec());
+            // tx dropped here → ChunkedReader::read returns 0 (EOF)
+        });
+
+        let outcome = super::drain_stream_json(
+            reader,
+            "steady-run",
+            &log_file,
+            &sink,
+            Some(std::time::Duration::from_millis(500)),
+            None,
+        );
+        let _ = std::fs::remove_file(&log_file);
+        assert_eq!(
+            outcome,
+            super::DrainOutcome::Completed,
+            "steady stream must not stall"
+        );
+    }
+
+    #[test]
+    fn drain_stream_json_turn_cap_reached() {
+        // Feed 4 assistant events with a cap of 3: drain must stop at turn 3.
+        let lines = [
+            r#"{"type":"assistant","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#,
+            r#"{"type":"assistant","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#,
+            r#"{"type":"assistant","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#,
+            r#"{"type":"assistant","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#,
+        ];
+        let input = lines.join("\n");
+        let log_file = std::env::temp_dir().join(format!(
+            "test-drain-turncap-{:?}.log",
+            std::thread::current().id()
+        ));
+        let sink = RecordingSink::default();
+        let outcome = super::drain_stream_json(
+            std::io::Cursor::new(input.into_bytes()),
+            "cap-run",
+            &log_file,
+            &sink,
+            None,
+            Some(3),
+        );
+        let _ = std::fs::remove_file(&log_file);
+        assert_eq!(
+            outcome,
+            super::DrainOutcome::TurnCapReached(3),
+            "expected TurnCapReached(3), got: {outcome:?}"
+        );
     }
 }

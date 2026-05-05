@@ -373,6 +373,10 @@ pub struct CallNode {
     /// Optional per-step timeout (e.g. "5m", "30s", "1h"). If the step does not
     /// complete within this duration it is cancelled with `CancellationReason::Timeout`.
     pub timeout: Option<String>,
+    /// Optional per-step host-enforced turn cap. Overrides the workflow-level default.
+    /// `None` defers to `DEFAULT_MAX_TURNS` applied by the executor.
+    #[serde(default)]
+    pub max_turns: Option<u32>,
 }
 
 /// A sub-workflow invocation node.

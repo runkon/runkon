@@ -707,6 +707,7 @@ pub fn run_on_fail_agent(
         bot_name: None,
         plugin_dirs: Vec::new(),
         timeout: None,
+        max_turns: None,
     };
     if let Err(e) = crate::executors::call::execute_call(state, &on_fail_node, iteration) {
         tracing::warn!("on_fail agent '{}' also failed: {e}", on_fail_agent.label(),);

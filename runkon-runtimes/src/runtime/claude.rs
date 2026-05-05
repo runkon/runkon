@@ -49,6 +49,12 @@ pub struct ClaudeRuntimeOptions {
     pub binary_path: PathBuf,
     pub log_path_for_run: Arc<dyn Fn(&str) -> PathBuf + Send + Sync>,
     pub argv_builder: ArgvBuilder,
+    /// If `Some(t)`, `drain_stream_json` returns `StalledOut` when no output
+    /// is received for longer than `t`. `None` disables stall detection.
+    pub stall_threshold: Option<Duration>,
+    /// If `Some(n)`, `drain_stream_json` returns `TurnCapReached(n)` after
+    /// counting `n` `"assistant"` events. `None` disables the turn cap.
+    pub max_turns: Option<u32>,
 }
 
 /// Runtime that spawns a headless agent subprocess via the injected argv builder.
@@ -210,6 +216,8 @@ fn poll_unix(
         tracing::warn!("ClaudeRuntime: failed to persist subprocess pid {pid}: {e}");
     }
 
+    let stall_threshold = rt.options.stall_threshold;
+    let max_turns = rt.options.max_turns;
     let (stderr_pipe, stdout_pipe, finish) = handle.into_stderr_drain_parts();
 
     let run_id_owned = run_id.to_string();
@@ -239,6 +247,8 @@ fn poll_unix(
             &run_id_owned,
             &log_path,
             &*event_sink_for_drain,
+            stall_threshold,
+            max_turns,
         );
         if let Some(pf) = prompt_file {
             let _ = std::fs::remove_file(pf);
@@ -298,6 +308,24 @@ fn poll_unix(
             }
             Err(PollError::NoResult)
         }
+        DrainOutcome::StalledOut(elapsed) => {
+            let msg = format!("stall_timeout: no events for {}s", elapsed.as_secs());
+            tracing::warn!("ClaudeRuntime: {msg} for run {run_id}");
+            if let Err(e) = tracker.mark_failed_if_running(run_id, &msg) {
+                tracing::warn!("ClaudeRuntime: failed to persist stall failure for {run_id}: {e}");
+            }
+            Err(PollError::Failed(msg))
+        }
+        DrainOutcome::TurnCapReached(count) => {
+            let msg = format!("turn_cap_reached: {} turns", count);
+            tracing::warn!("ClaudeRuntime: {msg} for run {run_id}");
+            if let Err(e) = tracker.mark_failed_if_running(run_id, &msg) {
+                tracing::warn!(
+                    "ClaudeRuntime: failed to persist turn-cap failure for {run_id}: {e}"
+                );
+            }
+            Err(PollError::Failed(msg))
+        }
     }
 }
 
@@ -308,12 +336,17 @@ mod tests {
     use crate::runtime::test_util::{make_test_run, NoopTracker};
     use crate::tracker::NoopEventSink;
 
-    fn make_test_runtime() -> ClaudeRuntime {
+    fn make_test_runtime(
+        stall_threshold: Option<Duration>,
+        max_turns: Option<u32>,
+    ) -> ClaudeRuntime {
         ClaudeRuntime::new(ClaudeRuntimeOptions {
             permission_mode: PermissionMode::default(),
             binary_path: std::path::PathBuf::from("/nonexistent/agent-bin"),
             log_path_for_run: Arc::new(|run_id| std::env::temp_dir().join(format!("{run_id}.log"))),
             argv_builder: Arc::new(|_| Err("test stub: no argv_builder configured".to_string())),
+            stall_threshold,
+            max_turns,
         })
     }
 
@@ -341,7 +374,7 @@ mod tests {
 
     #[test]
     fn spawn_rejects_path_traversal_run_id() {
-        let runtime = make_test_runtime();
+        let runtime = make_test_runtime(None, None);
         let request = make_request("../../etc/cron.d/payload");
         let err = runtime
             .spawn_validated(&request)
@@ -354,7 +387,7 @@ mod tests {
 
     #[test]
     fn spawn_rejects_slash_in_run_id() {
-        let runtime = make_test_runtime();
+        let runtime = make_test_runtime(None, None);
         let request = make_request("run/id");
         assert!(runtime.spawn_validated(&request).is_err());
     }
@@ -362,7 +395,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn poll_before_spawn_returns_failed() {
-        let runtime = make_test_runtime();
+        let runtime = make_test_runtime(None, None);
         let result = runtime.poll("some-run-id", None, Duration::from_millis(10));
         assert!(
             matches!(result, Err(PollError::Failed(_))),
@@ -373,7 +406,7 @@ mod tests {
     #[cfg(not(unix))]
     #[test]
     fn poll_fails_on_non_unix() {
-        let runtime = make_test_runtime();
+        let runtime = make_test_runtime(None, None);
         let result = runtime.poll("some-run-id", None, Duration::from_millis(10));
         assert!(
             matches!(result, Err(PollError::Failed(_))),
@@ -383,7 +416,7 @@ mod tests {
 
     #[test]
     fn is_alive_returns_false_when_no_pid() {
-        let runtime = make_test_runtime();
+        let runtime = make_test_runtime(None, None);
         let run = make_test_run("claude", None);
         assert!(!runtime.is_alive(&run));
     }
@@ -391,7 +424,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn is_alive_returns_true_for_self() {
-        let runtime = make_test_runtime();
+        let runtime = make_test_runtime(None, None);
         let run = make_test_run("claude", Some(std::process::id() as i64));
         assert!(runtime.is_alive(&run));
     }
@@ -402,14 +435,14 @@ mod tests {
         let mut child = std::process::Command::new("true").spawn().unwrap();
         child.wait().unwrap();
         let dead_pid = child.id() as i64;
-        let runtime = make_test_runtime();
+        let runtime = make_test_runtime(None, None);
         let run = make_test_run("claude", Some(dead_pid));
         assert!(!runtime.is_alive(&run));
     }
 
     #[test]
     fn cancel_with_no_handle_and_no_pid() {
-        let runtime = make_test_runtime();
+        let runtime = make_test_runtime(None, None);
         let run = make_test_run("claude", None);
         assert!(runtime.cancel(&run).is_ok());
     }
@@ -420,7 +453,7 @@ mod tests {
         let mut child = std::process::Command::new("true").spawn().unwrap();
         child.wait().unwrap();
         let dead_pid = child.id() as i64;
-        let runtime = make_test_runtime();
+        let runtime = make_test_runtime(None, None);
         let run = make_test_run("claude", Some(dead_pid));
         assert!(runtime.cancel(&run).is_ok());
     }
@@ -460,7 +493,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn poll_kills_leaked_grandchildren_after_result() {
-        let runtime = make_test_runtime();
+        let runtime = make_test_runtime(None, None);
         let (pgid, _script) = inject_script_child(&runtime);
 
         // poll returns Err::Failed because NoopTracker.get_run returns None;
@@ -505,7 +538,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn poll_timeout_returns_no_result() {
-        let runtime = make_test_runtime();
+        let runtime = make_test_runtime(None, None);
         let _pid = inject_sleep_child(&runtime, 60);
         let result = runtime.poll("timeout-run", None, Duration::from_millis(100));
         assert!(
@@ -517,13 +550,66 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn poll_shutdown_flag_returns_cancelled() {
-        let runtime = make_test_runtime();
+        let runtime = make_test_runtime(None, None);
         let _pid = inject_sleep_child(&runtime, 60);
         let flag = Arc::new(AtomicBool::new(true));
         let result = runtime.poll("shutdown-run", Some(&flag), Duration::from_secs(300));
         assert!(
             matches!(result, Err(PollError::Cancelled)),
             "expected Cancelled when shutdown flag is set, got: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn poll_returns_failed_on_stall() {
+        let runtime = make_test_runtime(Some(Duration::from_millis(200)), None);
+        let _pid = inject_sleep_child(&runtime, 60);
+        let result = runtime.poll("stall-run", None, Duration::from_secs(30));
+        assert!(
+            matches!(result, Err(PollError::Failed(ref msg)) if msg.contains("stall_timeout")),
+            "expected Failed(stall_timeout), got: {result:?}"
+        );
+    }
+
+    /// Inject a child that emits 4 assistant JSONL events then exits (no result event).
+    #[cfg(unix)]
+    fn inject_turn_cap_child(runtime: &ClaudeRuntime) -> (u32, tempfile::NamedTempFile) {
+        use std::io::Write as _;
+        use std::os::unix::process::CommandExt;
+        use std::process::Stdio;
+
+        let assistant_line = r#"{"type":"assistant","usage":{"input_tokens":1,"output_tokens":1,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#;
+        let mut script = tempfile::NamedTempFile::new().expect("tempfile");
+        for _ in 0..4 {
+            writeln!(script, "echo '{assistant_line}'").unwrap();
+        }
+
+        let child = std::process::Command::new("sh")
+            .arg(script.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .expect("sh must be available");
+        let handle = crate::headless::HeadlessHandle::from_child(child)
+            .expect("HeadlessHandle from_child failed");
+        let pid = handle.pid();
+        *runtime.handle.lock().unwrap() = Some(handle);
+        *runtime.tracker.lock().unwrap() = Some(Arc::new(NoopTracker));
+        *runtime.event_sink.lock().unwrap() = Some(Arc::new(NoopEventSink));
+        (pid, script)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn poll_returns_failed_on_turn_cap() {
+        let runtime = make_test_runtime(None, Some(3));
+        let (_pid, _script) = inject_turn_cap_child(&runtime);
+        let result = runtime.poll("turn-cap-run", None, Duration::from_secs(30));
+        assert!(
+            matches!(result, Err(PollError::Failed(ref msg)) if msg.contains("turn_cap_reached")),
+            "expected Failed(turn_cap_reached), got: {result:?}"
         );
     }
 }

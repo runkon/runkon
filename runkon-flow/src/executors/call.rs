@@ -112,6 +112,7 @@ fn execute_call_inner(
             state.model.clone(),
             effective_bot_name,
             merged_plugin_dirs,
+            node.max_turns,
         );
 
         // Per-step timeout: spawn a timer thread that cancels a child token after
@@ -392,6 +393,7 @@ mod tests {
             timeout: None,
             bot_name: None,
             plugin_dirs: vec![],
+            max_turns: None,
         };
 
         execute_call(&mut state, &node, 0).unwrap();

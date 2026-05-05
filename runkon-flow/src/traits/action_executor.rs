@@ -43,6 +43,8 @@ pub struct ActionParams {
     pub model: Option<String>,
     pub bot_name: Option<String>,
     pub plugin_dirs: Vec<String>,
+    /// Per-step host-enforced turn cap. `None` defers to the executor's default.
+    pub max_turns: Option<u32>,
 }
 
 /// Output produced by an `ActionExecutor` on success.

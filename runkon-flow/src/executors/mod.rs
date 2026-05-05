@@ -179,6 +179,7 @@ pub(super) fn build_action_params(
     model: Option<String>,
     bot_name: Option<String>,
     plugin_dirs: Vec<String>,
+    max_turns: Option<u32>,
 ) -> crate::traits::action_executor::ActionParams {
     let mut extensions = crate::extensions::Extensions::default();
     if let Some(s) = schema {
@@ -196,6 +197,7 @@ pub(super) fn build_action_params(
         model,
         bot_name,
         plugin_dirs,
+        max_turns,
     }
 }
 

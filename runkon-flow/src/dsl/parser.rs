@@ -77,6 +77,16 @@ impl KvValue {
             Self::Map(_) => unreachable!("BUG: into_agent_ref() called on KvValue::Map"),
         }
     }
+
+    fn into_u32(self) -> std::result::Result<u32, String> {
+        match self {
+            Self::Quoted(s) | Self::Bare(s) => {
+                s.parse::<u32>().map_err(|_| format!("invalid u32: {s}"))
+            }
+            Self::Array(_) => Err("BUG: into_u32() called on KvValue::Array".to_string()),
+            Self::Map(_) => Err("BUG: into_u32() called on KvValue::Map".to_string()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +416,7 @@ impl Parser {
         let mut bot_name = None;
         let mut plugin_dirs = Vec::new();
         let mut timeout = None;
+        let mut max_turns = None;
 
         if self.peek() == &Token::LBrace {
             self.advance();
@@ -425,6 +436,9 @@ impl Parser {
             if let Some(t) = kvs.remove("timeout") {
                 timeout = Some(t.into_string());
             }
+            if let Some(mt) = kvs.remove("max_turns") {
+                max_turns = Some(mt.into_u32()?);
+            }
         }
 
         Ok(CallNode {
@@ -436,6 +450,7 @@ impl Parser {
             bot_name,
             plugin_dirs,
             timeout,
+            max_turns,
         })
     }
 

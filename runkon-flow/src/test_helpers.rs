@@ -35,6 +35,7 @@ pub fn make_params(name: &str) -> ActionParams {
         model: None,
         bot_name: None,
         plugin_dirs: vec![],
+        max_turns: None,
     }
 }
 
@@ -96,6 +97,7 @@ pub fn call_node(agent: &str) -> WorkflowNode {
         bot_name: None,
         plugin_dirs: vec![],
         timeout: None,
+        max_turns: None,
     })
 }
 

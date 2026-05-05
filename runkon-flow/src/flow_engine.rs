@@ -1849,6 +1849,7 @@ mod tests {
             bot_name: None,
             plugin_dirs: vec![],
             timeout: Some("10ms".to_string()),
+            max_turns: None,
         });
 
         let def = make_def("wf", vec![timed_out_call]);

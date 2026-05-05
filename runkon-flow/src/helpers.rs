@@ -797,6 +797,7 @@ mod tests {
             bot_name: None,
             plugin_dirs: vec![],
             timeout: None,
+            max_turns: None,
         });
         let keys = collect_leaf_step_keys(&node);
         assert_eq!(keys, vec!["plan".to_string()]);
