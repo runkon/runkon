@@ -16,6 +16,14 @@ use crate::permission::PermissionMode;
 use crate::run::RunHandle;
 use crate::tracker::{RunEventSink, RunTracker};
 
+/// Trait for resolving a runtime name to a boxed [`AgentRuntime`].
+///
+/// Abstracts over [`resolve_runtime`] so consumers (e.g. `ClaudeAgentExecutor`)
+/// do not need to depend on the host crate's `Config` type directly.
+pub trait RuntimeResolver: Send + Sync {
+    fn resolve(&self, name: &str) -> Result<Box<dyn AgentRuntime>>;
+}
+
 /// Sealed capability token for `AgentRuntime::spawn_impl`.
 pub mod private {
     pub struct Seal(());

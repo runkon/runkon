@@ -17,5 +17,5 @@ pub use config::RuntimeConfig;
 pub use error::{Result, RuntimeError};
 pub use permission::PermissionMode;
 pub use run::{RunHandle, RunStatus};
-pub use runtime::{AgentRuntime, PollError, RuntimeOptions, RuntimeRequest};
+pub use runtime::{AgentRuntime, PollError, RuntimeOptions, RuntimeRequest, RuntimeResolver};
 pub use tracker::{EventSink, NoopEventSink, RunEventSink, RunTracker, RuntimeEvent};

@@ -1,0 +1,27 @@
+[package]
+name = "runkon-flow-executors"
+version = "0.1.0-alpha"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Portable executor implementations for runkon-flow — event sinks, env providers, and step utilities without conductor dependencies"
+
+[features]
+test-utils = ["runkon-flow/test-utils"]
+
+[dependencies]
+runkon-flow = { path = "../runkon-flow" }
+runkon-runtimes = { path = "../runkon-runtimes" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yml = "0.0"
+ureq = { version = "2", features = ["json"] }
+tracing = "0.1"
+
+[dev-dependencies]
+runkon-flow = { path = "../runkon-flow", features = ["test-utils"] }
+tempfile = "3"
+
+[[example]]
+name = "standalone_flow"
+required-features = ["test-utils"]
