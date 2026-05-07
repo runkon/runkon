@@ -91,11 +91,15 @@ impl Drop for HeadlessHandle {
 }
 
 /// Spawn a headless agent subprocess.
+///
+/// `env` is applied via `Command::envs()` (overlay — parent env is preserved).
+/// Keys in `env` override inherited values; all other env vars pass through unchanged.
 #[cfg(unix)]
 pub fn spawn_headless(
     args: &[Cow<'static, str>],
     working_dir: &std::path::Path,
     binary_path: &str,
+    env: &std::collections::HashMap<String, String>,
 ) -> std::result::Result<HeadlessHandle, String> {
     use std::process::Stdio;
     let child = Command::new(binary_path)
@@ -104,6 +108,7 @@ pub fn spawn_headless(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
+        .envs(env)
         .spawn()
         .map_err(|e| format!("Failed to spawn headless agent: {e}"))?;
 
@@ -337,6 +342,74 @@ pub fn drain_stream_json<S: EventSink + ?Sized>(
 
 #[cfg(test)]
 mod tests {
+    // ------------------------------------------------------------------
+    // spawn_headless env injection tests
+    // ------------------------------------------------------------------
+
+    /// Env var injected via the `env` map must be visible in the child process.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_headless_injects_env_var() {
+        use std::io::Read;
+
+        let env = std::collections::HashMap::from([(
+            "CONDUCTOR_TEST_ENV_2929".to_string(),
+            "injected-value".to_string(),
+        )]);
+
+        let args: Vec<std::borrow::Cow<'static, str>> = vec![
+            std::borrow::Cow::Borrowed("-c"),
+            std::borrow::Cow::Borrowed("printf '%s' \"$CONDUCTOR_TEST_ENV_2929\""),
+        ];
+
+        let handle =
+            super::spawn_headless(&args, std::path::Path::new("/tmp"), "/bin/sh", &env).unwrap();
+        let (mut stdout, finish) = handle.into_drain_parts();
+        let mut output = String::new();
+        stdout.read_to_string(&mut output).unwrap();
+        finish();
+
+        assert!(
+            output.contains("injected-value"),
+            "expected 'injected-value' in child stdout, got: {output:?}"
+        );
+    }
+
+    /// An env var set in the `env` map must override a same-named var inherited
+    /// from the parent process (overlay semantics, not replacement).
+    ///
+    /// Uses HOME, which is reliably set on Unix, as the "pre-existing parent var"
+    /// so no unsafe set_var mutation is needed.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_headless_env_overlay_wins_over_parent() {
+        use std::io::Read;
+
+        // HOME is always set in the parent on Unix. Override it with a synthetic
+        // value to confirm that the env map entry beats the inherited parent var.
+        let env = std::collections::HashMap::from([(
+            "HOME".to_string(),
+            "/conductor-overlay-test".to_string(),
+        )]);
+
+        let args: Vec<std::borrow::Cow<'static, str>> = vec![
+            std::borrow::Cow::Borrowed("-c"),
+            std::borrow::Cow::Borrowed("printf '%s' \"$HOME\""),
+        ];
+
+        let handle =
+            super::spawn_headless(&args, std::path::Path::new("/tmp"), "/bin/sh", &env).unwrap();
+        let (mut stdout, finish) = handle.into_drain_parts();
+        let mut output = String::new();
+        stdout.read_to_string(&mut output).unwrap();
+        finish();
+
+        assert!(
+            output.contains("/conductor-overlay-test"),
+            "expected '/conductor-overlay-test' (overlay wins), got: {output:?}"
+        );
+    }
+
     // ------------------------------------------------------------------
     // drain_stream_json tests
     // ------------------------------------------------------------------

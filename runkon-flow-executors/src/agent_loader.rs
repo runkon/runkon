@@ -36,19 +36,15 @@ struct AgentFrontmatter {
     can_commit: bool,
     #[serde(default)]
     model: Option<String>,
-    #[serde(default = "default_runtime")]
-    runtime: String,
+    #[serde(default)]
+    runtime: Option<String>,
 }
 
 fn default_role() -> String {
     "reviewer".to_string()
 }
 
-fn default_runtime() -> String {
-    "claude".to_string()
-}
-
-fn parse_agent_file(path: &Path) -> Result<AgentDef, String> {
+fn parse_agent_file(path: &Path, default_runtime: Option<&str>) -> Result<AgentDef, String> {
     let content = fs::read_to_string(path)
         .map_err(|e| format!("Failed to read agent file {}: {e}", path.display()))?;
 
@@ -66,7 +62,7 @@ fn parse_agent_file(path: &Path) -> Result<AgentDef, String> {
                 role: AgentRole::Reviewer,
                 can_commit: false,
                 model: None,
-                runtime: default_runtime(),
+                runtime: default_runtime.unwrap_or("claude").to_string(),
                 prompt: content.trim().to_string(),
             });
         }
@@ -87,12 +83,19 @@ fn parse_agent_file(path: &Path) -> Result<AgentDef, String> {
         ));
     }
 
+    let runtime = fm
+        .runtime
+        .as_deref()
+        .or(default_runtime)
+        .unwrap_or("claude")
+        .to_string();
+
     Ok(AgentDef {
         name: file_stem,
         role,
         can_commit: fm.can_commit,
         model: fm.model,
-        runtime: fm.runtime,
+        runtime,
         prompt: body.trim().to_string(),
     })
 }
@@ -147,6 +150,7 @@ pub fn load_agent(
     name: &str,
     workflow_name: Option<&str>,
     plugin_dirs: &[String],
+    default_runtime: Option<&str>,
 ) -> Result<AgentDef, String> {
     let filename = format!("{name}.md");
     let bases = [working_dir, repo_path];
@@ -159,20 +163,20 @@ pub fn load_agent(
             .join("agents");
         if let Some(path) = find_agent_path(&bases, &subdir, &filename) {
             validate_path_within_either_base(&path, working_dir, repo_path)?;
-            return parse_agent_file(&path);
+            return parse_agent_file(&path, default_runtime);
         }
     }
 
     // 2. Shared conductor agents (worktree, then repo)
     if let Some(path) = find_agent_path(&bases, Path::new(".conductor/agents"), &filename) {
         validate_path_within_either_base(&path, working_dir, repo_path)?;
-        return parse_agent_file(&path);
+        return parse_agent_file(&path, default_runtime);
     }
 
     // 3. Claude Code agents fallback (worktree, then repo)
     if let Some(path) = find_agent_path(&bases, Path::new(".claude/agents"), &filename) {
         validate_path_within_either_base(&path, working_dir, repo_path)?;
-        return parse_agent_file(&path);
+        return parse_agent_file(&path, default_runtime);
     }
 
     // 4. Extra plugin directories (lowest priority)
@@ -180,7 +184,7 @@ pub fn load_agent(
         let path = Path::new(dir).join("agents").join(&filename);
         if path.is_file() {
             validate_path_within_base(&path, dir)?;
-            return parse_agent_file(&path);
+            return parse_agent_file(&path, default_runtime);
         }
     }
 
@@ -602,6 +606,9 @@ pub struct BuildPromptParams<'a> {
     pub dry_run: bool,
     /// Optional output schema for structured output enforcement.
     pub schema: Option<&'a OutputSchema>,
+    /// Default runtime name applied when the agent frontmatter omits `runtime:`.
+    /// Falls back to `"claude"` when `None`.
+    pub default_runtime: Option<&'a str>,
 }
 
 /// Load an agent and build the fully-substituted prompt.
@@ -626,6 +633,7 @@ pub fn load_agent_and_build_prompt(
         agent_name,
         Some(workflow_name),
         plugin_dirs,
+        params.default_runtime,
     )?;
 
     let resolved_snippets = if !params.snippet_refs.is_empty() {
@@ -709,7 +717,7 @@ mod tests {
 
         write_file(&tmp, ".conductor/agents/worker.md", "Do the work.");
 
-        let agent = load_agent(&dir, &dir, "worker", None, &[]).unwrap();
+        let agent = load_agent(&dir, &dir, "worker", None, &[], None).unwrap();
         assert_eq!(agent.name, "worker");
         assert_eq!(agent.prompt, "Do the work.");
         assert_eq!(agent.role, runkon_runtimes::AgentRole::Reviewer);
@@ -726,7 +734,7 @@ mod tests {
             "---\nrole: actor\ncan_commit: true\n---\nMake changes.",
         );
 
-        let agent = load_agent(&dir, &dir, "committer", None, &[]).unwrap();
+        let agent = load_agent(&dir, &dir, "committer", None, &[], None).unwrap();
         assert_eq!(agent.role, runkon_runtimes::AgentRole::Actor);
         assert!(agent.can_commit);
         assert_eq!(agent.prompt, "Make changes.");
@@ -744,7 +752,7 @@ mod tests {
             "Workflow-local agent.",
         );
 
-        let agent = load_agent(&dir, &dir, "worker", Some("my-wf"), &[]).unwrap();
+        let agent = load_agent(&dir, &dir, "worker", Some("my-wf"), &[], None).unwrap();
         assert_eq!(agent.prompt, "Workflow-local agent.");
     }
 
@@ -755,7 +763,7 @@ mod tests {
 
         write_file(&tmp, ".claude/agents/fallback.md", "Claude fallback.");
 
-        let agent = load_agent(&dir, &dir, "fallback", None, &[]).unwrap();
+        let agent = load_agent(&dir, &dir, "fallback", None, &[], None).unwrap();
         assert_eq!(agent.prompt, "Claude fallback.");
     }
 
@@ -764,7 +772,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().to_str().unwrap().to_string();
 
-        let err = load_agent(&dir, &dir, "ghost", None, &[]).unwrap_err();
+        let err = load_agent(&dir, &dir, "ghost", None, &[], None).unwrap_err();
         assert!(err.contains("ghost"), "got: {err}");
         assert!(err.contains("not found"), "got: {err}");
     }
@@ -781,7 +789,7 @@ mod tests {
             "---\nrole: [unclosed\n---\nPrompt.",
         );
 
-        let err = load_agent(&dir, &dir, "bad", None, &[]).unwrap_err();
+        let err = load_agent(&dir, &dir, "bad", None, &[], None).unwrap_err();
         assert!(
             err.contains("Invalid YAML") || err.contains("frontmatter"),
             "got: {err}"
@@ -799,7 +807,7 @@ mod tests {
             "---\nrole: reviewer\ncan_commit: true\n---\nPrompt.",
         );
 
-        let err = load_agent(&dir, &dir, "bad", None, &[]).unwrap_err();
+        let err = load_agent(&dir, &dir, "bad", None, &[], None).unwrap_err();
         assert!(err.contains("can_commit"), "got: {err}");
     }
 
@@ -962,6 +970,7 @@ mod tests {
             retry_error: None,
             dry_run: false,
             schema: None,
+            default_runtime: None,
         };
 
         let (agent_def, prompt) =
@@ -987,6 +996,7 @@ mod tests {
             retry_error: None,
             dry_run: false,
             schema: None,
+            default_runtime: None,
         };
 
         let (_, prompt) =
@@ -1014,6 +1024,7 @@ mod tests {
             retry_error: None,
             dry_run: false,
             schema: Some(&schema),
+            default_runtime: None,
         };
 
         let (_, prompt) =
@@ -1041,6 +1052,7 @@ mod tests {
             retry_error: None,
             dry_run: true,
             schema: None,
+            default_runtime: None,
         };
 
         let (_, prompt) =
@@ -1061,6 +1073,7 @@ mod tests {
             retry_error: None,
             dry_run: false,
             schema: None,
+            default_runtime: None,
         };
 
         let err =

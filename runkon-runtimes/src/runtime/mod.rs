@@ -131,6 +131,10 @@ impl std::fmt::Display for PollError {
 pub struct RuntimeOptions {
     /// Binary to spawn for headless re-invocation.
     pub binary_path: PathBuf,
+    /// Per-runtime environment variable overrides injected into the spawned
+    /// subprocess via `Command::envs()` (overlay — parent env is preserved).
+    /// Use this for endpoint/auth vars like `ANTHROPIC_BASE_URL`.
+    pub env: HashMap<String, String>,
     /// Where to write the per-run JSONL log of the agent's stdout stream.
     pub log_path_for_run: Arc<dyn Fn(&str) -> PathBuf + Send + Sync>,
     /// Where `CliRuntime` writes `<run_id>/output.json`.
@@ -156,6 +160,7 @@ pub fn resolve_runtime(
         let claude_options = claude::ClaudeRuntimeOptions {
             permission_mode,
             binary_path: options.binary_path.clone(),
+            env: options.env.clone(),
             log_path_for_run: options.log_path_for_run.clone(),
             argv_builder: options.argv_builder.clone(),
             stall_threshold: options.stall_threshold,
@@ -170,6 +175,22 @@ pub fn resolve_runtime(
         ))
     })?;
     match rt_config.runtime_type.as_deref().unwrap_or("cli") {
+        "claude" => {
+            // Named claude runtime: merge env — rt_config wins over options.env on conflict.
+            let mut merged_env = options.env.clone();
+            merged_env.extend(rt_config.env.clone());
+            Ok(Box::new(claude::ClaudeRuntime::new(
+                claude::ClaudeRuntimeOptions {
+                    permission_mode,
+                    binary_path: options.binary_path.clone(),
+                    env: merged_env,
+                    log_path_for_run: options.log_path_for_run.clone(),
+                    argv_builder: options.argv_builder.clone(),
+                    stall_threshold: options.stall_threshold,
+                    max_turns: options.max_turns,
+                },
+            )))
+        }
         "cli" => Ok(Box::new(cli::CliRuntime::new(
             rt_config.clone(),
             options.workspace_root.clone(),
@@ -321,6 +342,116 @@ mod tests {
     fn test_extract_missing_returns_none() {
         let v = json!({"a": 1});
         assert!(extract_json_path(&v, "b").is_none());
+    }
+
+    // ── resolve_runtime tests ────────────────────────────────────────────────
+
+    fn make_test_options(env: HashMap<String, String>) -> RuntimeOptions {
+        RuntimeOptions {
+            binary_path: PathBuf::from("/bin/sh"),
+            env,
+            log_path_for_run: Arc::new(|run_id: &str| PathBuf::from(format!("/tmp/{run_id}.log"))),
+            workspace_root: PathBuf::from("/tmp"),
+            argv_builder: Arc::new(|_req| Ok((vec![], None))),
+            stall_threshold: None,
+            max_turns: None,
+        }
+    }
+
+    #[test]
+    fn resolve_runtime_builtin_claude_regression() {
+        let runtimes = HashMap::new();
+        let options = make_test_options(HashMap::new());
+        let result = resolve_runtime(
+            "claude",
+            crate::permission::PermissionMode::Default,
+            &runtimes,
+            &options,
+        );
+        assert!(result.is_ok(), "built-in 'claude' runtime must resolve");
+    }
+
+    #[test]
+    fn resolve_runtime_named_claude_type_dispatches_ok() {
+        let mut runtimes = HashMap::new();
+        let rt = crate::config::RuntimeConfig {
+            runtime_type: Some("claude".to_string()),
+            ..crate::config::RuntimeConfig::default()
+        };
+        runtimes.insert("claude-local".to_string(), rt);
+        let options = make_test_options(HashMap::new());
+        let result = resolve_runtime(
+            "claude-local",
+            crate::permission::PermissionMode::Default,
+            &runtimes,
+            &options,
+        );
+        assert!(result.is_ok(), "named 'claude' type runtime must resolve");
+    }
+
+    #[test]
+    fn resolve_runtime_named_claude_env_rt_config_wins_on_conflict() {
+        let mut runtimes = HashMap::new();
+        let mut rt_env = HashMap::new();
+        rt_env.insert("X".to_string(), "over".to_string());
+        rt_env.insert("Y".to_string(), "new".to_string());
+        let rt = crate::config::RuntimeConfig {
+            runtime_type: Some("claude".to_string()),
+            env: rt_env,
+            ..crate::config::RuntimeConfig::default()
+        };
+        runtimes.insert("claude-local".to_string(), rt);
+
+        let mut base_env = HashMap::new();
+        base_env.insert("X".to_string(), "base".to_string());
+        let options = make_test_options(base_env);
+        let result = resolve_runtime(
+            "claude-local",
+            crate::permission::PermissionMode::Default,
+            &runtimes,
+            &options,
+        );
+        assert!(result.is_ok(), "named claude with env overlay must resolve");
+    }
+
+    #[test]
+    fn resolve_runtime_named_cli_type_regression() {
+        let mut runtimes = HashMap::new();
+        let rt = crate::config::RuntimeConfig {
+            runtime_type: Some("cli".to_string()),
+            binary: Some("echo".to_string()),
+            ..crate::config::RuntimeConfig::default()
+        };
+        runtimes.insert("my-cli".to_string(), rt);
+        let options = make_test_options(HashMap::new());
+        let result = resolve_runtime(
+            "my-cli",
+            crate::permission::PermissionMode::Default,
+            &runtimes,
+            &options,
+        );
+        assert!(result.is_ok(), "named 'cli' type runtime must resolve");
+    }
+
+    #[test]
+    fn resolve_runtime_unknown_name_is_error() {
+        let runtimes = HashMap::new();
+        let options = make_test_options(HashMap::new());
+        let result = resolve_runtime(
+            "nonexistent",
+            crate::permission::PermissionMode::Default,
+            &runtimes,
+            &options,
+        );
+        assert!(result.is_err(), "unknown runtime name must return Err");
+        let msg = match result {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected error, got ok"),
+        };
+        assert!(
+            msg.contains("nonexistent"),
+            "error must mention runtime name"
+        );
     }
 }
 

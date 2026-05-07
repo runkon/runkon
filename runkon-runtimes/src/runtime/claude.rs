@@ -47,6 +47,10 @@ pub type ArgvBuilder = Arc<
 pub struct ClaudeRuntimeOptions {
     pub permission_mode: PermissionMode,
     pub binary_path: PathBuf,
+    /// Per-runtime environment variable overrides injected into the spawned
+    /// subprocess via `Command::envs()` (overlay — parent env is preserved).
+    /// Use this for endpoint/auth vars like `ANTHROPIC_BASE_URL`.
+    pub env: std::collections::HashMap<String, String>,
     pub log_path_for_run: Arc<dyn Fn(&str) -> PathBuf + Send + Sync>,
     pub argv_builder: ArgvBuilder,
     /// If `Some(t)`, `drain_stream_json` returns `StalledOut` when no output
@@ -101,6 +105,7 @@ impl AgentRuntime for ClaudeRuntime {
                 &args,
                 std::path::Path::new(wd),
                 &self.options.binary_path.to_string_lossy(),
+                &self.options.env,
             )
             .map_err(|e| {
                 if let Some(ref pf) = prompt_file {
@@ -343,6 +348,7 @@ mod tests {
         ClaudeRuntime::new(ClaudeRuntimeOptions {
             permission_mode: PermissionMode::default(),
             binary_path: std::path::PathBuf::from("/nonexistent/agent-bin"),
+            env: std::collections::HashMap::new(),
             log_path_for_run: Arc::new(|run_id| std::env::temp_dir().join(format!("{run_id}.log"))),
             argv_builder: Arc::new(|_| Err("test stub: no argv_builder configured".to_string())),
             stall_threshold,
@@ -370,6 +376,36 @@ mod tests {
             tracker: Arc::new(NoopTracker),
             event_sink: Arc::new(NoopEventSink),
         }
+    }
+
+    #[test]
+    fn claude_runtime_options_env_field_round_trips() {
+        let mut env = std::collections::HashMap::new();
+        env.insert(
+            "ANTHROPIC_BASE_URL".to_string(),
+            "https://proxy.example.com".to_string(),
+        );
+        env.insert("ANTHROPIC_AUTH_TOKEN".to_string(), "test-token".to_string());
+
+        let options = ClaudeRuntimeOptions {
+            permission_mode: PermissionMode::default(),
+            binary_path: std::path::PathBuf::from("/usr/local/bin/claude"),
+            env: env.clone(),
+            log_path_for_run: Arc::new(|run_id| std::env::temp_dir().join(format!("{run_id}.log"))),
+            argv_builder: Arc::new(|_| Err("stub".to_string())),
+            stall_threshold: None,
+            max_turns: None,
+        };
+
+        assert_eq!(
+            options.env.get("ANTHROPIC_BASE_URL").map(String::as_str),
+            Some("https://proxy.example.com")
+        );
+        assert_eq!(
+            options.env.get("ANTHROPIC_AUTH_TOKEN").map(String::as_str),
+            Some("test-token")
+        );
+        assert_eq!(options.env.len(), 2);
     }
 
     #[test]
