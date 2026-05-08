@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::fmt;
 
 use super::types::{
-    Condition, GateType, InputType, OnChildFail, ScriptNode, WorkflowDef, WorkflowNode,
+    Condition, InputType, OnChildFail, ScriptNode, WorkflowDef, WorkflowNode, QUALITY_GATE_TYPE,
 };
 use crate::traits::item_provider::ItemProviderRegistry;
 
@@ -229,7 +229,7 @@ fn validate_nodes<F>(
                 );
             }
             WorkflowNode::Gate(n) => {
-                if n.gate_type == GateType::QualityGate && n.quality_gate.is_none() {
+                if n.gate_type == QUALITY_GATE_TYPE && n.quality_gate.is_none() {
                     errors.push(ValidationError {
                         message: format!(
                             "Quality gate '{}' is missing required `source` and `threshold` fields",

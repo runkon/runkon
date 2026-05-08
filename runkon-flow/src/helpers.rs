@@ -614,7 +614,7 @@ mod tests {
     use super::{collect_leaf_step_keys, parse_duration, serialize_or_empty_array};
     use crate::dsl::{
         AgentRef, AlwaysNode, CallNode, CallWorkflowNode, Condition, DoNode, ForEachNode, GateNode,
-        GateType, IfNode, OnMaxIter, ParallelNode, ScriptNode, UnlessNode, WhileNode, WorkflowNode,
+        IfNode, OnMaxIter, ParallelNode, ScriptNode, UnlessNode, WhileNode, WorkflowNode,
     };
     use crate::test_helpers::call_node;
 
@@ -626,7 +626,7 @@ mod tests {
             timeout: None,
             retries: 0,
             on_fail: None,
-            bot_name: None,
+            as_identity: None,
         })
     }
 
@@ -653,7 +653,7 @@ mod tests {
             inputs: Default::default(),
             retries: 0,
             on_fail: None,
-            bot_name: None,
+            as_identity: None,
         });
         let keys = collect_leaf_step_keys(&node);
         assert_eq!(keys, vec!["workflow:child-wf".to_string()]);
@@ -683,13 +683,13 @@ mod tests {
     fn leaf_keys_from_gate_node() {
         let node = WorkflowNode::Gate(GateNode {
             name: "human_approval".to_string(),
-            gate_type: GateType::HumanApproval,
+            gate_type: "human_approval".to_string(),
             prompt: None,
             min_approvals: 1,
             approval_mode: Default::default(),
             timeout_secs: 0,
             on_timeout: crate::dsl::OnTimeout::Fail,
-            bot_name: None,
+            as_identity: None,
             quality_gate: None,
             options: None,
         });
@@ -794,7 +794,7 @@ mod tests {
             on_fail: None,
             output: None,
             with: vec![],
-            bot_name: None,
+            as_identity: None,
             plugin_dirs: vec![],
             timeout: None,
             max_turns: None,

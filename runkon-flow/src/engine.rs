@@ -63,7 +63,7 @@ pub struct ExecutionState {
     pub block_output: Option<String>,
     pub block_with: Vec<String>,
     pub resume_ctx: Option<ResumeContext>,
-    pub default_bot_name: Option<String>,
+    pub default_as_identity: Option<String>,
     pub triggered_by_hook: bool,
     /// Schema resolver callback — (schema_name) → OutputSchema.
     /// The host closes over working_dir and repo_path at construction time.
@@ -91,7 +91,7 @@ pub struct ExecutionState {
 pub struct ChildWorkflowInput {
     pub inputs: HashMap<String, String>,
     pub iteration: u32,
-    pub bot_name: Option<String>,
+    pub as_identity: Option<String>,
     pub depth: u32,
     pub parent_step_id: Option<String>,
     /// Child token derived from the parent run's cancellation token.
@@ -704,7 +704,7 @@ pub fn run_on_fail_agent(
         on_fail: None,
         output: None,
         with: Vec::new(),
-        bot_name: None,
+        as_identity: None,
         plugin_dirs: Vec::new(),
         timeout: None,
         max_turns: None,
@@ -1122,7 +1122,7 @@ mod tests {
             block_output: Some("output".to_string()),
             block_with: vec!["with".to_string()],
             resume_ctx: None,
-            default_bot_name: Some("bot".to_string()),
+            default_as_identity: Some("bot".to_string()),
             triggered_by_hook: true,
             schema_resolver: None,
             child_runner: Some(Arc::new(DummyChildRunner)),
@@ -1145,7 +1145,7 @@ mod tests {
         assert_eq!(child.model, Some("gpt-4".to_string()));
         assert_eq!(child.depth, 3);
         assert_eq!(child.target_label, Some("label".to_string()));
-        assert_eq!(child.default_bot_name, Some("bot".to_string()));
+        assert_eq!(child.default_as_identity, Some("bot".to_string()));
         assert_eq!(child.parent_run_id, "parent-1");
 
         // Runtime state reset
@@ -1253,7 +1253,7 @@ mod tests {
             block_output: None,
             block_with: vec![],
             resume_ctx: None,
-            default_bot_name: None,
+            default_as_identity: None,
             triggered_by_hook: true,
             schema_resolver: None,
             child_runner: None,

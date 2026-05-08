@@ -82,9 +82,9 @@ fn execute_call_inner(
         let inputs = super::build_inputs_map(state);
 
         let effective_bot_name = node
-            .bot_name
+            .as_identity
             .as_deref()
-            .or(state.default_bot_name.as_deref())
+            .or(state.default_as_identity.as_deref())
             .map(String::from);
 
         let mut merged_plugin_dirs = state.extra_plugin_dirs.clone();
@@ -391,7 +391,7 @@ mod tests {
             retries: 0,
             on_fail: None,
             timeout: None,
-            bot_name: None,
+            as_identity: None,
             plugin_dirs: vec![],
             max_turns: None,
         };

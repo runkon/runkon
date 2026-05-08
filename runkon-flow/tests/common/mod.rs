@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use runkon_flow::cancellation::CancellationToken;
 use runkon_flow::dsl::{
-    ApprovalMode, ForEachNode, GateNode, GateType, OnChildFail, OnCycle, OnTimeout, WorkflowDef,
+    ApprovalMode, ForEachNode, GateNode, OnChildFail, OnCycle, OnTimeout, WorkflowDef,
     WorkflowNode, WorkflowTrigger,
 };
 use runkon_flow::engine::{ChildWorkflowInput, ChildWorkflowRunner, ExecutionState, ResumeContext};
@@ -151,7 +151,7 @@ pub fn make_state(
         block_output: None,
         block_with: vec![],
         resume_ctx: None,
-        default_bot_name: None,
+        default_as_identity: None,
         triggered_by_hook: false,
         schema_resolver: None,
         child_runner: None,
@@ -209,13 +209,13 @@ pub fn make_def_with_always(
 pub fn gate_node(name: &str) -> WorkflowNode {
     WorkflowNode::Gate(GateNode {
         name: name.to_string(),
-        gate_type: GateType::HumanApproval,
+        gate_type: "human_approval".to_string(),
         prompt: None,
         min_approvals: 1,
         approval_mode: ApprovalMode::default(),
         timeout_secs: 0,
         on_timeout: OnTimeout::Fail,
-        bot_name: None,
+        as_identity: None,
         quality_gate: None,
         options: None,
     })
@@ -226,13 +226,13 @@ pub fn gate_node(name: &str) -> WorkflowNode {
 pub fn timeout_gate(on_timeout: OnTimeout) -> WorkflowNode {
     WorkflowNode::Gate(GateNode {
         name: "approval".to_string(),
-        gate_type: GateType::HumanApproval,
+        gate_type: "human_approval".to_string(),
         prompt: None,
         min_approvals: 1,
         approval_mode: ApprovalMode::default(),
         timeout_secs: 0,
         on_timeout,
-        bot_name: None,
+        as_identity: None,
         quality_gate: None,
         options: None,
     })

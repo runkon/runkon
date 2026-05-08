@@ -3,7 +3,7 @@ members = ["runkon-anthropic", "runkon-flow", "runkon-flow-executors", "runkon-r
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0-alpha"
+version = "0.2.0-alpha"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/runkon/runkon"
