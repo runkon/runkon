@@ -116,7 +116,9 @@ impl ClaudeAgentExecutor {
 
         // API fast path: schema + key both present.
         if let (Some(schema), Some(api_key)) = (params.schema, self.api_key.as_deref()) {
-            let model = ctx.model.as_deref()
+            let model = ctx
+                .model
+                .as_deref()
                 .or(agent_def.model.as_deref())
                 .or_else(|| {
                     ctx.runtimes
