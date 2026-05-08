@@ -746,6 +746,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "runkon-anthropic"
+version = "0.1.0-alpha"
+dependencies = [
+ "runkon-flow",
+ "runkon-flow-executors",
+ "runkon-runtimes",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
 name = "runkon-flow"
 version = "0.1.0-alpha"
 dependencies = [
@@ -775,7 +789,6 @@ dependencies = [
  "serde_yml",
  "tempfile",
  "tracing",
- "ureq",
 ]
 
 [[package]]

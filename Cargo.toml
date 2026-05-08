@@ -1,5 +1,5 @@
 [workspace]
-members = ["runkon-flow", "runkon-flow-executors", "runkon-runtimes"]
+members = ["runkon-anthropic", "runkon-flow", "runkon-flow-executors", "runkon-runtimes"]
 resolver = "2"
 
 [workspace.package]
