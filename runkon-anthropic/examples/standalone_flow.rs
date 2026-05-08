@@ -1,21 +1,21 @@
-//! Standalone doc example: `runkon-flow-executors` is self-contained.
+//! Standalone doc example: `runkon-anthropic` composes cleanly with `runkon-flow`.
 //!
-//! Constructs a `FlowEngine` wired entirely from `runkon_flow_executors` types
-//! and in-memory helpers from `runkon_flow` — zero `conductor_*` imports.
-//! Compilation alone proves the extraction is real; no workflow is executed.
+//! Constructs a `FlowEngine` wired from `runkon_anthropic`, `runkon_flow_executors`,
+//! and `runkon_flow` in-memory helpers — zero `conductor_*` imports.
+//! Compilation alone proves the composition is real; no workflow is executed.
 //!
 //! Run:
 //!   cargo run --example standalone_flow --features test-utils
 
 use std::sync::Arc;
 
+use runkon_anthropic::{ApiCallExecutor, ClaudeAgentExecutor};
 use runkon_flow::engine_error::EngineError;
 use runkon_flow::persistence_memory::InMemoryWorkflowPersistence;
 use runkon_flow::traits::action_executor::{ActionExecutor, ActionOutput, ActionParams, StepInfo};
 use runkon_flow::traits::run_context::RunContext;
 use runkon_flow::{FlowEngineBuilder, InMemoryWorkflowResolver};
-use runkon_flow_executors::anthropic_api::ApiCallExecutor;
-use runkon_flow_executors::{ChannelEventSink, ClaudeAgentExecutor, PathPrependingEnvProvider};
+use runkon_flow_executors::{ChannelEventSink, PathPrependingEnvProvider};
 use runkon_runtimes::{AgentRuntime, Result as RkResult, RuntimeError, RuntimeResolver};
 
 // Stub resolver so ClaudeAgentExecutor can be instantiated without a real runtime.

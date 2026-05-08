@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use runkon_flow::constants::metadata_keys;
 use runkon_flow::output_schema::OutputSchema;
 
-use crate::output::{derive_output_from_value, schema_to_tool_json};
+use runkon_flow_executors::output::{derive_output_from_value, schema_to_tool_json};
 
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
