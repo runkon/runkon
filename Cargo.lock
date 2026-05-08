@@ -747,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "runkon-anthropic"
-version = "0.1.0-alpha"
+version = "0.2.0-alpha"
 dependencies = [
  "runkon-flow",
  "runkon-flow-executors",
@@ -761,7 +761,7 @@ dependencies = [
 
 [[package]]
 name = "runkon-flow"
-version = "0.1.0-alpha"
+version = "0.2.0-alpha"
 dependencies = [
  "chrono",
  "rusqlite",
@@ -780,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "runkon-flow-executors"
-version = "0.1.0-alpha"
+version = "0.2.0-alpha"
 dependencies = [
  "runkon-flow",
  "runkon-runtimes",
@@ -793,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "runkon-runtimes"
-version = "0.1.0-alpha"
+version = "0.2.0-alpha"
 dependencies = [
  "libc",
  "serde",
