@@ -6,8 +6,8 @@
 //! host binary's global dispatch as well.
 //!
 //! Panics that escape the engine are caught, emitted as `EngineEvent::Panicked`
-//! (so all registered sinks — including the conductor-core `PanicDbSink` — receive
-//! them), then re-raised so the host binary's panic handler still fires.
+//! (delivered to all registered `EventSink` impls), then re-raised so the host
+//! binary's panic handler still fires.
 
 use std::panic::UnwindSafe;
 use std::path::{Path, PathBuf};

@@ -64,6 +64,9 @@ pub struct WorkflowRun {
     pub total_turns: Option<i64>,
     pub total_cost_usd: Option<f64>,
     pub total_duration_ms: Option<i64>,
+    /// Persisted model override for this run. Cross-runtime — same semantics as
+    /// `ActionParams::model`. `None` means no override; each step executor falls
+    /// back to its own default. (Issue #2987 may move this column; keep current.)
     pub model: Option<String>,
     pub dismissed: bool,
     #[serde(skip)]

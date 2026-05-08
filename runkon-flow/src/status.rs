@@ -154,7 +154,7 @@ impl std::str::FromStr for WorkflowStepStatus {
     }
 }
 
-#[cfg(feature = "rusqlite")]
+#[cfg(feature = "sqlite")]
 mod sql_impls {
     use super::{WorkflowRunStatus, WorkflowStepStatus};
     use rusqlite::types::{FromSql, FromSqlError, FromSqlResult, ToSql, ToSqlOutput, ValueRef};
@@ -303,7 +303,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "rusqlite")]
+    #[cfg(feature = "sqlite")]
     mod rusqlite_roundtrip {
         use super::*;
         use rusqlite::types::{FromSql, ToSql};

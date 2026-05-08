@@ -9,7 +9,7 @@ description = "Portable workflow execution engine — DSL, traits, and in-memory
 [features]
 test-utils = []
 utoipa = ["dep:utoipa"]
-rusqlite = ["dep:rusqlite"]
+sqlite = ["dep:rusqlite"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -20,12 +20,36 @@ chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
-dirs = "6"
 tempfile = "3"
 threadpool = "1"
 wait-timeout = "0.2"
 utoipa = { version = "5", optional = true }
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+
+[[example]]
+name = "echo_executor"
+
+[[example]]
+name = "static_items_provider"
+
+[[example]]
+name = "always_approve_gate"
+
+[[example]]
+name = "fixed_env_provider"
+
+[[example]]
+name = "stdout_event_sink"
+
+[[example]]
+name = "static_workflow_resolver"
+
+[[example]]
+name = "logging_child_runner"
+
+[[example]]
+name = "full_engine_minimal"
+required-features = ["test-utils"]
 
 [[test]]
 name = "basic_flow"
@@ -49,4 +73,8 @@ required-features = ["test-utils"]
 
 [[test]]
 name = "lease_refresh"
+required-features = ["test-utils"]
+
+[[test]]
+name = "cross_harness_composition"
 required-features = ["test-utils"]

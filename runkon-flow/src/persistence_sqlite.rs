@@ -1,8 +1,8 @@
 //! SQLite-backed implementation of [`WorkflowPersistence`] (Phase 4 step 4.3).
 //!
-//! Gated on the `rusqlite` cargo feature. The module is fully self-contained:
+//! Gated on the `sqlite` cargo feature. The module is fully self-contained:
 //! row mappers, column constants, and the small set of gate / json helpers
-//! all live here so a harness only needs to enable `rusqlite` to get a
+//! all live here so a harness only needs to enable `sqlite` to get a
 //! production-ready persistence backend without writing any SQL itself.
 
 use std::collections::{HashMap, HashSet};
@@ -203,6 +203,158 @@ fn serialize_gate_selections(selections: Option<&[String]>) -> Result<Option<Str
 }
 
 // ---------------------------------------------------------------------------
+// Canonical schema DDL
+// ---------------------------------------------------------------------------
+
+/// Engine-essential DDL for the three canonical workflow tables and their
+/// indexes. Column set mirrors [`RUN_COLUMNS`] and [`STEP_COLUMNS`] exactly.
+/// Conductor-specific extension columns (`worktree_id`, `ticket_id`, etc.) and
+/// FK references to conductor-only tables are intentionally excluded so the DDL
+/// is portable to non-conductor harnesses.
+///
+/// Exposed as a `pub const` for harnesses that prefer to mirror it in an
+/// explicit migration file rather than calling [`create_canonical_schema`] at
+/// runtime.
+pub const CANONICAL_SCHEMA_DDL: &str = "
+CREATE TABLE IF NOT EXISTS workflow_runs (
+    id                                TEXT    PRIMARY KEY,
+    workflow_name                     TEXT    NOT NULL,
+    parent_run_id                     TEXT,
+    status                            TEXT    NOT NULL DEFAULT 'pending'
+                                          CHECK (status IN (
+                                              'pending','running','completed','failed',
+                                              'cancelled','waiting','needs_resume','cancelling'
+                                          )),
+    dry_run                           INTEGER NOT NULL DEFAULT 0,
+    trigger                           TEXT    NOT NULL DEFAULT '',
+    started_at                        TEXT    NOT NULL DEFAULT (datetime('now')),
+    ended_at                          TEXT,
+    result_summary                    TEXT,
+    definition_snapshot               TEXT,
+    inputs                            TEXT,
+    parent_workflow_run_id            TEXT,
+    iteration                         INTEGER NOT NULL DEFAULT 0,
+    blocked_on                        TEXT,
+    total_input_tokens                INTEGER,
+    total_output_tokens               INTEGER,
+    total_cache_read_input_tokens     INTEGER,
+    total_cache_creation_input_tokens INTEGER,
+    total_turns                       INTEGER,
+    total_cost_usd                    REAL,
+    total_duration_ms                 INTEGER,
+    model                             TEXT,
+    error                             TEXT,
+    dismissed                         INTEGER NOT NULL DEFAULT 0,
+    workflow_title                    TEXT,
+    owner_token                       TEXT,
+    lease_until                       TEXT,
+    generation                        INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS workflow_run_steps (
+    id                TEXT    PRIMARY KEY,
+    workflow_run_id   TEXT    NOT NULL REFERENCES workflow_runs(id),
+    step_name         TEXT    NOT NULL DEFAULT '',
+    role              TEXT    NOT NULL DEFAULT 'agent'
+                          CHECK (role IN ('agent','gate','foreach','workflow')),
+    can_commit        INTEGER NOT NULL DEFAULT 0,
+    condition_expr    TEXT,
+    status            TEXT    NOT NULL DEFAULT 'pending'
+                          CHECK (status IN (
+                              'pending','running','completed','failed',
+                              'skipped','waiting','timed_out'
+                          )),
+    child_run_id      TEXT,
+    position          INTEGER NOT NULL DEFAULT 0,
+    started_at        TEXT,
+    ended_at          TEXT,
+    result_text       TEXT,
+    condition_met     INTEGER,
+    iteration         INTEGER NOT NULL DEFAULT 0,
+    parallel_group_id TEXT,
+    context_out       TEXT,
+    markers_out       TEXT,
+    retry_count       INTEGER NOT NULL DEFAULT 0,
+    gate_type         TEXT,
+    gate_prompt       TEXT,
+    gate_timeout      TEXT,
+    gate_approved_by  TEXT,
+    gate_approved_at  TEXT,
+    gate_feedback     TEXT,
+    structured_output TEXT,
+    output_file       TEXT,
+    gate_options      TEXT,
+    gate_selections   TEXT,
+    fan_out_total     INTEGER,
+    fan_out_completed INTEGER,
+    fan_out_failed    INTEGER,
+    fan_out_skipped   INTEGER,
+    step_error        TEXT
+);
+
+CREATE TABLE IF NOT EXISTS workflow_run_step_fan_out_items (
+    id            TEXT    PRIMARY KEY,
+    step_run_id   TEXT    NOT NULL REFERENCES workflow_run_steps(id),
+    item_type     TEXT    NOT NULL,
+    item_id       TEXT    NOT NULL,
+    item_ref      TEXT    NOT NULL DEFAULT '',
+    child_run_id  TEXT,
+    status        TEXT    NOT NULL DEFAULT 'pending',
+    dispatched_at TEXT,
+    completed_at  TEXT,
+    context       TEXT,
+    UNIQUE (step_run_id, item_type, item_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_status
+    ON workflow_runs(status);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_runs_parent_workflow_run_id
+    ON workflow_runs(parent_workflow_run_id);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_run_steps_run
+    ON workflow_run_steps(workflow_run_id);
+
+CREATE INDEX IF NOT EXISTS idx_steps_status_gate
+    ON workflow_run_steps(status, gate_type);
+
+CREATE INDEX IF NOT EXISTS idx_workflow_run_steps_child_run_id
+    ON workflow_run_steps(child_run_id);
+
+CREATE INDEX IF NOT EXISTS idx_fan_out_items_step
+    ON workflow_run_step_fan_out_items(step_run_id, status);
+";
+
+/// Create the canonical workflow tables (`workflow_runs`,
+/// `workflow_run_steps`, `workflow_run_step_fan_out_items`) and their
+/// engine-essential indexes in the given connection.
+///
+/// Idempotent — uses `CREATE TABLE IF NOT EXISTS`. Safe to call against an
+/// already-populated DB (e.g. conductor's, where the tables are managed by
+/// conductor's own migrations 020/021).
+///
+/// Harnesses without their own migration runner can call this as their sole
+/// initial setup. Harnesses with a migration runner can either call this
+/// directly or mirror [`CANONICAL_SCHEMA_DDL`] in an explicit migration file.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use std::sync::{Arc, Mutex};
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let conn = rusqlite::Connection::open("workflow.db")?;
+/// runkon_flow::create_canonical_schema(&conn)?;
+/// let p = runkon_flow::SqliteWorkflowPersistence::from_shared_connection(
+///     Arc::new(Mutex::new(conn))
+/// );
+/// # Ok(())
+/// # }
+/// ```
+pub fn create_canonical_schema(conn: &Connection) -> Result<(), EngineError> {
+    conn.execute_batch(CANONICAL_SCHEMA_DDL).map_err(db_err)
+}
+
+// ---------------------------------------------------------------------------
 // SqliteWorkflowPersistence
 // ---------------------------------------------------------------------------
 
@@ -211,10 +363,10 @@ fn serialize_gate_selections(selections: Option<&[String]>) -> Result<Option<Str
 /// Wraps a [`rusqlite::Connection`] behind `Arc<Mutex<_>>` so it satisfies the
 /// `Send + Sync` requirement of the trait. Each method acquires the lock and
 /// runs its own SQL directly against the connection — no manager-layer
-/// indirection. The required schema is defined by the conductor migrations
-/// for now (`workflow_runs`, `workflow_run_steps`,
-/// `workflow_run_step_fan_out_items`); a built-in `create_tables()` helper is
-/// tracked as a follow-up under Phase 4 step 4.4.
+/// indirection. The required schema (`workflow_runs`, `workflow_run_steps`,
+/// `workflow_run_step_fan_out_items`) can be created with
+/// [`create_canonical_schema`]; harnesses that manage their own migrations can
+/// mirror [`CANONICAL_SCHEMA_DDL`] directly.
 pub struct SqliteWorkflowPersistence {
     conn: Arc<Mutex<Connection>>,
 }
@@ -994,8 +1146,144 @@ fn validate_gate_selections(
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::SqliteWorkflowPersistence;
+    use super::{create_canonical_schema, SqliteWorkflowPersistence};
     use crate::traits::persistence::WorkflowPersistence;
+
+    #[test]
+    fn create_canonical_schema_creates_three_tables() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        create_canonical_schema(&conn).expect("create_canonical_schema must succeed");
+
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .unwrap();
+        let tables: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+
+        assert!(
+            tables.contains(&"workflow_run_step_fan_out_items".to_string()),
+            "workflow_run_step_fan_out_items table must exist"
+        );
+        assert!(
+            tables.contains(&"workflow_run_steps".to_string()),
+            "workflow_run_steps table must exist"
+        );
+        assert!(
+            tables.contains(&"workflow_runs".to_string()),
+            "workflow_runs table must exist"
+        );
+
+        let mut idx_stmt = conn
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'index' \
+                 AND name NOT LIKE 'sqlite_%' ORDER BY name",
+            )
+            .unwrap();
+        let indexes: Vec<String> = idx_stmt
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+
+        for expected in &[
+            "idx_fan_out_items_step",
+            "idx_steps_status_gate",
+            "idx_workflow_run_steps_child_run_id",
+            "idx_workflow_run_steps_run",
+            "idx_workflow_runs_parent_workflow_run_id",
+            "idx_workflow_runs_status",
+        ] {
+            assert!(
+                indexes.contains(&(*expected).to_string()),
+                "expected index {expected} to exist"
+            );
+        }
+    }
+
+    #[test]
+    fn create_canonical_schema_is_idempotent() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        create_canonical_schema(&conn).expect("first call must succeed");
+        create_canonical_schema(&conn).expect("second call must also succeed (idempotent)");
+
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            table_count, 3,
+            "table count must remain 3 after second call"
+        );
+    }
+
+    #[test]
+    fn create_canonical_schema_supports_full_persistence_round_trip() {
+        use crate::status::WorkflowStepStatus;
+        use crate::traits::persistence::{NewRun, NewStep, StepUpdate};
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        create_canonical_schema(&conn).expect("schema setup must succeed");
+        let conn = Arc::new(Mutex::new(conn));
+        let p = SqliteWorkflowPersistence::from_shared_connection(Arc::clone(&conn));
+
+        let run = p
+            .create_run(NewRun {
+                workflow_name: "round-trip-wf".to_string(),
+                parent_run_id: String::new(),
+                dry_run: false,
+                trigger: "manual".to_string(),
+                definition_snapshot: None,
+                parent_workflow_run_id: None,
+            })
+            .expect("create_run must succeed against canonical schema");
+
+        let step_id = p
+            .insert_step(NewStep {
+                workflow_run_id: run.id.clone(),
+                step_name: "step-1".to_string(),
+                role: "agent".to_string(),
+                can_commit: false,
+                position: 0,
+                iteration: 0,
+                retry_count: None,
+            })
+            .expect("insert_step must succeed");
+
+        p.update_step(
+            &step_id,
+            StepUpdate {
+                generation: run.generation,
+                status: WorkflowStepStatus::Completed,
+                child_run_id: None,
+                result_text: Some("ok".to_string()),
+                context_out: None,
+                markers_out: None,
+                retry_count: Some(0),
+                structured_output: None,
+                step_error: None,
+            },
+        )
+        .expect("update_step must succeed");
+
+        let fetched = p
+            .get_run(&run.id)
+            .expect("get_run must not error")
+            .expect("run must exist");
+        assert_eq!(fetched.workflow_name, "round-trip-wf");
+        assert_eq!(fetched.generation, 0);
+
+        let steps = p.get_steps(&run.id).expect("get_steps must not error");
+        assert_eq!(steps.len(), 1, "one step must be present");
+        assert_eq!(steps[0].step_name, "step-1");
+        assert_eq!(steps[0].status, WorkflowStepStatus::Completed);
+        assert_eq!(steps[0].result_text.as_deref(), Some("ok"));
+    }
 
     /// Create an in-memory SQLite DB with the minimal schema for acquire_lease tests.
     fn make_lease_db() -> (SqliteWorkflowPersistence, String) {

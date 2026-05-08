@@ -27,7 +27,18 @@ pub struct GateParams {
     /// Resolved options map (StepRef already expanded by the dispatcher).
     pub options: HashMap<String, String>,
     pub timeout_secs: u64,
-    pub bot_name: Option<String>,
+    /// When `Some`, names the identity this gate should resolve as.
+    /// Resolver implementations use it to select harness-defined auth
+    /// material — e.g. signing approval webhooks or posting gate prompts
+    /// as a specific bot. Examples:
+    ///
+    /// - GitHub App installation name → `GH_TOKEN`
+    /// - AWS service account ID → `AWS_ACCESS_KEY_ID` / related vars
+    /// - Slack bot user ID → `SLACK_BOT_TOKEN`
+    /// - Agent persona key → API key scoped to that persona
+    ///
+    /// Resolvers that don't model named identities ignore the field.
+    pub as_identity: Option<String>,
     pub step_id: String,
 }
 

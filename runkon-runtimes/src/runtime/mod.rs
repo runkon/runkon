@@ -71,6 +71,9 @@ pub struct RuntimeRequest {
     pub agent_def: AgentDef,
     pub prompt: String,
     pub working_dir: PathBuf,
+    /// Workflow-level model override. Cross-runtime — same convention as
+    /// `ActionParams::model` in `runkon-flow`. `None` defers to agent frontmatter;
+    /// call `resolved_model()` rather than reading this field directly.
     pub model: Option<String>,
     pub extra_cli_args: Vec<(Cow<'static, str>, Cow<'static, str>)>,
     pub plugin_dirs: Vec<String>,

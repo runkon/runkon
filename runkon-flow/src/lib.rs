@@ -13,8 +13,14 @@ pub mod helpers;
 pub mod output_schema;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod persistence_memory;
-#[cfg(feature = "rusqlite")]
+#[cfg(feature = "sqlite")]
 pub mod persistence_sqlite;
+#[cfg(feature = "sqlite")]
+pub use persistence_sqlite::create_canonical_schema;
+#[cfg(feature = "sqlite")]
+pub use persistence_sqlite::SqliteWorkflowPersistence;
+#[cfg(feature = "sqlite")]
+pub use persistence_sqlite::CANONICAL_SCHEMA_DDL;
 pub mod prompt_builder;
 pub mod status;
 #[cfg(any(test, feature = "test-utils"))]

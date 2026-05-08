@@ -33,7 +33,7 @@ pub fn make_params(name: &str) -> ActionParams {
         gate_feedback: None,
         extensions: crate::extensions::Extensions::default(),
         model: None,
-        bot_name: None,
+        as_identity: None,
         plugin_dirs: vec![],
     }
 }

@@ -177,7 +177,7 @@ pub(super) fn build_action_params(
     retries_remaining: u32,
     retry_error: Option<String>,
     model: Option<String>,
-    bot_name: Option<String>,
+    as_identity: Option<String>,
     plugin_dirs: Vec<String>,
     max_turns: Option<u32>,
 ) -> crate::traits::action_executor::ActionParams {
@@ -200,7 +200,7 @@ pub(super) fn build_action_params(
         gate_feedback,
         extensions,
         model,
-        bot_name,
+        as_identity,
         plugin_dirs,
     }
 }
