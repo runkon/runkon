@@ -1,0 +1,30 @@
+fields:
+  reviewed_by: string
+  blocking_findings:
+    type: array
+    items:
+      reviewer: string
+      file: string
+      line: number
+      severity: enum(critical, warning)
+      message: string
+  overall_approved: boolean
+  summary: string
+  off_diff_findings:
+    type: array
+    items:
+      file: string
+      line: number
+      severity: enum(critical, warning)
+      title: string
+      message: string
+      reviewer: string
+      labels:
+        type: array
+        items: string
+
+markers:
+  has_review_issues: "overall_approved == false"
+  approved: "overall_approved == true"
+  has_blocking_findings: "blocking_findings.length > 0"
+  has_warnings: "blocking_findings[severity == warning].length > 0"

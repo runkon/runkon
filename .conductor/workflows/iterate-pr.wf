@@ -1,0 +1,58 @@
+workflow iterate-pr {
+  meta {
+    title       = "Iterate on PR Feedback"
+    description = "Sync with main, resolve conflicts, lint, then iterate review until clean"
+    trigger     = "manual"
+    targets     = ["worktree"]
+    group       = "Development"
+  }
+
+  do {
+    max_iterations = 10
+    on_max_iter    = fail
+
+    call workflow rebase-worktree
+
+    if rebase-worktree.pulled_new_commits {
+      call workflow lint-fix
+    }
+
+    call workflow review-pr {
+      inputs {
+        scope = "incremental"
+      }
+    }
+
+    if review-aggregator.has_blocking_findings {
+      call triage-reviews {
+        as = "developer"
+      }
+
+      if triage-reviews.has_to_address {
+        call address-reviews {
+          as = "developer"
+        }
+
+        call verify
+
+        if verify.has_failures {
+          call address-reviews {
+            retries = 1
+            as      = "developer"
+          }
+          call verify
+        }
+
+        script fmt-fix {
+          run = ".conductor/scripts/fmt-fix.sh"
+        }
+        call workflow lint-fix
+      }
+    }
+
+    script push {
+      run = ".conductor/scripts/push.sh"
+      as  = "developer"
+    }
+  } while push.pushed_new_commits
+}

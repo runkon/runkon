@@ -1,0 +1,52 @@
+workflow review-pr {
+  meta {
+    title       = "Review Pull Request"
+    description = "Run review swarm and aggregate findings"
+    trigger     = "manual"
+    targets     = ["pr", "worktree"]
+    group       = "Review"
+  }
+
+  inputs {
+    scope default = "full"
+  }
+
+  // Resolve the PR's base branch once at workflow start. Exposes it to all
+  // downstream steps as {{base_branch}} via the engine's variable map.
+  // Without this, reviewer agents and detect-* scripts each run their own
+  // `gh pr view` and the silent fallback to `main` corrupts the diff. #2736.
+  script resolve-pr-base {
+    run = ".conductor/scripts/resolve-pr-base.sh"
+  }
+  script detect-file-types {
+    run = ".conductor/scripts/detect-file-types.sh"
+    env = {
+      BASE_BRANCH = "{{base_branch}}"
+    }
+  }
+
+  parallel {
+    output    = "review-findings"
+    with      = ["review-diff-scope", "off-diff-findings"]
+    fail_fast = false
+    call review-architecture    { retries = 1 }
+    call review-dry-abstraction { retries = 1 }
+    call review-security        { retries = 1  if = "detect-file-types.has_code_changes" }
+    call review-performance     { retries = 1  if = "detect-file-types.has_code_changes" }
+    call review-error-handling  { retries = 1  if = "detect-file-types.has_code_changes" }
+    call review-test-coverage   { retries = 1  if = "detect-file-types.has_code_changes" }
+  }
+
+  call review-aggregator { output = "review-aggregator" retries = 1 }
+  script submit-review {
+    run = ".conductor/scripts/submit-review.sh"
+    as  = "reviewer"
+    env = {
+      PRIOR_OUTPUT     = "{{prior_output}}"
+      PR_NUMBER        = "{{pr_number}}"
+      DRY_RUN          = "{{dry_run}}"
+      TICKET_SOURCE_ID = "{{ticket_source_id}}"
+      CONDUCTOR_REPO   = "{{repo_name}}"
+    }
+  }
+}

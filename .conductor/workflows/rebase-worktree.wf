@@ -1,0 +1,31 @@
+workflow rebase-worktree {
+  meta {
+    title       = "Rebase Worktree"
+    description = "Fetch latest base branch, resolve any conflicts, and force-push the branch"
+    trigger     = "manual"
+    targets     = ["worktree"]
+    group       = "Development"
+  }
+
+  script check-mergeability {
+    run = ".conductor/scripts/check-mergeability.sh"
+  }
+
+  if check-mergeability.has_conflicts {
+    script sync-with-base {
+      run = ".conductor/scripts/sync-with-base.sh"
+      env = { FEATURE_BASE_BRANCH = "{{feature_base_branch}}" }
+    }
+
+    if sync-with-base.has_conflicts {
+      call resolve-conflicts
+    }
+
+    unless sync-with-base.is_up_to_date {
+      script push {
+        run = ".conductor/scripts/push-rebased.sh"
+        as  = "developer"
+      }
+    }
+  }
+}
