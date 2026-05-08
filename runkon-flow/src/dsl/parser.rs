@@ -818,9 +818,6 @@ impl Parser {
         let options = match kvs.get("options") {
             None => None,
             Some(v) => {
-                if gate_type == QUALITY_GATE_TYPE {
-                    return Err("`options` is not valid on quality_gate gates".to_string());
-                }
                 let parsed = match v {
                     KvValue::Array(items) => {
                         let map: HashMap<String, String> =
