@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Portable executor implementations for runkon-flow — event sinks, env providers, and step utilities without conductor dependencies"
+publish = false
 
 [features]
 test-utils = ["runkon-flow/test-utils"]

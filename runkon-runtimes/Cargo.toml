@@ -1,10 +1,11 @@
 [package]
 name = "runkon-runtimes"
-version = "0.1.1-alpha"
+version = "0.1.0-alpha"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Portable agent runtime harness — spawn, poll, and cancel agents without depending on conductor's full domain"
+publish = false
 
 [features]
 utoipa = ["dep:utoipa"]
