@@ -1467,6 +1467,27 @@ workflow wf {
     }
 
     #[test]
+    fn parse_gate_quality_gate_without_options_accepted() {
+        let src = r#"
+workflow wf {
+    gate quality_gate {
+        source = prior_step
+        threshold = 80
+    }
+}
+"#;
+        let def =
+            parse_workflow_str(src, "t.wf").expect("quality_gate without options must parse");
+        match &def.body[0] {
+            WorkflowNode::Gate(g) => {
+                assert_eq!(g.gate_type, "quality_gate");
+                assert!(g.options.is_none(), "options should be absent");
+            }
+            other => panic!("expected Gate node, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_gate_custom_type_accepts_options() {
         let src = r#"
 workflow wf {
