@@ -1,0 +1,73 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (must equal workspace.package.version in Cargo.toml)"
+        required: true
+      dry_run:
+        description: "Dry run: skip pushing tags, skip cargo publish (uses --dry-run), skip GH release"
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Verify input version matches Cargo.toml
+        run: |
+          ws_ver=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
+          if [[ "${{ inputs.version }}" != "$ws_ver" ]]; then
+            echo "::error::workflow input version ${{ inputs.version }} != workspace version $ws_ver"
+            exit 1
+          fi
+
+      - uses: Swatinem/rust-cache@v2.9.1
+
+      - name: Pre-flight build & test
+        run: cargo test --workspace --features runkon-flow/test-utils
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Tag crates
+        run: ./scripts/release/tag.sh
+
+      - name: Push tags
+        if: inputs.dry_run != 'true'
+        run: |
+          version="${{ inputs.version }}"
+          git push origin \
+            "runkon-flow-v${version}" \
+            "runkon-flow-executors-v${version}" \
+            "runkon-runtimes-v${version}" \
+            "runkon-anthropic-v${version}"
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+            ./scripts/release/publish.sh --dry-run
+          else
+            ./scripts/release/publish.sh
+          fi
+
+      - name: Create GitHub release
+        if: inputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/release/gh-release.sh
