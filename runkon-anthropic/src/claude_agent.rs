@@ -116,10 +116,20 @@ impl ClaudeAgentExecutor {
 
         // API fast path: schema + key both present.
         if let (Some(schema), Some(api_key)) = (params.schema, self.api_key.as_deref()) {
-            let model = ctx
-                .model
-                .as_deref()
-                .unwrap_or(crate::anthropic_api::DEFAULT_API_MODEL);
+            let model = match ctx.model.as_deref() {
+                Some(m) => m,
+                None => ctx
+                    .runtimes
+                    .get(effective_runtime)
+                    .and_then(|rc| rc.default_model.as_deref())
+                    .ok_or_else(|| {
+                        format!(
+                            "no model resolved for agent '{}': step did not specify a model \
+                             and runtime '{}' has no default_model configured",
+                            params.name, effective_runtime
+                        )
+                    })?,
+            };
             let executor = ApiCallExecutor::new(api_key.to_string());
             let out = executor
                 .execute(&prompt, schema, model, ctx.step_timeout)
@@ -342,7 +352,8 @@ mod tests {
 
         let resolver = Arc::new(TrackingResolver::new());
         let resolver_ref = resolver.clone();
-        let ctx = make_ctx(&tmp);
+        let mut ctx = make_ctx(&tmp);
+        ctx.model = Some("test-model".to_string());
 
         let schema = make_schema();
         let params = ClaudeAgentParams {
@@ -365,6 +376,78 @@ mod tests {
             "runtime resolver must not be called when schema + api_key are both present"
         );
         let _ = result; // Err expected (no real endpoint), but we only care that resolver wasn't called.
+    }
+
+    #[test]
+    fn api_path_uses_runtime_default_model_when_step_model_absent() {
+        let tmp = TempDir::new().unwrap();
+        write_agent(&tmp);
+
+        let resolver = Arc::new(TrackingResolver::new());
+        let mut ctx = make_ctx(&tmp);
+        // No per-step model — resolution must fall through to runtime config.
+        ctx.model = None;
+        ctx.runtimes.insert(
+            "claude".to_string(),
+            runkon_runtimes::config::RuntimeConfig {
+                default_model: Some("model-from-config".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let schema = make_schema();
+        let params = ClaudeAgentParams {
+            name: "test-agent",
+            inputs: &HashMap::new(),
+            snippet_refs: &[],
+            dry_run: false,
+            retry_error: None,
+            schema: Some(&schema),
+        };
+
+        let executor = ClaudeAgentExecutor::new(resolver, Some("dummy-api-key".to_string()));
+        let result = executor.execute(&ctx, &params);
+
+        // Model resolved successfully from runtime config; the Err (if any) must be
+        // an HTTP error from the dummy endpoint, not a "no model resolved" error.
+        if let Err(ref e) = result {
+            assert!(
+                !e.contains("no model resolved"),
+                "model resolution should succeed via runtime default_model, got: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn api_path_errors_when_no_model_and_no_runtime_default() {
+        let tmp = TempDir::new().unwrap();
+        write_agent(&tmp);
+
+        let resolver = Arc::new(TrackingResolver::new());
+        let ctx = make_ctx(&tmp); // model: None, runtimes: empty
+
+        let schema = make_schema();
+        let params = ClaudeAgentParams {
+            name: "test-agent",
+            inputs: &HashMap::new(),
+            snippet_refs: &[],
+            dry_run: false,
+            retry_error: None,
+            schema: Some(&schema),
+        };
+
+        let executor = ClaudeAgentExecutor::new(resolver, Some("dummy-api-key".to_string()));
+        let result = executor.execute(&ctx, &params);
+
+        let err = result.expect_err("expected Err when no model and no runtime default");
+        assert!(
+            err.contains("no model resolved"),
+            "error should mention 'no model resolved', got: {err}"
+        );
+        assert!(
+            err.contains("test-agent"),
+            "error should name the agent, got: {err}"
+        );
     }
 
     #[test]
