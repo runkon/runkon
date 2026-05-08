@@ -107,7 +107,7 @@ fn main() {
     let params = ChildWorkflowInput {
         inputs: HashMap::new(),
         iteration: 0,
-        bot_name: None,
+        as_identity: None,
         depth: 1,
         parent_step_id: None,
         cancellation: CancellationToken::new(),

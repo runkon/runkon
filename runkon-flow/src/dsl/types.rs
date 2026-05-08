@@ -107,10 +107,10 @@ impl WorkflowDef {
         refs
     }
 
-    /// Collect all bot names referenced across body and always blocks, sorted and deduplicated.
-    pub fn collect_all_bot_names(&self) -> Vec<String> {
-        let mut names = collect_bot_names(&self.body);
-        names.extend(collect_bot_names(&self.always));
+    /// Collect all as_identity values referenced across body and always blocks, sorted and deduplicated.
+    pub fn collect_all_as_identities(&self) -> Vec<String> {
+        let mut names = collect_as_identities(&self.body);
+        names.extend(collect_as_identities(&self.always));
         names.sort();
         names.dedup();
         names
@@ -294,7 +294,7 @@ pub struct ScriptNode {
     /// Named GitHub App bot identity to use for this script (matches `[github.apps.<name>]`).
     /// When set, the resolved installation token is injected as `GH_TOKEN` so the script
     /// uses that bot identity for all `gh` CLI calls.
-    pub bot_name: Option<String>,
+    pub as_identity: Option<String>,
 }
 
 /// The action to take when all retries for a `call`, `script`, or `call workflow` step exhaust.
@@ -364,7 +364,7 @@ pub struct CallNode {
     #[serde(default)]
     pub with: Vec<String>,
     /// Named GitHub App bot identity to use for this call (matches `[github.apps.<name>]`).
-    pub bot_name: Option<String>,
+    pub as_identity: Option<String>,
     /// Per-step plugin directories from the `.wf` file. Merged with repo-level
     /// `extra_plugin_dirs` at execution time to give this agent access to
     /// specialist plugins (e.g. `/usr/local/bsg/agent-architecture/planner`).
@@ -389,7 +389,7 @@ pub struct CallWorkflowNode {
     pub retries: u32,
     pub on_fail: Option<OnFail>,
     /// Named GitHub App bot identity inherited by child call nodes.
-    pub bot_name: Option<String>,
+    pub as_identity: Option<String>,
 }
 
 /// A condition in an `if`/`unless` block.
@@ -543,7 +543,7 @@ pub struct GateNode {
     pub timeout_secs: u64,
     pub on_timeout: OnTimeout,
     /// Named GitHub App bot identity used for `gh` calls inside this gate.
-    pub bot_name: Option<String>,
+    pub as_identity: Option<String>,
     /// Quality gate-specific configuration. Present only when `gate_type == QualityGate`.
     #[serde(flatten)]
     pub quality_gate: Option<QualityGateConfig>,
@@ -736,34 +736,34 @@ pub(crate) fn collect_schema_refs(nodes: &[WorkflowNode]) -> Vec<String> {
     refs
 }
 
-/// Collect all bot names (`bot_name =` values) from a node tree.
-pub(crate) fn collect_bot_names(nodes: &[WorkflowNode]) -> Vec<String> {
+/// Collect all as_identity values from a node tree.
+pub(crate) fn collect_as_identities(nodes: &[WorkflowNode]) -> Vec<String> {
     let mut names = Vec::new();
     for node in nodes {
         match node {
             WorkflowNode::Call(n) => {
-                if let Some(ref b) = n.bot_name {
+                if let Some(ref b) = n.as_identity {
                     names.push(b.clone());
                 }
             }
             WorkflowNode::CallWorkflow(n) => {
-                if let Some(ref b) = n.bot_name {
+                if let Some(ref b) = n.as_identity {
                     names.push(b.clone());
                 }
             }
             WorkflowNode::Gate(n) => {
-                if let Some(ref b) = n.bot_name {
+                if let Some(ref b) = n.as_identity {
                     names.push(b.clone());
                 }
             }
             WorkflowNode::Script(n) => {
-                if let Some(ref b) = n.bot_name {
+                if let Some(ref b) = n.as_identity {
                     names.push(b.clone());
                 }
             }
             _ => {
                 if let Some(body) = node.body() {
-                    names.extend(collect_bot_names(body));
+                    names.extend(collect_as_identities(body));
                 }
             }
         }

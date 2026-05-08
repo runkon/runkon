@@ -98,9 +98,9 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
     // workflow-level default bot when the step doesn't specify one.
     {
         let effective_bot = node
-            .bot_name
+            .as_identity
             .as_deref()
-            .or(state.default_bot_name.as_deref());
+            .or(state.default_as_identity.as_deref());
         let provider_env = state
             .script_env_provider
             .env(state.run_ctx.as_ref(), effective_bot);
@@ -459,7 +459,7 @@ mod tests {
             block_output: None,
             block_with: vec![],
             resume_ctx: None,
-            default_bot_name: None,
+            default_as_identity: None,
             triggered_by_hook: false,
             schema_resolver: None,
             child_runner: None,
@@ -482,7 +482,7 @@ mod tests {
             timeout: None,
             retries: 0,
             on_fail: None,
-            bot_name: None,
+            as_identity: None,
         }
     }
 
@@ -584,7 +584,7 @@ mod tests {
             timeout: None,
             retries: 0,
             on_fail: None,
-            bot_name: None,
+            as_identity: None,
         };
         execute_script(&mut state, &node, 0).unwrap();
 
@@ -622,7 +622,7 @@ mod tests {
             timeout: None,
             retries: 0,
             on_fail: None,
-            bot_name: None,
+            as_identity: None,
         };
         execute_script(&mut state, &node, 0).unwrap();
 
@@ -656,7 +656,7 @@ mod tests {
             timeout: None,
             retries: 0,
             on_fail: None,
-            bot_name: None,
+            as_identity: None,
         };
         execute_script(&mut state, &node, 0).unwrap();
 
@@ -690,7 +690,7 @@ mod tests {
             timeout: Some(1), // 1 second timeout
             retries: 0,
             on_fail: None,
-            bot_name: None,
+            as_identity: None,
         };
         let result = execute_script(&mut state, &node, 0);
         // on_fail is None, so failure should return Err.
@@ -722,7 +722,7 @@ mod tests {
             timeout: None,
             retries: 0,
             on_fail: None,
-            bot_name: None,
+            as_identity: None,
         };
         execute_script(&mut state, &node, 0).unwrap();
 
@@ -746,7 +746,7 @@ mod tests {
             timeout: None,
             retries: 0,
             on_fail: None,
-            bot_name: None,
+            as_identity: None,
         };
         execute_script(&mut state, &node, 0).unwrap();
 
@@ -768,7 +768,7 @@ mod tests {
             timeout: None,
             retries: 0,
             on_fail: None,
-            bot_name: None,
+            as_identity: None,
         };
         let result = execute_script(&mut state, &node, 0);
         assert!(result.is_err(), "expected failure for non-zero exit");
@@ -796,7 +796,7 @@ mod tests {
             timeout: None,
             retries: 0,
             on_fail: None,
-            bot_name: None,
+            as_identity: None,
         };
         let result = execute_script(&mut state, &node, 0);
         assert!(result.is_err(), "expected failure for non-zero exit");

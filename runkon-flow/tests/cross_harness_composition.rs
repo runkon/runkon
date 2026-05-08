@@ -143,7 +143,7 @@ fn parent_in_harness_a_can_invoke_child_in_harness_b() {
             inputs: HashMap::new(),
             retries: 0,
             on_fail: None,
-            bot_name: None,
+            as_identity: None,
         })],
     );
 

@@ -386,7 +386,7 @@ impl Parser {
         }
     }
 
-    fn extract_retries_on_fail_bot_name(
+    fn extract_retries_on_fail_as_identity(
         kvs: &mut HashMap<String, KvValue>,
         err_prefix: &str,
     ) -> std::result::Result<(u32, Option<OnFail>, Option<String>), String> {
@@ -401,8 +401,8 @@ impl Parser {
             Some(v) if v.as_str() == "continue" => Some(OnFail::Continue),
             Some(v) => Some(OnFail::Agent(v.into_agent_ref()?)),
         };
-        let bot_name = kvs.remove("as").map(|v| v.into_string());
-        Ok((retries, on_fail, bot_name))
+        let as_identity = kvs.remove("as").map(|v| v.into_string());
+        Ok((retries, on_fail, as_identity))
     }
 
     fn parse_call(&mut self) -> std::result::Result<CallNode, String> {
@@ -413,7 +413,7 @@ impl Parser {
         let mut on_fail = None;
         let mut output = None;
         let mut with = Vec::new();
-        let mut bot_name = None;
+        let mut as_identity = None;
         let mut plugin_dirs = Vec::new();
         let mut timeout = None;
         let mut max_turns = None;
@@ -423,7 +423,7 @@ impl Parser {
             let mut kvs = self.parse_kvs()?;
             self.expect(&Token::RBrace)?;
 
-            (retries, on_fail, bot_name) = Self::extract_retries_on_fail_bot_name(&mut kvs, "")?;
+            (retries, on_fail, as_identity) = Self::extract_retries_on_fail_as_identity(&mut kvs, "")?;
             if let Some(o) = kvs.remove("output") {
                 output = Some(o.into_string());
             }
@@ -447,7 +447,7 @@ impl Parser {
             on_fail,
             output,
             with,
-            bot_name,
+            as_identity,
             plugin_dirs,
             timeout,
             max_turns,
@@ -462,7 +462,7 @@ impl Parser {
         let mut inputs = HashMap::new();
         let mut retries = 0u32;
         let mut on_fail = None;
-        let mut bot_name = None;
+        let mut as_identity = None;
 
         if self.peek() == &Token::LBrace {
             self.advance();
@@ -482,7 +482,7 @@ impl Parser {
             kvs.extend(self.parse_kvs()?);
             self.expect(&Token::RBrace)?;
 
-            (retries, on_fail, bot_name) = Self::extract_retries_on_fail_bot_name(&mut kvs, "")?;
+            (retries, on_fail, as_identity) = Self::extract_retries_on_fail_as_identity(&mut kvs, "")?;
         }
 
         Ok(CallWorkflowNode {
@@ -490,7 +490,7 @@ impl Parser {
             inputs,
             retries,
             on_fail,
-            bot_name,
+            as_identity,
         })
     }
 
@@ -764,7 +764,7 @@ impl Parser {
                 Some("continue") => OnFailAction::Continue,
                 Some(other) => return Err(format!("Invalid on_fail for quality_gate: {other}")),
             };
-            let bot_name = kvs.get("as").map(|v| v.as_str().to_string());
+            let as_identity = kvs.get("as").map(|v| v.as_str().to_string());
 
             return Ok(GateNode {
                 name,
@@ -774,7 +774,7 @@ impl Parser {
                 approval_mode: Default::default(),
                 timeout_secs: 0,
                 on_timeout: OnTimeout::Fail,
-                bot_name,
+                as_identity,
                 quality_gate: Some(QualityGateConfig {
                     source,
                     threshold,
@@ -817,7 +817,7 @@ impl Parser {
             Some(other) => return Err(format!("Invalid on_timeout: {other}")),
         };
 
-        let bot_name = kvs.get("as").map(|v| v.as_str().to_string());
+        let as_identity = kvs.get("as").map(|v| v.as_str().to_string());
 
         let options = match kvs.get("options") {
             None => None,
@@ -858,7 +858,7 @@ impl Parser {
             approval_mode,
             timeout_secs,
             on_timeout,
-            bot_name,
+            as_identity,
             quality_gate: None,
             options,
         })
@@ -901,8 +901,8 @@ impl Parser {
             .transpose()
             .map_err(|e| format!("script '{name}': invalid timeout: {e}"))?;
 
-        let (retries, on_fail, bot_name) =
-            Self::extract_retries_on_fail_bot_name(&mut kvs, &format!("script '{name}': "))?;
+        let (retries, on_fail, as_identity) =
+            Self::extract_retries_on_fail_as_identity(&mut kvs, &format!("script '{name}': "))?;
 
         Ok(ScriptNode {
             name,
@@ -911,7 +911,7 @@ impl Parser {
             timeout,
             retries,
             on_fail,
-            bot_name,
+            as_identity,
         })
     }
 
