@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Portable agent runtime harness — spawn, poll, and cancel agents without depending on conductor's full domain"
+readme = "README.md"
+keywords = ["agent", "runtime", "subprocess", "harness", "runkon"]
+categories = ["development-tools", "os"]
 
 [features]
 utoipa = ["dep:utoipa"]

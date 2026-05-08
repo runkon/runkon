@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Portable workflow execution engine — DSL, traits, and in-memory reference implementations"
+readme = "README.md"
+keywords = ["workflow", "engine", "dsl", "automation", "agent"]
+categories = ["development-tools", "asynchronous"]
 
 [features]
 test-utils = []

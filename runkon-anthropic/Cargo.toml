@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Anthropic API client and Claude agent executor for runkon-flow. Supports both direct API calls and headless Claude CLI subprocesses."
+readme = "README.md"
+keywords = ["anthropic", "claude", "llm", "agent", "runkon"]
+categories = ["api-bindings", "development-tools"]
 
 [features]
 test-utils = ["runkon-flow/test-utils"]
