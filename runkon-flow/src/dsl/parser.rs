@@ -423,7 +423,8 @@ impl Parser {
             let mut kvs = self.parse_kvs()?;
             self.expect(&Token::RBrace)?;
 
-            (retries, on_fail, as_identity) = Self::extract_retries_on_fail_as_identity(&mut kvs, "")?;
+            (retries, on_fail, as_identity) =
+                Self::extract_retries_on_fail_as_identity(&mut kvs, "")?;
             if let Some(o) = kvs.remove("output") {
                 output = Some(o.into_string());
             }
@@ -482,7 +483,8 @@ impl Parser {
             kvs.extend(self.parse_kvs()?);
             self.expect(&Token::RBrace)?;
 
-            (retries, on_fail, as_identity) = Self::extract_retries_on_fail_as_identity(&mut kvs, "")?;
+            (retries, on_fail, as_identity) =
+                Self::extract_retries_on_fail_as_identity(&mut kvs, "")?;
         }
 
         Ok(CallWorkflowNode {
