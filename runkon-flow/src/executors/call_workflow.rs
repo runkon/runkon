@@ -259,9 +259,9 @@ pub fn execute_call_workflow(
         let raw_child_inputs = node.inputs.clone();
 
         let effective_bot_name = node
-            .bot_name
+            .as_identity
             .clone()
-            .or_else(|| state.default_bot_name.clone());
+            .or_else(|| state.default_as_identity.clone());
 
         // Create a minimal child workflow definition stub for passing inputs.
         // The child runner (conductor-core adapter) will load the actual def.
@@ -301,7 +301,7 @@ pub fn execute_call_workflow(
             crate::engine::ChildWorkflowInput {
                 inputs: resolved_inputs,
                 iteration,
-                bot_name: effective_bot_name.clone(),
+                as_identity: effective_bot_name.clone(),
                 depth: child_depth,
                 parent_step_id: Some(step_id.clone()),
                 cancellation: state.cancellation.child(),

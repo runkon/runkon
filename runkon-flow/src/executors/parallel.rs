@@ -172,7 +172,7 @@ pub fn execute_parallel(
             retries,
             None,
             state.model.clone(),
-            state.default_bot_name.clone(),
+            state.default_as_identity.clone(),
             state.extra_plugin_dirs.clone(),
             None,
         );
@@ -492,7 +492,7 @@ mod tests {
             block_output: None,
             block_with: vec![],
             resume_ctx: None,
-            default_bot_name: None,
+            default_as_identity: None,
             triggered_by_hook: false,
             schema_resolver: None,
             child_runner: None,

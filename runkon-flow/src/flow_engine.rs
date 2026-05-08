@@ -925,7 +925,7 @@ mod tests {
             approval_mode: ApprovalMode::default(),
             timeout_secs: 0,
             on_timeout: OnTimeout::Fail,
-            bot_name: None,
+            as_identity: None,
             quality_gate: None,
             options: None,
         })
@@ -1076,7 +1076,7 @@ mod tests {
             approval_mode: ApprovalMode::default(),
             timeout_secs: 0,
             on_timeout: OnTimeout::Fail,
-            bot_name: None,
+            as_identity: None,
             quality_gate: Some(QualityGateConfig {
                 source: "step1".to_string(),
                 threshold: 80,
@@ -1143,7 +1143,7 @@ mod tests {
                 inputs: HashMap::new(),
                 retries: 0,
                 on_fail: None,
-                bot_name: None,
+                as_identity: None,
             })],
         );
 
@@ -1173,7 +1173,7 @@ mod tests {
                 inputs: HashMap::new(),
                 retries: 0,
                 on_fail: None,
-                bot_name: None,
+                as_identity: None,
             })],
         );
         let engine = FlowEngineBuilder::new()
@@ -1211,7 +1211,7 @@ mod tests {
                 inputs: HashMap::new(),
                 retries: 0,
                 on_fail: None,
-                bot_name: None,
+                as_identity: None,
             })],
         );
 
@@ -1242,7 +1242,7 @@ mod tests {
                 inputs: HashMap::new(),
                 retries: 0,
                 on_fail: None,
-                bot_name: None,
+                as_identity: None,
             })],
         );
 
@@ -1292,7 +1292,7 @@ mod tests {
             block_output: None,
             block_with: vec![],
             resume_ctx: None,
-            default_bot_name: None,
+            default_as_identity: None,
             triggered_by_hook: false,
             schema_resolver: None,
             child_runner: None,
@@ -1846,7 +1846,7 @@ mod tests {
             on_fail: None,
             output: None,
             with: vec![],
-            bot_name: None,
+            as_identity: None,
             plugin_dirs: vec![],
             timeout: Some("10ms".to_string()),
             max_turns: None,

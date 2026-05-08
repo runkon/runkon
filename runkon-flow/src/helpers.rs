@@ -626,7 +626,7 @@ mod tests {
             timeout: None,
             retries: 0,
             on_fail: None,
-            bot_name: None,
+            as_identity: None,
         })
     }
 
@@ -653,7 +653,7 @@ mod tests {
             inputs: Default::default(),
             retries: 0,
             on_fail: None,
-            bot_name: None,
+            as_identity: None,
         });
         let keys = collect_leaf_step_keys(&node);
         assert_eq!(keys, vec!["workflow:child-wf".to_string()]);
@@ -689,7 +689,7 @@ mod tests {
             approval_mode: Default::default(),
             timeout_secs: 0,
             on_timeout: crate::dsl::OnTimeout::Fail,
-            bot_name: None,
+            as_identity: None,
             quality_gate: None,
             options: None,
         });
@@ -794,7 +794,7 @@ mod tests {
             on_fail: None,
             output: None,
             with: vec![],
-            bot_name: None,
+            as_identity: None,
             plugin_dirs: vec![],
             timeout: None,
             max_turns: None,

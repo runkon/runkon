@@ -151,7 +151,7 @@ pub fn make_state(
         block_output: None,
         block_with: vec![],
         resume_ctx: None,
-        default_bot_name: None,
+        default_as_identity: None,
         triggered_by_hook: false,
         schema_resolver: None,
         child_runner: None,
@@ -215,7 +215,7 @@ pub fn gate_node(name: &str) -> WorkflowNode {
         approval_mode: ApprovalMode::default(),
         timeout_secs: 0,
         on_timeout: OnTimeout::Fail,
-        bot_name: None,
+        as_identity: None,
         quality_gate: None,
         options: None,
     })
@@ -232,7 +232,7 @@ pub fn timeout_gate(on_timeout: OnTimeout) -> WorkflowNode {
         approval_mode: ApprovalMode::default(),
         timeout_secs: 0,
         on_timeout,
-        bot_name: None,
+        as_identity: None,
         quality_gate: None,
         options: None,
     })
