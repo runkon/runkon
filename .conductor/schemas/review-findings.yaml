@@ -1,0 +1,26 @@
+fields:
+  findings:
+    type: array
+    items:
+      file: string
+      line: number
+      severity: enum(critical, warning)
+      message: string
+      suggestion?:
+        type: string
+        desc: "Suggested fix or remediation"
+  off_diff_findings?:
+    type: array
+    desc: "Issues found in unchanged/removed code — filed as separate issues, do not affect approval"
+    items:
+      title: string
+      file: string
+      line: number
+      severity: enum(critical, warning)
+      body: string
+  approved: boolean
+  summary: string
+
+markers:
+  has_review_issues: "approved == false"
+  has_critical_findings: "findings[severity == critical].length > 0"

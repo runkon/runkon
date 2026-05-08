@@ -1,0 +1,25 @@
+fields:
+  tasks:
+    type: array
+    items:
+      id:
+        type: string
+        desc: "Short identifier like task-1, setup-db, add-api-route"
+      description: string
+      files:
+        type: array
+        desc: "Files this task will create or modify"
+      dependencies?:
+        type: array
+        desc: "IDs of tasks that must complete before this one"
+      complexity: enum(low, medium, high)
+  risks?:
+    type: array
+    desc: "Risks or unknowns that should be resolved before implementing"
+  estimated_minutes:
+    type: number
+    desc: "Estimated total minutes to complete the entire plan, including all tasks"
+  summary: string
+
+markers:
+  has_complex_tasks: "tasks[complexity == high].length > 0"
