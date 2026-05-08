@@ -116,20 +116,21 @@ impl ClaudeAgentExecutor {
 
         // API fast path: schema + key both present.
         if let (Some(schema), Some(api_key)) = (params.schema, self.api_key.as_deref()) {
-            let model = match ctx.model.as_deref() {
-                Some(m) => m,
-                None => ctx
-                    .runtimes
-                    .get(effective_runtime)
-                    .and_then(|rc| rc.default_model.as_deref())
-                    .ok_or_else(|| {
-                        format!(
-                            "no model resolved for agent '{}': step did not specify a model \
-                             and runtime '{}' has no default_model configured",
-                            params.name, effective_runtime
-                        )
-                    })?,
-            };
+            let model = ctx.model.as_deref()
+                .or(agent_def.model.as_deref())
+                .or_else(|| {
+                    ctx.runtimes
+                        .get(effective_runtime)
+                        .and_then(|rc| rc.default_model.as_deref())
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "no model resolved for agent '{}': step did not specify a model, \
+                         agent frontmatter declares no model, and runtime '{}' has no \
+                         default_model configured",
+                        params.name, effective_runtime
+                    )
+                })?;
             let executor = ApiCallExecutor::new(api_key.to_string());
             let out = executor
                 .execute(&prompt, schema, model, ctx.step_timeout)
@@ -325,6 +326,16 @@ mod tests {
         std::fs::write(path.join("test-agent.md"), "Do the work.").unwrap();
     }
 
+    fn write_agent_with_model(dir: &TempDir, model: &str) {
+        let path = dir.path().join(".conductor").join("agents");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(
+            path.join("test-agent.md"),
+            format!("---\nmodel: {model}\n---\nDo the work."),
+        )
+        .unwrap();
+    }
+
     fn make_ctx(dir: &TempDir) -> ClaudeAgentContext {
         let dir_str = dir.path().to_str().unwrap().to_string();
         ClaudeAgentContext {
@@ -414,6 +425,38 @@ mod tests {
             assert!(
                 !e.contains("no model resolved"),
                 "model resolution should succeed via runtime default_model, got: {e}"
+            );
+        }
+    }
+
+    #[test]
+    fn api_path_uses_agent_frontmatter_model_when_step_model_absent() {
+        let tmp = TempDir::new().unwrap();
+        write_agent_with_model(&tmp, "model-from-frontmatter");
+
+        let resolver = Arc::new(TrackingResolver::new());
+        let mut ctx = make_ctx(&tmp);
+        ctx.model = None;
+        // No runtime default — model must come from agent frontmatter.
+
+        let schema = make_schema();
+        let params = ClaudeAgentParams {
+            name: "test-agent",
+            inputs: &HashMap::new(),
+            snippet_refs: &[],
+            dry_run: false,
+            retry_error: None,
+            schema: Some(&schema),
+        };
+
+        let executor = ClaudeAgentExecutor::new(resolver, Some("dummy-api-key".to_string()));
+        let result = executor.execute(&ctx, &params);
+
+        // Model resolved from frontmatter; any Err must not be "no model resolved".
+        if let Err(ref e) = result {
+            assert!(
+                !e.contains("no model resolved"),
+                "model resolution should succeed via agent frontmatter model, got: {e}"
             );
         }
     }
