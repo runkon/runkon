@@ -5,3 +5,7 @@ Cargo.lock.bak
 .idea/
 .vscode/
 *.swp
+
+# Conductor workflow artifacts
+.conductor.db
+PLAN.md
