@@ -5,6 +5,9 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Portable executor primitives for runkon-flow — event sinks, env providers, structured output parsing, and agent definition loading. No vendor coupling."
+readme = "README.md"
+keywords = ["workflow", "executor", "runkon", "agent", "automation"]
+categories = ["development-tools"]
 
 [features]
 test-utils = ["runkon-flow/test-utils"]
