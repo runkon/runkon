@@ -5,19 +5,18 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Portable executor primitives for runkon-flow — event sinks, env providers, structured output parsing, and agent definition loading. No vendor coupling."
-publish = false
 
 [features]
 test-utils = ["runkon-flow/test-utils"]
 
 [dependencies]
-runkon-flow = { path = "../runkon-flow" }
-runkon-runtimes = { path = "../runkon-runtimes" }
+runkon-flow = { path = "../runkon-flow", version = "0.1.0-alpha" }
+runkon-runtimes = { path = "../runkon-runtimes", version = "0.1.0-alpha" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yml = "0.0"
 tracing = "0.1"
 
 [dev-dependencies]
-runkon-flow = { path = "../runkon-flow", features = ["test-utils"] }
+runkon-flow = { path = "../runkon-flow", version = "0.1.0-alpha", features = ["test-utils"] }
 tempfile = "3"
