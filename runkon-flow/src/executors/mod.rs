@@ -185,6 +185,11 @@ pub(super) fn build_action_params(
     if let Some(s) = schema {
         extensions.insert(s);
     }
+    if let Some(mt) = max_turns {
+        extensions.insert(crate::extensions::ClaudeActionParams {
+            max_turns: Some(mt),
+        });
+    }
     crate::traits::action_executor::ActionParams {
         name: name.to_string(),
         inputs,
@@ -197,7 +202,6 @@ pub(super) fn build_action_params(
         model,
         bot_name,
         plugin_dirs,
-        max_turns,
     }
 }
 
@@ -263,5 +267,49 @@ pub(super) fn skip_if_already_completed(
         true
     } else {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::extensions::ClaudeActionParams;
+    use crate::traits::action_executor::ActionParams;
+
+    fn make_inputs() -> Arc<HashMap<String, String>> {
+        Arc::new(HashMap::new())
+    }
+
+    fn make_test_params(max_turns: Option<u32>) -> ActionParams {
+        build_action_params(
+            "test",
+            make_inputs(),
+            vec![],
+            false,
+            None,
+            None,
+            0,
+            None,
+            None,
+            None,
+            vec![],
+            max_turns,
+        )
+    }
+
+    #[test]
+    fn build_action_params_inserts_claude_action_params_when_max_turns_some() {
+        let params = make_test_params(Some(50));
+        let cap = params
+            .extensions
+            .get::<ClaudeActionParams>()
+            .expect("ClaudeActionParams should be present");
+        assert_eq!(cap.max_turns, Some(50));
+    }
+
+    #[test]
+    fn build_action_params_no_claude_action_params_when_max_turns_none() {
+        let params = make_test_params(None);
+        assert!(params.extensions.get::<ClaudeActionParams>().is_none());
     }
 }

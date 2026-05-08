@@ -26,6 +26,13 @@ impl Extensions {
     }
 }
 
+/// Claude-specific per-step parameters, passed through `ActionParams.extensions`.
+/// Same convention as `OutputSchema`: executor-specific types live in extensions,
+/// not on the shared `ActionParams` surface.
+pub struct ClaudeActionParams {
+    pub max_turns: Option<u32>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -70,5 +77,17 @@ mod tests {
         let a = ext.get::<String>().unwrap();
         let b = cloned.get::<String>().unwrap();
         assert!(Arc::ptr_eq(&a, &b));
+    }
+
+    #[test]
+    fn claude_action_params_round_trips() {
+        let mut ext = Extensions::default();
+        ext.insert(ClaudeActionParams {
+            max_turns: Some(50),
+        });
+        let v = ext
+            .get::<ClaudeActionParams>()
+            .expect("should find ClaudeActionParams");
+        assert_eq!(v.max_turns, Some(50));
     }
 }

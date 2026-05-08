@@ -997,7 +997,7 @@ mod tests {
             fn env(
                 &self,
                 _ctx: &dyn RunContext,
-                _bot_name: Option<&str>,
+                _as_identity: Option<&str>,
             ) -> HashMap<String, String> {
                 let mut m = HashMap::new();
                 m.insert("CUSTOM_VAR".to_string(), "42".to_string());

@@ -30,6 +30,7 @@ pub use diagnostics::run_with_per_run_log;
 pub use dsl::ValidationContext;
 pub use dsl::ValidationError;
 pub use events::{EngineEvent, EngineEventData, EventSink};
+pub use extensions::ClaudeActionParams;
 pub use extensions::Extensions;
 pub use flow_engine::{FlowEngine, FlowEngineBuilder};
 pub use traits::action_executor::ActionRegistry;

@@ -6,7 +6,7 @@ use runkon_flow::traits::script_env_provider::ScriptEnvProvider;
 
 /// A `ScriptEnvProvider` that prepends directories to `PATH`.
 ///
-/// Bot-name / GH_TOKEN resolution is conductor-specific and intentionally
+/// Identity-based / GH_TOKEN resolution is conductor-specific and intentionally
 /// omitted — use `ConductorScriptEnvProvider` (in `conductor-core`) when
 /// GitHub App token injection is required.
 pub struct PathPrependingEnvProvider {
@@ -20,7 +20,7 @@ impl PathPrependingEnvProvider {
 }
 
 impl ScriptEnvProvider for PathPrependingEnvProvider {
-    fn env(&self, _ctx: &dyn RunContext, _bot_name: Option<&str>) -> HashMap<String, String> {
+    fn env(&self, _ctx: &dyn RunContext, _as_identity: Option<&str>) -> HashMap<String, String> {
         let mut env = HashMap::new();
         if !self.prepend_dirs.is_empty() {
             let existing = std::env::var("PATH").unwrap_or_default();

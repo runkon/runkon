@@ -35,7 +35,6 @@ pub fn make_params(name: &str) -> ActionParams {
         model: None,
         bot_name: None,
         plugin_dirs: vec![],
-        max_turns: None,
     }
 }
 
