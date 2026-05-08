@@ -6,9 +6,9 @@ use runkon_flow::traits::script_env_provider::ScriptEnvProvider;
 
 /// A `ScriptEnvProvider` that prepends directories to `PATH`.
 ///
-/// Identity-based / GH_TOKEN resolution is conductor-specific and intentionally
-/// omitted — use `ConductorScriptEnvProvider` (in `conductor-core`) when
-/// GitHub App token injection is required.
+/// Identity-based / `GH_TOKEN` resolution is intentionally omitted — host
+/// applications that need GitHub App token injection should provide their own
+/// `ScriptEnvProvider` impl that resolves credentials per identity.
 pub struct PathPrependingEnvProvider {
     prepend_dirs: Vec<PathBuf>,
 }
