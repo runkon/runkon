@@ -758,6 +758,10 @@ impl Parser {
             };
             let as_identity = kvs.get("as").map(|v| v.as_str().to_string());
 
+            if kvs.contains_key("options") {
+                return Err("`options` is not valid on quality_gate gates".to_string());
+            }
+
             return Ok(GateNode {
                 name,
                 gate_type,
@@ -1441,6 +1445,45 @@ workflow wf {
                 AgentRef::Path(".claude/agents/plan.md".to_string())
             ),
             other => panic!("expected Call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_gate_quality_gate_rejects_options() {
+        let src = r#"
+workflow wf {
+    gate quality_gate {
+        source = prior_step
+        threshold = 80
+        options = { key = "value" }
+    }
+}
+"#;
+        let err = parse_workflow_str(src, "t.wf").expect_err("quality_gate with options must fail");
+        assert!(
+            err.contains("`options` is not valid on quality_gate gates"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_gate_custom_type_accepts_options() {
+        let src = r#"
+workflow wf {
+    gate slack_reaction {
+        prompt = "React to approve"
+        options = { thumbs_up = "approve" thumbs_down = "reject" }
+    }
+}
+"#;
+        let def =
+            parse_workflow_str(src, "t.wf").expect("custom gate type with options must parse");
+        match &def.body[0] {
+            WorkflowNode::Gate(g) => {
+                assert_eq!(g.gate_type, "slack_reaction");
+                assert!(g.options.is_some(), "options should be parsed");
+            }
+            other => panic!("expected Gate node, got {other:?}"),
         }
     }
 }
