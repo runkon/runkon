@@ -9,9 +9,6 @@ const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const MAX_TOKENS: u64 = 8192;
 
-/// Default model used when the step does not specify a model override.
-pub const DEFAULT_API_MODEL: &str = "claude-sonnet-4-6";
-
 #[derive(Debug)]
 struct ApiCallResult {
     json: serde_json::Value,
