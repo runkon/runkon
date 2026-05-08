@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use crate::cancellation::CancellationToken;
 use crate::cancellation_reason::CancellationReason;
-use crate::dsl::{detect_workflow_cycles, GateType, ValidationError, WorkflowDef, WorkflowNode};
+use crate::dsl::{
+    detect_workflow_cycles, ValidationError, WorkflowDef, WorkflowNode, QUALITY_GATE_TYPE,
+};
 use crate::engine::{run_workflow_engine, ExecutionState};
 use crate::engine_error::EngineError;
 use crate::events::EventSink;
@@ -540,9 +542,9 @@ fn validate_nodes_impl(
             }
             WorkflowNode::Gate(n) => {
                 // QualityGate is evaluated inline and never goes through a GateResolver.
-                if n.gate_type != GateType::QualityGate {
-                    let type_str = n.gate_type.to_string();
-                    if !ctx.gate_resolver_registry.has_type(&type_str) {
+                if n.gate_type != QUALITY_GATE_TYPE {
+                    let type_str = n.gate_type.as_str();
+                    if !ctx.gate_resolver_registry.has_type(type_str) {
                         errors.push(ValidationError {
                             message: format!(
                                 "gate '{}': no registered GateResolver for type '{}'",
@@ -748,8 +750,8 @@ impl Drop for FlowEngine {
 mod tests {
     use super::*;
     use crate::dsl::{
-        ApprovalMode, CallWorkflowNode, ForEachNode, GateNode, GateType, OnChildFail, OnCycle,
-        OnTimeout,
+        ApprovalMode, CallWorkflowNode, ForEachNode, GateNode, OnChildFail, OnCycle, OnTimeout,
+        QUALITY_GATE_TYPE,
     };
     use crate::engine_error::EngineError;
     use crate::test_helpers::{
@@ -916,10 +918,10 @@ mod tests {
         })
     }
 
-    fn gate_node(name: &str, gate_type: GateType) -> WorkflowNode {
+    fn gate_node(name: &str, gate_type: &str) -> WorkflowNode {
         WorkflowNode::Gate(GateNode {
             name: name.to_string(),
-            gate_type,
+            gate_type: gate_type.to_string(),
             prompt: None,
             min_approvals: 1,
             approval_mode: ApprovalMode::default(),
@@ -1053,7 +1055,7 @@ mod tests {
     // AC3: missing gate type produces error
     #[test]
     fn validate_missing_gate_type_produces_error() {
-        let def = make_def("wf", vec![gate_node("approval", GateType::HumanApproval)]);
+        let def = make_def("wf", vec![gate_node("approval", "human_approval")]);
         let engine = FlowEngineBuilder::new().build().unwrap();
 
         let errors = engine.validate(&def).unwrap_err();
@@ -1067,10 +1069,10 @@ mod tests {
     // AC3b: QualityGate is excluded from resolver checks
     #[test]
     fn validate_quality_gate_does_not_require_resolver() {
-        use crate::dsl::{GateNode, GateType, OnFailAction, OnTimeout, QualityGateConfig};
+        use crate::dsl::{GateNode, OnFailAction, OnTimeout, QualityGateConfig};
         let gate = WorkflowNode::Gate(GateNode {
             name: "qg".to_string(),
-            gate_type: GateType::QualityGate,
+            gate_type: QUALITY_GATE_TYPE.to_string(),
             prompt: None,
             min_approvals: 1,
             approval_mode: ApprovalMode::default(),
@@ -1109,7 +1111,7 @@ mod tests {
             vec![
                 call_node("alpha"),
                 foreach_node("items", "tickets"),
-                gate_node("approval", GateType::HumanApproval),
+                gate_node("approval", "human_approval"),
             ],
         );
         let engine = FlowEngineBuilder::new()
@@ -1122,6 +1124,50 @@ mod tests {
         assert!(
             engine.validate(&def).is_ok(),
             "all registrations present — validation should pass"
+        );
+    }
+
+    // Open-registry positive case: a custom gate type with a registered resolver passes validation
+    #[test]
+    fn validate_open_registry_custom_gate_type_accepted() {
+        struct SlackReactionResolver;
+        impl crate::traits::gate_resolver::GateResolver for SlackReactionResolver {
+            fn gate_type(&self) -> &str {
+                "slack_reaction"
+            }
+            fn poll(
+                &self,
+                _run_id: &str,
+                _params: &GateParams,
+                _ctx: &dyn RunContext,
+            ) -> Result<GatePoll, EngineError> {
+                Ok(GatePoll::Approved(None))
+            }
+        }
+
+        let def = make_def("wf", vec![gate_node("notify", "slack_reaction")]);
+        let engine = FlowEngineBuilder::new()
+            .gate_resolver(SlackReactionResolver)
+            .build()
+            .unwrap();
+
+        assert!(
+            engine.validate(&def).is_ok(),
+            "registered slack_reaction resolver should satisfy validation"
+        );
+    }
+
+    // Unregistered type still fails validation
+    #[test]
+    fn validate_unregistered_gate_type_produces_error() {
+        let def = make_def("wf", vec![gate_node("g", "fictional_type")]);
+        let engine = FlowEngineBuilder::new().build().unwrap();
+
+        let errors = engine.validate(&def).unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.message.contains("fictional_type")),
+            "error should mention the unregistered gate type; got: {:?}",
+            errors
         );
     }
 

@@ -5,9 +5,9 @@ use std::path::Path;
 use super::lexer::{Lexer, Token};
 use super::types::{
     AgentRef, AlwaysNode, CallNode, CallWorkflowNode, Condition, DoNode, DoWhileNode, ForEachNode,
-    GateNode, GateOptions, GateType, IfNode, InputDecl, InputType, OnChildFail, OnCycle, OnFail,
+    GateNode, GateOptions, IfNode, InputDecl, InputType, OnChildFail, OnCycle, OnFail,
     OnFailAction, OnMaxIter, OnTimeout, ParallelNode, QualityGateConfig, ScriptNode, UnlessNode,
-    WhileNode, WorkflowDef, WorkflowNode, WorkflowTrigger,
+    WhileNode, WorkflowDef, WorkflowNode, WorkflowTrigger, QUALITY_GATE_TYPE,
 };
 
 // ---------------------------------------------------------------------------
@@ -728,23 +728,13 @@ impl Parser {
         self.expect(&Token::Gate)?;
         let name = self.expect_ident()?;
 
-        let gate_type = match name.as_str() {
-            "human_approval" => GateType::HumanApproval,
-            "human_review" => GateType::HumanReview,
-            "pr_approval" => GateType::PrApproval,
-            "pr_checks" => GateType::PrChecks,
-            "quality_gate" => GateType::QualityGate,
-            _ => return Err(format!(
-                "Unknown gate type: '{}'. Expected one of: human_approval, human_review, pr_approval, pr_checks, quality_gate",
-                name
-            )),
-        };
+        let gate_type = name.clone(); // any identifier accepted; validated at runtime
 
         self.expect(&Token::LBrace)?;
         let kvs = self.parse_kvs()?;
         self.expect(&Token::RBrace)?;
 
-        if gate_type == GateType::QualityGate {
+        if gate_type == QUALITY_GATE_TYPE {
             let source = kvs
                 .get("source")
                 .ok_or("quality_gate requires a `source` field referencing a prior step")?
@@ -767,6 +757,10 @@ impl Parser {
                 Some(other) => return Err(format!("Invalid on_fail for quality_gate: {other}")),
             };
             let as_identity = kvs.get("as").map(|v| v.as_str().to_string());
+
+            if kvs.contains_key("options") {
+                return Err("`options` is not valid on quality_gate gates".to_string());
+            }
 
             return Ok(GateNode {
                 name,
@@ -824,14 +818,6 @@ impl Parser {
         let options = match kvs.get("options") {
             None => None,
             Some(v) => {
-                match gate_type {
-                    GateType::HumanApproval | GateType::HumanReview => {}
-                    _ => {
-                        return Err(format!(
-                            "`options` is only valid on human_approval / human_review gates, not '{gate_type}'"
-                        ));
-                    }
-                }
                 let parsed = match v {
                     KvValue::Array(items) => {
                         let map: HashMap<String, String> =
@@ -1094,7 +1080,7 @@ pub fn parse_workflow_str(input: &str, source_path: &str) -> Result<WorkflowDef,
 #[cfg(test)]
 mod tests {
     use super::parse_workflow_str;
-    use crate::dsl::{AgentRef, Condition, GateType, InputType, WorkflowNode, WorkflowTrigger};
+    use crate::dsl::{AgentRef, Condition, InputType, WorkflowNode, WorkflowTrigger};
 
     // ---- basic workflow structure ----
 
@@ -1260,7 +1246,7 @@ workflow wf {
         let def = parse_workflow_str(src, "t.wf").unwrap();
         match &def.body[0] {
             WorkflowNode::Gate(g) => {
-                assert_eq!(g.gate_type, GateType::HumanApproval);
+                assert_eq!(g.gate_type, "human_approval");
                 assert_eq!(g.prompt.as_deref(), Some("Approve deployment?"));
                 assert_eq!(g.timeout_secs, 3600);
             }
@@ -1456,6 +1442,65 @@ workflow wf {
                 AgentRef::Path(".claude/agents/plan.md".to_string())
             ),
             other => panic!("expected Call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_gate_quality_gate_rejects_options() {
+        let src = r#"
+workflow wf {
+    gate quality_gate {
+        source = prior_step
+        threshold = 80
+        options = { key = "value" }
+    }
+}
+"#;
+        let err = parse_workflow_str(src, "t.wf").expect_err("quality_gate with options must fail");
+        assert!(
+            err.contains("`options` is not valid on quality_gate gates"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_gate_quality_gate_without_options_accepted() {
+        let src = r#"
+workflow wf {
+    gate quality_gate {
+        source = prior_step
+        threshold = 80
+    }
+}
+"#;
+        let def = parse_workflow_str(src, "t.wf").expect("quality_gate without options must parse");
+        match &def.body[0] {
+            WorkflowNode::Gate(g) => {
+                assert_eq!(g.gate_type, "quality_gate");
+                assert!(g.options.is_none(), "options should be absent");
+            }
+            other => panic!("expected Gate node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_gate_custom_type_accepts_options() {
+        let src = r#"
+workflow wf {
+    gate slack_reaction {
+        prompt = "React to approve"
+        options = { thumbs_up = "approve" thumbs_down = "reject" }
+    }
+}
+"#;
+        let def =
+            parse_workflow_str(src, "t.wf").expect("custom gate type with options must parse");
+        match &def.body[0] {
+            WorkflowNode::Gate(g) => {
+                assert_eq!(g.gate_type, "slack_reaction");
+                assert!(g.options.is_some(), "options should be parsed");
+            }
+            other => panic!("expected Gate node, got {other:?}"),
         }
     }
 }

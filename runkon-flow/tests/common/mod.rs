@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use runkon_flow::cancellation::CancellationToken;
 use runkon_flow::dsl::{
-    ApprovalMode, ForEachNode, GateNode, GateType, OnChildFail, OnCycle, OnTimeout, WorkflowDef,
+    ApprovalMode, ForEachNode, GateNode, OnChildFail, OnCycle, OnTimeout, WorkflowDef,
     WorkflowNode, WorkflowTrigger,
 };
 use runkon_flow::engine::{ChildWorkflowInput, ChildWorkflowRunner, ExecutionState, ResumeContext};
@@ -209,7 +209,7 @@ pub fn make_def_with_always(
 pub fn gate_node(name: &str) -> WorkflowNode {
     WorkflowNode::Gate(GateNode {
         name: name.to_string(),
-        gate_type: GateType::HumanApproval,
+        gate_type: "human_approval".to_string(),
         prompt: None,
         min_approvals: 1,
         approval_mode: ApprovalMode::default(),
@@ -226,7 +226,7 @@ pub fn gate_node(name: &str) -> WorkflowNode {
 pub fn timeout_gate(on_timeout: OnTimeout) -> WorkflowNode {
     WorkflowNode::Gate(GateNode {
         name: "approval".to_string(),
-        gate_type: GateType::HumanApproval,
+        gate_type: "human_approval".to_string(),
         prompt: None,
         min_approvals: 1,
         approval_mode: ApprovalMode::default(),
