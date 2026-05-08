@@ -5,7 +5,9 @@ use std::time::Duration;
 
 use crate::cancellation::CancellationToken;
 use crate::cancellation_reason::CancellationReason;
-use crate::dsl::{detect_workflow_cycles, ValidationError, WorkflowDef, WorkflowNode, QUALITY_GATE_TYPE};
+use crate::dsl::{
+    detect_workflow_cycles, ValidationError, WorkflowDef, WorkflowNode, QUALITY_GATE_TYPE,
+};
 use crate::engine::{run_workflow_engine, ExecutionState};
 use crate::engine_error::EngineError;
 use crate::events::EventSink;
@@ -542,7 +544,7 @@ fn validate_nodes_impl(
                 // QualityGate is evaluated inline and never goes through a GateResolver.
                 if n.gate_type != QUALITY_GATE_TYPE {
                     let type_str = n.gate_type.as_str();
-                    if !ctx.gate_resolver_registry.has_type(&type_str) {
+                    if !ctx.gate_resolver_registry.has_type(type_str) {
                         errors.push(ValidationError {
                             message: format!(
                                 "gate '{}': no registered GateResolver for type '{}'",
@@ -748,8 +750,8 @@ impl Drop for FlowEngine {
 mod tests {
     use super::*;
     use crate::dsl::{
-        ApprovalMode, CallWorkflowNode, ForEachNode, GateNode, OnChildFail, OnCycle,
-        OnTimeout, QUALITY_GATE_TYPE,
+        ApprovalMode, CallWorkflowNode, ForEachNode, GateNode, OnChildFail, OnCycle, OnTimeout,
+        QUALITY_GATE_TYPE,
     };
     use crate::engine_error::EngineError;
     use crate::test_helpers::{
