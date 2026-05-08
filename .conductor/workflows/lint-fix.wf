@@ -1,0 +1,23 @@
+workflow lint-fix {
+  meta {
+    title       = "Lint & Fix"
+    description = "Analyze lint errors and apply fixes, re-verifying until clean"
+    trigger     = "manual"
+    targets     = ["worktree"]
+    group       = "Development"
+  }
+
+  do {
+    max_iterations = 3
+    on_max_iter    = fail
+
+    script analyze-lint {
+      run = ".conductor/scripts/analyze-lint.sh"
+      env = { FEATURE_BASE_BRANCH = "{{feature_base_branch}}" }
+    }
+
+    if analyze-lint.has_lint_errors {
+      call lint-fix-impl
+    }
+  } while analyze-lint.has_lint_errors
+}
