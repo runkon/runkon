@@ -1476,8 +1476,7 @@ workflow wf {
     }
 }
 "#;
-        let def =
-            parse_workflow_str(src, "t.wf").expect("quality_gate without options must parse");
+        let def = parse_workflow_str(src, "t.wf").expect("quality_gate without options must parse");
         match &def.body[0] {
             WorkflowNode::Gate(g) => {
                 assert_eq!(g.gate_type, "quality_gate");
