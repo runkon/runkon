@@ -148,10 +148,7 @@ fn row_to_step(row: &rusqlite::Row) -> rusqlite::Result<WorkflowRunStep> {
         context_out: row.get("context_out")?,
         markers_out: row.get("markers_out")?,
         retry_count: row.get("retry_count")?,
-        gate_type: {
-            let s: Option<String> = row.get("gate_type")?;
-            s.as_deref().and_then(|s| s.parse().ok())
-        },
+        gate_type: row.get("gate_type")?,
         gate_prompt: row.get("gate_prompt")?,
         gate_timeout: row.get("gate_timeout")?,
         gate_approved_by: row.get("gate_approved_by")?,

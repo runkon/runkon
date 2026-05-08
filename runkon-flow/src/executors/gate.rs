@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::thread;
 use std::time::Duration;
 
-use crate::dsl::{GateNode, GateOptions, GateType, OnFailAction, OnTimeout};
+use crate::dsl::{GateNode, GateOptions, OnFailAction, OnTimeout, QUALITY_GATE_TYPE};
 use crate::engine::{emit_event, restore_step, should_skip, ExecutionState};
 use crate::engine_error::{EngineError, Result};
 use crate::events::EngineEvent;
@@ -32,7 +32,7 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
     }
 
     // Quality gates evaluate immediately — no blocking/waiting.
-    if node.gate_type == GateType::QualityGate {
+    if node.gate_type == QUALITY_GATE_TYPE {
         return execute_quality_gate(state, node, pos, iteration);
     }
 
@@ -117,34 +117,7 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
         HashMap::new()
     };
 
-    // Log human gate instructions before entering the poll loop.
-    if matches!(
-        node.gate_type,
-        GateType::HumanApproval | GateType::HumanReview
-    ) {
-        tracing::info!("Gate '{}' waiting for human action:", node.name);
-        if let Some(ref p) = node.prompt {
-            tracing::info!("  Prompt: {p}");
-        }
-        tracing::info!(
-            "  Approve:  conductor workflow gate-approve {}",
-            state.workflow_run_id
-        );
-        tracing::info!(
-            "  Reject:   conductor workflow gate-reject {}",
-            state.workflow_run_id
-        );
-        if node.gate_type == GateType::HumanReview {
-            tracing::info!(
-                "  Feedback: conductor workflow gate-feedback {} \"<text>\"",
-                state.workflow_run_id
-            );
-        }
-    } else if node.gate_type == GateType::PrApproval {
-        tracing::info!("Gate '{}' polling for PR approvals...", node.name);
-    } else if node.gate_type == GateType::PrChecks {
-        tracing::info!("Gate '{}' polling for PR checks...", node.name);
-    }
+    tracing::info!("Gate '{}' waiting (type = {})", node.name, node.gate_type);
 
     // Poll/timeout loop — poll via persistence.get_gate_approval()
     let start = std::time::Instant::now();

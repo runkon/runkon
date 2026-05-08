@@ -499,7 +499,7 @@ pub enum OnFailAction {
     Continue,
 }
 
-/// Configuration specific to `GateType::QualityGate` nodes.
+/// Configuration specific to `quality_gate` nodes.
 ///
 /// Grouped into a single struct so non-quality-gate construction sites need
 /// only `quality_gate: None` instead of three separate optional fields.
@@ -534,7 +534,7 @@ pub enum GateOptions {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateNode {
     pub name: String,
-    pub gate_type: GateType,
+    pub gate_type: String,
     pub prompt: Option<String>,
     #[serde(default = "default_one")]
     pub min_approvals: u32,
@@ -544,7 +544,7 @@ pub struct GateNode {
     pub on_timeout: OnTimeout,
     /// Named GitHub App bot identity used for `gh` calls inside this gate.
     pub as_identity: Option<String>,
-    /// Quality gate-specific configuration. Present only when `gate_type == QualityGate`.
+    /// Quality gate-specific configuration. Present only when `gate_type == QUALITY_GATE_TYPE`.
     #[serde(flatten)]
     pub quality_gate: Option<QualityGateConfig>,
     /// Optional multi-select options for human_approval / human_review gates.
@@ -555,42 +555,7 @@ fn default_one() -> u32 {
     1
 }
 
-#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum GateType {
-    HumanApproval,
-    HumanReview,
-    PrApproval,
-    PrChecks,
-    QualityGate,
-}
-
-impl std::fmt::Display for GateType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::HumanApproval => write!(f, "human_approval"),
-            Self::HumanReview => write!(f, "human_review"),
-            Self::PrApproval => write!(f, "pr_approval"),
-            Self::PrChecks => write!(f, "pr_checks"),
-            Self::QualityGate => write!(f, "quality_gate"),
-        }
-    }
-}
-
-impl std::str::FromStr for GateType {
-    type Err = String;
-    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-        match s {
-            "human_approval" => Ok(Self::HumanApproval),
-            "human_review" => Ok(Self::HumanReview),
-            "pr_approval" => Ok(Self::PrApproval),
-            "pr_checks" => Ok(Self::PrChecks),
-            "quality_gate" => Ok(Self::QualityGate),
-            _ => Err(format!("unknown gate type: {s}")),
-        }
-    }
-}
+pub const QUALITY_GATE_TYPE: &str = "quality_gate";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
