@@ -10,6 +10,10 @@ description = "Portable workflow execution engine — DSL, traits, and in-memory
 test-utils = []
 utoipa = ["dep:utoipa"]
 sqlite = ["dep:rusqlite"]
+# Per-run engine diagnostics: thread-local tracing subscriber + per-run log file
+# + panic capture. Off by default — libraries shouldn't ship subscriber stacks
+# unconditionally. Enable when you want the `run_with_per_run_log` helper.
+diagnostics = ["dep:tracing-subscriber", "dep:tracing-appender"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -18,8 +22,8 @@ thiserror = "2"
 ulid = "1"
 chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+tracing-appender = { version = "0.2", optional = true }
 tempfile = "3"
 threadpool = "1"
 wait-timeout = "0.2"

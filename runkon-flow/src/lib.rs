@@ -1,6 +1,7 @@
 pub mod cancellation;
 pub mod cancellation_reason;
 pub mod constants;
+#[cfg(feature = "diagnostics")]
 pub mod diagnostics;
 pub mod dsl;
 pub mod engine;
@@ -32,6 +33,7 @@ pub mod workflow_resolver_memory;
 
 pub use cancellation::CancellationToken;
 pub use cancellation_reason::CancellationReason;
+#[cfg(feature = "diagnostics")]
 pub use diagnostics::run_with_per_run_log;
 pub use dsl::ValidationContext;
 pub use dsl::ValidationError;
