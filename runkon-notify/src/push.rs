@@ -58,6 +58,15 @@ impl InMemoryPushStore {
     pub fn new() -> Self {
         Self::default()
     }
+
+    fn lock_subs(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, Vec<Subscription>>> {
+        use crate::error::NotifyError;
+        self.inner
+            .lock()
+            .map_err(|e| NotifyError::Subscription(format!("lock poisoned: {e}")))
+    }
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -77,12 +86,7 @@ impl PushSubscriptionStore for InMemoryPushStore {
     }
 
     fn upsert(&self, endpoint: &str, p256dh: &str, auth: &str) -> Result<Subscription> {
-        use crate::error::NotifyError;
-
-        let mut subs = self
-            .inner
-            .lock()
-            .map_err(|e| NotifyError::Subscription(format!("lock poisoned: {e}")))?;
+        let mut subs = self.lock_subs()?;
 
         if let Some(existing) = subs.iter_mut().find(|s| s.endpoint == endpoint) {
             existing.p256dh = p256dh.to_string();
@@ -110,12 +114,7 @@ impl PushSubscriptionStore for InMemoryPushStore {
     }
 
     fn delete(&self, endpoint: &str) -> Result<bool> {
-        use crate::error::NotifyError;
-
-        let mut subs = self
-            .inner
-            .lock()
-            .map_err(|e| NotifyError::Subscription(format!("lock poisoned: {e}")))?;
+        let mut subs = self.lock_subs()?;
         let len_before = subs.len();
         subs.retain(|s| s.endpoint != endpoint);
         Ok(subs.len() < len_before)

@@ -117,6 +117,19 @@ pub struct HookConfig {
     pub timeout_ms: Option<u64>,
 }
 
+/// Build a `sh -c <cmd>` base command with event env vars and stdin closed.
+///
+/// Callers append their desired stdout/stderr disposition before spawning.
+fn build_shell_command(cmd: &str, env_vars: &HashMap<String, String>) -> std::process::Command {
+    let mut command = std::process::Command::new("sh");
+    command
+        .arg("-c")
+        .arg(cmd)
+        .envs(env_vars)
+        .stdin(Stdio::null());
+    command
+}
+
 /// Execute a shell hook for `event`, enforcing the configured timeout.
 ///
 /// The command is run via `sh -c` with all `RUNKON_NOTIFY_*` env vars injected.
@@ -128,11 +141,7 @@ fn run_shell_hook(hook: &HookConfig, event: &Event) {
     let timeout_ms = hook.timeout_ms.unwrap_or(10_000);
     let env_vars = event.to_env_vars();
 
-    let mut child = match std::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .envs(&env_vars)
-        .stdin(Stdio::null())
+    let mut child = match build_shell_command(cmd, &env_vars)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -188,11 +197,7 @@ fn run_shell_hook_capture(hook: &HookConfig, event: &Event) -> Result<(), String
 
     let env_vars = event.to_env_vars();
 
-    let child = match std::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .envs(&env_vars)
-        .stdin(Stdio::null())
+    let child = match build_shell_command(cmd, &env_vars)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
