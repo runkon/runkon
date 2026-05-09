@@ -80,7 +80,10 @@ mod tests {
     #[test]
     fn agent_role_from_str_round_trip() {
         assert_eq!(AgentRole::from_str("actor").unwrap(), AgentRole::Actor);
-        assert_eq!(AgentRole::from_str("reviewer").unwrap(), AgentRole::Reviewer);
+        assert_eq!(
+            AgentRole::from_str("reviewer").unwrap(),
+            AgentRole::Reviewer
+        );
     }
 
     #[test]

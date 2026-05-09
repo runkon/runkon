@@ -962,7 +962,10 @@ mod tests {
 
     #[test]
     fn max_iterations_for_step_found_in_while() {
-        let wf = simple_wf(vec![call("reviewer"), while_node("reviewer", 3, vec![call("fix")])]);
+        let wf = simple_wf(vec![
+            call("reviewer"),
+            while_node("reviewer", 3, vec![call("fix")]),
+        ]);
         assert_eq!(wf.max_iterations_for_step("reviewer"), Some(3));
     }
 
@@ -1180,7 +1183,10 @@ mod tests {
     #[test]
     fn agent_ref_label_returns_inner_string() {
         assert_eq!(AgentRef::Name("foo".to_string()).label(), "foo");
-        assert_eq!(AgentRef::Path("bar/baz.md".to_string()).label(), "bar/baz.md");
+        assert_eq!(
+            AgentRef::Path("bar/baz.md".to_string()).label(),
+            "bar/baz.md"
+        );
     }
 
     // ── WorkflowTrigger serde ─────────────────────────────────────────────────

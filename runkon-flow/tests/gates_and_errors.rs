@@ -456,7 +456,12 @@ fn event_sink_captures_step_events() {
 // Quality gate helpers
 // ---------------------------------------------------------------------------
 
-fn quality_gate_node(name: &str, source: &str, threshold: u32, on_fail: OnFailAction) -> WorkflowNode {
+fn quality_gate_node(
+    name: &str,
+    source: &str,
+    threshold: u32,
+    on_fail: OnFailAction,
+) -> WorkflowNode {
     WorkflowNode::Gate(GateNode {
         name: name.to_string(),
         gate_type: QUALITY_GATE_TYPE.to_string(),
@@ -531,7 +536,10 @@ fn quality_gate_passes_when_confidence_above_threshold() {
     );
 
     let result = engine.run(&def, &mut state).expect("run should succeed");
-    assert!(result.all_succeeded, "quality gate should pass with confidence=90 >= threshold=80");
+    assert!(
+        result.all_succeeded,
+        "quality gate should pass with confidence=90 >= threshold=80"
+    );
 
     let steps = persistence
         .get_steps(&result.workflow_run_id)
@@ -656,7 +664,11 @@ fn quality_gate_fails_when_source_step_missing() {
     let persistence = make_persistence();
     let run_id;
     {
-        let mut state = make_state("qg-missing-source", Arc::clone(&persistence), HashMap::new());
+        let mut state = make_state(
+            "qg-missing-source",
+            Arc::clone(&persistence),
+            HashMap::new(),
+        );
         run_id = state.workflow_run_id.clone();
         let _ = engine.run(&def, &mut state);
     }
@@ -696,7 +708,9 @@ fn quality_gate_fails_when_source_step_has_no_structured_output() {
         let mut state = make_state(
             "qg-no-output",
             Arc::clone(&persistence),
-            named_executors([Box::new(common::MockExecutor::new("prior")) as Box<dyn common::ActionExecutor>]),
+            named_executors([
+                Box::new(common::MockExecutor::new("prior")) as Box<dyn common::ActionExecutor>
+            ]),
         );
         run_id = state.workflow_run_id.clone();
         let _ = engine.run(&def, &mut state);

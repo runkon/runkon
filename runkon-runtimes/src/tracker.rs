@@ -113,7 +113,9 @@ mod tests {
 
     #[test]
     fn noop_tracker_mark_failed_if_running_returns_ok() {
-        assert!(NoopTracker.mark_failed_if_running("run-1", "some reason").is_ok());
+        assert!(NoopTracker
+            .mark_failed_if_running("run-1", "some reason")
+            .is_ok());
     }
 
     #[test]
@@ -125,7 +127,13 @@ mod tests {
     #[test]
     fn noop_event_sink_on_event_all_variants_do_not_panic() {
         let sink = NoopEventSink;
-        sink.on_event("run-1", RuntimeEvent::Init { model: None, session_id: None });
+        sink.on_event(
+            "run-1",
+            RuntimeEvent::Init {
+                model: None,
+                session_id: None,
+            },
+        );
         sink.on_event(
             "run-1",
             RuntimeEvent::Tokens {

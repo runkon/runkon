@@ -311,7 +311,9 @@ mod tests {
     fn poll_shutdown_flag_causes_cancellation() {
         let runtime = make_runtime(Some("sleep 100"));
         let request = make_request("test-shutdown");
-        runtime.spawn_validated(&request).expect("spawn should succeed");
+        runtime
+            .spawn_validated(&request)
+            .expect("spawn should succeed");
 
         let shutdown = Arc::new(AtomicBool::new(true));
         let result = runtime.poll("test-shutdown", Some(&shutdown), Duration::from_secs(30));

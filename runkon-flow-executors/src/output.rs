@@ -764,7 +764,10 @@ mod tests {
     fn find_flow_output_start_requires_json_or_backtick_after_marker() {
         let text = "<<<FLOW_OUTPUT>>>\nnot-json\n<<<END_FLOW_OUTPUT>>>";
         let pos = find_flow_output_start(text, "<<<FLOW_OUTPUT>>>");
-        assert!(pos.is_none(), "marker without json/backtick follower should not match");
+        assert!(
+            pos.is_none(),
+            "marker without json/backtick follower should not match"
+        );
     }
 
     // ── extract_output_block ──────────────────────────────────────────────────
@@ -908,7 +911,10 @@ mod tests {
     fn derive_default_markers_approved_false_produces_not_approved() {
         let val = serde_json::json!({"approved": false});
         let markers = derive_default_markers(&val);
-        assert!(markers.contains(&"not_approved".to_string()), "got: {markers:?}");
+        assert!(
+            markers.contains(&"not_approved".to_string()),
+            "got: {markers:?}"
+        );
     }
 
     #[test]

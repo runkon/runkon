@@ -591,7 +591,9 @@ mod tests {
     use super::{validate_script_steps, validate_workflow_semantics, ValidationContext};
     use crate::dsl::parse_workflow_str;
     use crate::engine_error::EngineError;
-    use crate::traits::item_provider::{FanOutItem, ItemProvider, ItemProviderRegistry, ProviderInfo};
+    use crate::traits::item_provider::{
+        FanOutItem, ItemProvider, ItemProviderRegistry, ProviderInfo,
+    };
     use crate::traits::run_context::RunContext;
 
     fn no_loader(name: &str) -> Result<crate::dsl::WorkflowDef, String> {
@@ -915,7 +917,10 @@ workflow wf {
         let report = validate_workflow_semantics(&def, &no_loader, &ctx);
         assert!(!report.is_ok(), "unregistered provider should fail");
         assert!(
-            report.errors.iter().any(|e| e.message.contains("unknown_provider")),
+            report
+                .errors
+                .iter()
+                .any(|e| e.message.contains("unknown_provider")),
             "error should mention provider name; errors: {:?}",
             report.errors
         );
@@ -935,10 +940,16 @@ workflow wf {
 "#;
         let def = parse_workflow_str(src, "test.wf").unwrap();
         let mut registry = ItemProviderRegistry::new();
-        registry.register(BasicProvider { provider_name: "simple_provider", ordered: false });
+        registry.register(BasicProvider {
+            provider_name: "simple_provider",
+            ordered: false,
+        });
         let ctx = empty_ctx(&registry);
         let report = validate_workflow_semantics(&def, &no_loader, &ctx);
-        assert!(!report.is_ok(), "ordered=true with unsupporting provider should fail");
+        assert!(
+            !report.is_ok(),
+            "ordered=true with unsupporting provider should fail"
+        );
         assert!(
             report.errors.iter().any(|e| e.message.contains("ordered")),
             "error should mention ordered; errors: {:?}",
@@ -984,9 +995,15 @@ workflow wf {
         let registry = ItemProviderRegistry::new();
         let ctx = empty_ctx(&registry);
         let report = validate_workflow_semantics(&def, &no_loader, &ctx);
-        assert!(!report.is_ok(), "quality gate with missing source step should fail");
         assert!(
-            report.errors.iter().any(|e| e.message.contains("nonexistent_step")),
+            !report.is_ok(),
+            "quality gate with missing source step should fail"
+        );
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.message.contains("nonexistent_step")),
             "error should mention the missing step; errors: {:?}",
             report.errors
         );
