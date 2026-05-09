@@ -59,9 +59,7 @@ impl InMemoryPushStore {
         Self::default()
     }
 
-    fn lock_subs(
-        &self,
-    ) -> Result<std::sync::MutexGuard<'_, Vec<Subscription>>> {
+    fn lock_subs(&self) -> Result<std::sync::MutexGuard<'_, Vec<Subscription>>> {
         use crate::error::NotifyError;
         self.inner
             .lock()
