@@ -621,4 +621,150 @@ mod tests {
             .unwrap();
         assert_eq!(contents.trim(), "fired");
     }
+
+    // ── HTTP hook tests ──────────────────────────────────────────────────
+    //
+    // A minimal in-process TCP mock server: bind to 127.0.0.1:0, accept one
+    // connection, read the request bytes until "\r\n\r\n" + Content-Length,
+    // reply 200 OK, and surface the captured request via a channel.
+
+    fn spawn_http_mock() -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 1024];
+                let mut content_length: usize = 0;
+                let mut headers_done = false;
+                let mut header_end = 0usize;
+
+                while let Ok(n) = stream.read(&mut tmp) {
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&tmp[..n]);
+
+                    if !headers_done {
+                        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                            headers_done = true;
+                            header_end = pos + 4;
+                            let header_str = String::from_utf8_lossy(&buf[..pos]);
+                            for line in header_str.split("\r\n") {
+                                if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                                    content_length = rest.trim().parse().unwrap_or(0);
+                                }
+                            }
+                        }
+                    }
+
+                    if headers_done && buf.len() >= header_end + content_length {
+                        break;
+                    }
+                }
+
+                let _ = tx.send(String::from_utf8_lossy(&buf).to_string());
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+                let _ = stream.flush();
+            }
+        });
+
+        (format!("http://127.0.0.1:{port}/"), rx)
+    }
+
+    #[test]
+    fn run_http_hook_posts_event_json() {
+        let (url, rx) = spawn_http_mock();
+        let hook = HookConfig {
+            on: "*".into(),
+            url: Some(url),
+            timeout_ms: Some(5_000),
+            ..Default::default()
+        };
+        run_http_hook(&hook, &demo_event());
+
+        let received = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(received.starts_with("POST "), "request: {received}");
+        assert!(received.contains("workflow_run.completed"));
+        assert!(received.contains("Workflow finished"));
+    }
+
+    #[test]
+    fn run_http_hook_resolves_env_var_header() {
+        let (url, rx) = spawn_http_mock();
+        std::env::set_var("__RUNKON_NOTIFY_TEST_HTTP_AUTH__", "Bearer abc123");
+        let mut headers = HashMap::new();
+        headers.insert(
+            "Authorization".to_string(),
+            "$__RUNKON_NOTIFY_TEST_HTTP_AUTH__".to_string(),
+        );
+        let hook = HookConfig {
+            on: "*".into(),
+            url: Some(url),
+            headers: Some(headers),
+            timeout_ms: Some(5_000),
+            ..Default::default()
+        };
+        run_http_hook(&hook, &demo_event());
+        std::env::remove_var("__RUNKON_NOTIFY_TEST_HTTP_AUTH__");
+
+        let received = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(
+            received.to_ascii_lowercase().contains("authorization: bearer abc123"),
+            "request: {received}"
+        );
+    }
+
+    #[test]
+    fn run_http_hook_swallows_unreachable_url() {
+        // Port 1 is reserved/unused on every platform — connect should fail
+        // immediately. The hook must swallow the error without panicking.
+        let hook = HookConfig {
+            on: "*".into(),
+            url: Some("http://127.0.0.1:1/".into()),
+            timeout_ms: Some(500),
+            ..Default::default()
+        };
+        run_http_hook(&hook, &demo_event()); // must not panic
+    }
+
+    #[test]
+    fn hook_runner_fires_matching_http_hook() {
+        let (url, rx) = spawn_http_mock();
+        let hook = HookConfig {
+            on: "workflow_run.*".into(),
+            url: Some(url),
+            timeout_ms: Some(5_000),
+            ..Default::default()
+        };
+        let runner = HookRunner::new(&[hook]);
+        runner.fire(&demo_event());
+
+        let received = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(received.starts_with("POST "), "request: {received}");
+        assert!(received.contains("workflow_run.completed"));
+    }
+
+    #[test]
+    fn run_test_dispatches_http_hook_and_returns_ok() {
+        let (url, rx) = spawn_http_mock();
+        let hook = HookConfig {
+            on: "*".into(),
+            url: Some(url),
+            timeout_ms: Some(5_000),
+            ..Default::default()
+        };
+        let runner = HookRunner::new(&[hook]);
+        let result = runner.run_test(&demo_event());
+        assert!(result.is_ok());
+
+        let received = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(received.starts_with("POST "), "request: {received}");
+    }
 }

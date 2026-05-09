@@ -80,7 +80,7 @@ fn now_str() -> String {
 #[cfg(any(test, feature = "test-utils"))]
 impl PushSubscriptionStore for InMemoryPushStore {
     fn list(&self) -> Result<Vec<Subscription>> {
-        Ok(self.inner.lock().unwrap().clone())
+        Ok(self.lock_subs()?.clone())
     }
 
     fn upsert(&self, endpoint: &str, p256dh: &str, auth: &str) -> Result<Subscription> {
