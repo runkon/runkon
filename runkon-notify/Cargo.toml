@@ -1,0 +1,30 @@
+[package]
+name = "runkon-notify"
+version = "0.2.0-alpha"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Domain-neutral notification dispatch primitives — generic event envelope, shell/HTTP hook execution, glob pattern matching, and web-push subscription store"
+readme = "README.md"
+keywords = ["notification", "webhook", "hook", "event", "runkon"]
+categories = ["asynchronous", "development-tools", "os"]
+
+[features]
+test-utils = []
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+ureq = { version = "2", features = ["json"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[[example]]
+name = "hook_fires"
+
+[[example]]
+name = "web_push"
+required-features = ["test-utils"]

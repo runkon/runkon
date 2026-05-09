@@ -792,6 +792,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "runkon-notify"
+version = "0.2.0-alpha"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
 name = "runkon-runtimes"
 version = "0.2.0-alpha"
 dependencies = [
