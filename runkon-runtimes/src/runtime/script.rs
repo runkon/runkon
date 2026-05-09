@@ -245,15 +245,35 @@ impl AgentRuntime for ScriptRuntime {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Arc;
+
     use super::*;
+    use crate::agent_def::AgentDef;
     use crate::config::RuntimeConfig;
     use crate::runtime::test_util::make_test_run;
+    use crate::tracker::{NoopEventSink, NoopTracker};
 
     fn make_runtime(command: Option<&str>) -> ScriptRuntime {
         ScriptRuntime::new(RuntimeConfig {
             command: command.map(|s| s.to_string()),
             ..RuntimeConfig::default()
         })
+    }
+
+    fn make_request(run_id: &str) -> RuntimeRequest {
+        RuntimeRequest {
+            run_id: run_id.to_string(),
+            agent_def: AgentDef::default(),
+            prompt: String::new(),
+            working_dir: std::env::temp_dir(),
+            model: None,
+            extra_cli_args: vec![],
+            plugin_dirs: vec![],
+            resume_session_id: None,
+            tracker: Arc::new(NoopTracker),
+            event_sink: Arc::new(NoopEventSink),
+        }
     }
 
     #[test]
@@ -266,5 +286,47 @@ mod tests {
     fn cancel_is_noop() {
         let runtime = make_runtime(Some("echo hi"));
         assert!(runtime.cancel(&make_test_run("script", None)).is_ok());
+    }
+
+    #[test]
+    fn spawn_validated_succeeds_with_valid_command() {
+        let runtime = make_runtime(Some("echo hello"));
+        let request = make_request("test-spawn-ok");
+        let result = runtime.spawn_validated(&request);
+        assert!(result.is_ok(), "spawn_validated should succeed: {result:?}");
+        // Clean up — cancel to terminate any lingering child
+        let _ = runtime.cancel(&make_test_run("script", None));
+    }
+
+    #[test]
+    fn spawn_validated_fails_without_command_config() {
+        let runtime = make_runtime(None);
+        let request = make_request("test-spawn-no-cmd");
+        let result = runtime.spawn_validated(&request);
+        assert!(result.is_err(), "spawn without command should fail");
+    }
+
+    #[test]
+    #[ignore = "spawns a real subprocess; run explicitly with --ignored"]
+    fn poll_shutdown_flag_causes_cancellation() {
+        let runtime = make_runtime(Some("sleep 100"));
+        let request = make_request("test-shutdown");
+        runtime
+            .spawn_validated(&request)
+            .expect("spawn should succeed");
+
+        let shutdown = Arc::new(AtomicBool::new(true));
+        let result = runtime.poll("test-shutdown", Some(&shutdown), Duration::from_secs(30));
+        assert!(
+            matches!(result, Err(PollError::Cancelled)),
+            "poll with shutdown flag should return Cancelled; got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn poll_before_spawn_returns_failed() {
+        let runtime = make_runtime(Some("echo hi"));
+        let result = runtime.poll("no-such-run", None, Duration::from_millis(10));
+        assert!(matches!(result, Err(PollError::Failed(_))));
     }
 }

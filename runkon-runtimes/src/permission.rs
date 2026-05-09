@@ -38,3 +38,45 @@ impl PermissionMode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+
+    use super::*;
+
+    #[test]
+    fn default_cli_flag_value_is_none() {
+        assert_eq!(PermissionMode::Default.cli_flag_value(), None);
+    }
+
+    #[test]
+    fn other_cli_flag_value_returns_inner_string() {
+        let mode = PermissionMode::Other(Cow::Borrowed("bypassPermissions"));
+        assert_eq!(mode.cli_flag_value(), Some("bypassPermissions"));
+    }
+
+    #[test]
+    fn other_owned_cli_flag_value() {
+        let mode = PermissionMode::Other(Cow::Owned("plan".to_string()));
+        assert_eq!(mode.cli_flag_value(), Some("plan"));
+    }
+
+    #[test]
+    fn default_variant_is_the_default() {
+        assert_eq!(PermissionMode::default(), PermissionMode::Default);
+    }
+
+    #[test]
+    fn default_serializes_without_panic() {
+        let json = serde_json::to_string(&PermissionMode::Default).unwrap();
+        assert!(!json.is_empty());
+    }
+
+    #[test]
+    fn other_serializes_and_contains_value() {
+        let mode = PermissionMode::Other(Cow::Borrowed("bypassPermissions"));
+        let json = serde_json::to_string(&mode).unwrap();
+        assert!(json.contains("bypass"), "got: {json}");
+    }
+}
