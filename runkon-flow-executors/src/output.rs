@@ -734,4 +734,291 @@ mod tests {
         assert_eq!(context, "fb");
         assert!(structured.is_none());
     }
+
+    // ── find_flow_output_start ────────────────────────────────────────────────
+
+    #[test]
+    fn find_flow_output_start_found_at_beginning() {
+        let text = "<<<FLOW_OUTPUT>>>\n{\"ok\": true}\n<<<END_FLOW_OUTPUT>>>";
+        let pos = find_flow_output_start(text, "<<<FLOW_OUTPUT>>>");
+        assert!(pos.is_some());
+        assert_eq!(pos.unwrap(), 0);
+    }
+
+    #[test]
+    fn find_flow_output_start_found_after_preamble() {
+        let text = "some text\n<<<FLOW_OUTPUT>>>\n{\"ok\": true}\n<<<END_FLOW_OUTPUT>>>";
+        let pos = find_flow_output_start(text, "<<<FLOW_OUTPUT>>>");
+        assert!(pos.is_some());
+        assert_eq!(pos.unwrap(), 10);
+    }
+
+    #[test]
+    fn find_flow_output_start_not_found_returns_none() {
+        let text = "no output block here";
+        let pos = find_flow_output_start(text, "<<<FLOW_OUTPUT>>>");
+        assert!(pos.is_none());
+    }
+
+    #[test]
+    fn find_flow_output_start_requires_json_or_backtick_after_marker() {
+        let text = "<<<FLOW_OUTPUT>>>\nnot-json\n<<<END_FLOW_OUTPUT>>>";
+        let pos = find_flow_output_start(text, "<<<FLOW_OUTPUT>>>");
+        assert!(pos.is_none(), "marker without json/backtick follower should not match");
+    }
+
+    // ── extract_output_block ──────────────────────────────────────────────────
+
+    #[test]
+    fn extract_output_block_basic() {
+        let text = "<<<FLOW_OUTPUT>>>\n{\"ok\": true}\n<<<END_FLOW_OUTPUT>>>";
+        let result = extract_output_block(text).unwrap();
+        assert_eq!(result, r#"{"ok": true}"#);
+    }
+
+    #[test]
+    fn extract_output_block_missing_opening_marker() {
+        let result = extract_output_block("no start marker");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_output_block_missing_closing_marker() {
+        let text = "<<<FLOW_OUTPUT>>>\n{\"ok\": true}";
+        let result = extract_output_block(text);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_output_block_with_code_fence() {
+        let text = "<<<FLOW_OUTPUT>>>\n```json\n{\"ok\": true}\n```\n<<<END_FLOW_OUTPUT>>>";
+        let result = extract_output_block(text).unwrap();
+        assert_eq!(result, r#"{"ok": true}"#);
+    }
+
+    // ── strip_code_fences ─────────────────────────────────────────────────────
+
+    #[test]
+    fn strip_code_fences_no_fences_returns_unchanged() {
+        let s = r#"{"ok": true}"#;
+        assert_eq!(strip_code_fences(s), s);
+    }
+
+    #[test]
+    fn strip_code_fences_with_json_specifier() {
+        let s = "```json\n{\"ok\": true}\n```";
+        assert_eq!(strip_code_fences(s), r#"{"ok": true}"#);
+    }
+
+    #[test]
+    fn strip_code_fences_without_language_specifier() {
+        let s = "```\n{\"ok\": true}\n```";
+        assert_eq!(strip_code_fences(s), r#"{"ok": true}"#);
+    }
+
+    #[test]
+    fn strip_code_fences_no_closing_fence_returns_unchanged() {
+        let s = "```json\n{\"ok\": true}";
+        let result = strip_code_fences(s);
+        // No closing fence, should return the original (trimmed)
+        assert_eq!(result, s.trim());
+    }
+
+    // ── evaluate_marker_expr ──────────────────────────────────────────────────
+
+    #[test]
+    fn evaluate_marker_expr_length_greater_than_true() {
+        let val = serde_json::json!({"items": [1, 2, 3]});
+        assert!(evaluate_marker_expr(&val, "items.length > 2"));
+    }
+
+    #[test]
+    fn evaluate_marker_expr_length_greater_than_false() {
+        let val = serde_json::json!({"items": [1]});
+        assert!(!evaluate_marker_expr(&val, "items.length > 2"));
+    }
+
+    #[test]
+    fn evaluate_marker_expr_filtered_length() {
+        let val = serde_json::json!({
+            "findings": [
+                {"severity": "critical"},
+                {"severity": "low"},
+                {"severity": "critical"},
+            ]
+        });
+        assert!(evaluate_marker_expr(
+            &val,
+            "findings[severity == critical].length > 1"
+        ));
+        assert!(!evaluate_marker_expr(
+            &val,
+            "findings[severity == low].length > 1"
+        ));
+    }
+
+    #[test]
+    fn evaluate_marker_expr_equality_true() {
+        let val = serde_json::json!({"status": "done"});
+        assert!(evaluate_marker_expr(&val, "status == done"));
+    }
+
+    #[test]
+    fn evaluate_marker_expr_equality_false() {
+        let val = serde_json::json!({"status": "pending"});
+        assert!(!evaluate_marker_expr(&val, "status == done"));
+    }
+
+    #[test]
+    fn evaluate_marker_expr_bool_equality() {
+        let val = serde_json::json!({"approved": true});
+        assert!(evaluate_marker_expr(&val, "approved == true"));
+        assert!(!evaluate_marker_expr(&val, "approved == false"));
+    }
+
+    #[test]
+    fn evaluate_marker_expr_numeric_less_than_true() {
+        let val = serde_json::json!({"score": 50});
+        assert!(evaluate_marker_expr(&val, "score < 80"));
+    }
+
+    #[test]
+    fn evaluate_marker_expr_numeric_less_than_false() {
+        let val = serde_json::json!({"score": 90});
+        assert!(!evaluate_marker_expr(&val, "score < 80"));
+    }
+
+    #[test]
+    fn evaluate_marker_expr_unknown_operator_returns_false() {
+        let val = serde_json::json!({"x": 1});
+        assert!(!evaluate_marker_expr(&val, "x @@ foo"));
+    }
+
+    #[test]
+    fn evaluate_marker_expr_malformed_does_not_panic() {
+        let val = serde_json::json!({});
+        assert!(!evaluate_marker_expr(&val, ""));
+        assert!(!evaluate_marker_expr(&val, ">>>"));
+        assert!(!evaluate_marker_expr(&val, "field.length"));
+    }
+
+    // ── derive_default_markers ────────────────────────────────────────────────
+
+    #[test]
+    fn derive_default_markers_approved_false_produces_not_approved() {
+        let val = serde_json::json!({"approved": false});
+        let markers = derive_default_markers(&val);
+        assert!(markers.contains(&"not_approved".to_string()), "got: {markers:?}");
+    }
+
+    #[test]
+    fn derive_default_markers_approved_true_no_not_approved_marker() {
+        let val = serde_json::json!({"approved": true});
+        let markers = derive_default_markers(&val);
+        assert!(!markers.contains(&"not_approved".to_string()));
+    }
+
+    #[test]
+    fn derive_default_markers_critical_findings() {
+        let val = serde_json::json!({
+            "findings": [
+                {"severity": "critical", "msg": "oh no"},
+                {"severity": "low", "msg": "minor"},
+            ]
+        });
+        let markers = derive_default_markers(&val);
+        assert!(markers.contains(&"has_findings".to_string()));
+        assert!(markers.contains(&"has_critical_findings".to_string()));
+        assert!(!markers.contains(&"has_high_findings".to_string()));
+    }
+
+    #[test]
+    fn derive_default_markers_high_findings() {
+        let val = serde_json::json!({
+            "findings": [{"severity": "high"}]
+        });
+        let markers = derive_default_markers(&val);
+        assert!(markers.contains(&"has_findings".to_string()));
+        assert!(markers.contains(&"has_high_findings".to_string()));
+    }
+
+    #[test]
+    fn derive_default_markers_no_relevant_fields_returns_empty() {
+        let val = serde_json::json!({"summary": "all good"});
+        let markers = derive_default_markers(&val);
+        assert!(markers.is_empty(), "got: {markers:?}");
+    }
+
+    // ── schema_to_tool_json additional sub-cases ──────────────────────────────
+
+    #[test]
+    fn schema_to_tool_json_array_with_object_items() {
+        let sub_fields = vec![
+            make_field("name", true, FieldType::String),
+            make_field("score", false, FieldType::Number),
+        ];
+        let schema = make_schema(
+            "findings_schema",
+            vec![make_field(
+                "findings",
+                true,
+                FieldType::Array {
+                    items: ArrayItems::Object(sub_fields),
+                },
+            )],
+        );
+        let tool = schema_to_tool_json(&schema);
+        let items = &tool["input_schema"]["properties"]["findings"]["items"];
+        assert_eq!(items["type"], "object");
+        assert_eq!(items["properties"]["name"]["type"], "string");
+    }
+
+    #[test]
+    fn schema_to_tool_json_nested_object_fields() {
+        let inner = vec![make_field("value", true, FieldType::Number)];
+        let schema = make_schema(
+            "nested_schema",
+            vec![make_field(
+                "metadata",
+                false,
+                FieldType::Object { fields: inner },
+            )],
+        );
+        let tool = schema_to_tool_json(&schema);
+        let meta = &tool["input_schema"]["properties"]["metadata"];
+        assert_eq!(meta["type"], "object");
+        assert_eq!(meta["properties"]["value"]["type"], "number");
+    }
+
+    #[test]
+    fn schema_to_tool_json_array_untyped_items() {
+        let schema = make_schema(
+            "list",
+            vec![make_field(
+                "tags",
+                false,
+                FieldType::Array {
+                    items: ArrayItems::Untyped,
+                },
+            )],
+        );
+        let tool = schema_to_tool_json(&schema);
+        assert_eq!(tool["input_schema"]["properties"]["tags"]["type"], "array");
+        assert!(
+            tool["input_schema"]["properties"]["tags"]["items"].is_null(),
+            "untyped array should have no items schema"
+        );
+    }
+
+    #[test]
+    fn schema_to_tool_json_field_with_description() {
+        let mut field = make_field("summary", true, FieldType::String);
+        field.desc = Some("A short summary".to_string());
+        let schema = make_schema("desc_schema", vec![field]);
+        let tool = schema_to_tool_json(&schema);
+        assert_eq!(
+            tool["input_schema"]["properties"]["summary"]["description"],
+            "A short summary"
+        );
+    }
 }

@@ -89,3 +89,107 @@ impl RunTracker for NoopTracker {
         Ok(None)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    #[test]
+    fn noop_tracker_record_pid_returns_ok() {
+        assert!(NoopTracker.record_pid("run-1", 1234).is_ok());
+    }
+
+    #[test]
+    fn noop_tracker_record_runtime_returns_ok() {
+        assert!(NoopTracker.record_runtime("run-1", "claude").is_ok());
+    }
+
+    #[test]
+    fn noop_tracker_mark_cancelled_returns_ok() {
+        assert!(NoopTracker.mark_cancelled("run-1").is_ok());
+    }
+
+    #[test]
+    fn noop_tracker_mark_failed_if_running_returns_ok() {
+        assert!(NoopTracker.mark_failed_if_running("run-1", "some reason").is_ok());
+    }
+
+    #[test]
+    fn noop_tracker_get_run_returns_none() {
+        let result = NoopTracker.get_run("run-1").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn noop_event_sink_on_event_all_variants_do_not_panic() {
+        let sink = NoopEventSink;
+        sink.on_event("run-1", RuntimeEvent::Init { model: None, session_id: None });
+        sink.on_event(
+            "run-1",
+            RuntimeEvent::Tokens {
+                input: 10,
+                output: 20,
+                cache_read: 5,
+                cache_create: 3,
+            },
+        );
+        sink.on_event(
+            "run-1",
+            RuntimeEvent::Completed {
+                result_text: Some("done".to_string()),
+                session_id: None,
+                cost_usd: Some(0.01),
+                num_turns: Some(1),
+                duration_ms: Some(1000),
+                input_tokens: Some(100),
+                output_tokens: Some(50),
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+            },
+        );
+        sink.on_event(
+            "run-1",
+            RuntimeEvent::Failed {
+                error: "oops".to_string(),
+                session_id: None,
+            },
+        );
+    }
+
+    #[test]
+    fn noop_event_sink_on_raw_value_does_not_panic() {
+        let val = serde_json::json!({"key": "value"});
+        NoopEventSink.on_raw_value("run-1", &val);
+    }
+
+    #[test]
+    fn runtime_event_tokens_fields_are_preserved() {
+        let event = RuntimeEvent::Tokens {
+            input: 42,
+            output: 100,
+            cache_read: 5,
+            cache_create: 10,
+        };
+        match event {
+            RuntimeEvent::Tokens {
+                input,
+                output,
+                cache_read,
+                cache_create,
+            } => {
+                assert_eq!(input, 42);
+                assert_eq!(output, 100);
+                assert_eq!(cache_read, 5);
+                assert_eq!(cache_create, 10);
+            }
+            _ => panic!("unexpected variant"),
+        }
+    }
+
+    #[test]
+    fn noop_event_sink_satisfies_run_event_sink_bound() {
+        let _sink: Arc<dyn RunEventSink> = Arc::new(NoopEventSink);
+    }
+}

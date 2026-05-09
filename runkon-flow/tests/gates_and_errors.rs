@@ -4,8 +4,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use runkon_flow::dsl::OnTimeout;
+use runkon_flow::dsl::{
+    ApprovalMode, GateNode, OnFailAction, OnTimeout, QualityGateConfig, WorkflowNode,
+    QUALITY_GATE_TYPE,
+};
+use runkon_flow::engine_error::EngineError;
 use runkon_flow::status::WorkflowStepStatus;
+use runkon_flow::traits::action_executor::ActionOutput;
 use runkon_flow::traits::gate_resolver::{GateParams, GatePoll, GateResolver};
 use runkon_flow::traits::persistence::WorkflowPersistence;
 use runkon_flow::traits::run_context::RunContext;
@@ -444,5 +449,265 @@ fn event_sink_captures_step_events() {
         kinds.contains(&"StepCompleted"),
         "should have StepCompleted event; got: {:?}",
         kinds
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Quality gate helpers
+// ---------------------------------------------------------------------------
+
+fn quality_gate_node(name: &str, source: &str, threshold: u32, on_fail: OnFailAction) -> WorkflowNode {
+    WorkflowNode::Gate(GateNode {
+        name: name.to_string(),
+        gate_type: QUALITY_GATE_TYPE.to_string(),
+        prompt: None,
+        min_approvals: 1,
+        approval_mode: ApprovalMode::default(),
+        timeout_secs: 0,
+        on_timeout: OnTimeout::Fail,
+        as_identity: None,
+        quality_gate: Some(QualityGateConfig {
+            source: source.to_string(),
+            threshold,
+            on_fail_action: on_fail,
+        }),
+        options: None,
+    })
+}
+
+struct StructuredOutputExecutor {
+    label: String,
+    confidence: u32,
+}
+
+impl common::ActionExecutor for StructuredOutputExecutor {
+    fn name(&self) -> &str {
+        &self.label
+    }
+
+    fn execute(
+        &self,
+        _ctx: &dyn runkon_flow::traits::run_context::RunContext,
+        _info: &runkon_flow::traits::action_executor::StepInfo,
+        _params: &runkon_flow::traits::action_executor::ActionParams,
+    ) -> Result<ActionOutput, EngineError> {
+        Ok(ActionOutput {
+            structured_output: Some(format!(r#"{{"confidence": {}}}"#, self.confidence)),
+            ..Default::default()
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Quality gate — confidence above threshold → passes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn quality_gate_passes_when_confidence_above_threshold() {
+    let engine = FlowEngineBuilder::new()
+        .action(Box::new(StructuredOutputExecutor {
+            label: "prior".to_string(),
+            confidence: 90,
+        }))
+        .build()
+        .expect("engine build failed");
+
+    let def = make_def(
+        "qg-pass",
+        vec![
+            common::call_node("prior"),
+            quality_gate_node("quality_check", "prior", 80, OnFailAction::Fail),
+        ],
+    );
+
+    let persistence = make_persistence();
+    let mut state = make_state(
+        "qg-pass",
+        Arc::clone(&persistence),
+        named_executors([Box::new(StructuredOutputExecutor {
+            label: "prior".to_string(),
+            confidence: 90,
+        }) as Box<dyn common::ActionExecutor>]),
+    );
+
+    let result = engine.run(&def, &mut state).expect("run should succeed");
+    assert!(result.all_succeeded, "quality gate should pass with confidence=90 >= threshold=80");
+
+    let steps = persistence
+        .get_steps(&result.workflow_run_id)
+        .expect("get_steps failed");
+    let gate_step = steps.iter().find(|s| s.step_name == "quality_check");
+    assert!(gate_step.is_some(), "quality_check step should be recorded");
+    assert_eq!(
+        gate_step.unwrap().status,
+        WorkflowStepStatus::Completed,
+        "gate step should be Completed"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Quality gate — confidence below threshold with on_fail=Continue → proceeds
+// ---------------------------------------------------------------------------
+
+#[test]
+fn quality_gate_continues_when_on_fail_continue_and_below_threshold() {
+    let engine = FlowEngineBuilder::new()
+        .action(Box::new(StructuredOutputExecutor {
+            label: "prior".to_string(),
+            confidence: 50,
+        }))
+        .build()
+        .expect("engine build failed");
+
+    let def = make_def(
+        "qg-continue",
+        vec![
+            common::call_node("prior"),
+            quality_gate_node("quality_check", "prior", 80, OnFailAction::Continue),
+        ],
+    );
+
+    let persistence = make_persistence();
+    let mut state = make_state(
+        "qg-continue",
+        Arc::clone(&persistence),
+        named_executors([Box::new(StructuredOutputExecutor {
+            label: "prior".to_string(),
+            confidence: 50,
+        }) as Box<dyn common::ActionExecutor>]),
+    );
+
+    let result = engine
+        .run(&def, &mut state)
+        .expect("run should succeed with on_fail=continue");
+    assert!(
+        result.all_succeeded,
+        "on_fail=continue should allow workflow to succeed even below threshold"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Quality gate — confidence below threshold with on_fail=Fail → workflow fails
+// ---------------------------------------------------------------------------
+
+#[test]
+fn quality_gate_fails_when_confidence_below_threshold_and_on_fail_fail() {
+    let engine = FlowEngineBuilder::new()
+        .action(Box::new(StructuredOutputExecutor {
+            label: "prior".to_string(),
+            confidence: 60,
+        }))
+        .build()
+        .expect("engine build failed");
+
+    let def = make_def(
+        "qg-fail",
+        vec![
+            common::call_node("prior"),
+            quality_gate_node("quality_check", "prior", 80, OnFailAction::Fail),
+        ],
+    );
+
+    let persistence = make_persistence();
+    let run_id;
+    {
+        let mut state = make_state(
+            "qg-fail",
+            Arc::clone(&persistence),
+            named_executors([Box::new(StructuredOutputExecutor {
+                label: "prior".to_string(),
+                confidence: 60,
+            }) as Box<dyn common::ActionExecutor>]),
+        );
+        run_id = state.workflow_run_id.clone();
+        let _ = engine.run(&def, &mut state);
+    }
+
+    let steps = persistence.get_steps(&run_id).expect("get_steps failed");
+    let gate_step = steps.iter().find(|s| s.step_name == "quality_check");
+    assert!(gate_step.is_some(), "quality_check step should be recorded");
+    assert_eq!(
+        gate_step.unwrap().status,
+        WorkflowStepStatus::Failed,
+        "gate step should be Failed when confidence < threshold with on_fail=fail"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Quality gate — source step not found → workflow fails
+// ---------------------------------------------------------------------------
+
+#[test]
+fn quality_gate_fails_when_source_step_missing() {
+    let engine = FlowEngineBuilder::new()
+        .build()
+        .expect("engine build failed");
+
+    let def = make_def(
+        "qg-missing-source",
+        vec![quality_gate_node(
+            "quality_check",
+            "nonexistent_step",
+            80,
+            OnFailAction::Fail,
+        )],
+    );
+
+    let persistence = make_persistence();
+    let run_id;
+    {
+        let mut state = make_state("qg-missing-source", Arc::clone(&persistence), HashMap::new());
+        run_id = state.workflow_run_id.clone();
+        let _ = engine.run(&def, &mut state);
+    }
+
+    let steps = persistence.get_steps(&run_id).expect("get_steps failed");
+    let gate_step = steps.iter().find(|s| s.step_name == "quality_check");
+    assert!(gate_step.is_some(), "quality_check step should be recorded");
+    assert_eq!(
+        gate_step.unwrap().status,
+        WorkflowStepStatus::Failed,
+        "gate step should fail when source step is missing"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Quality gate — step has no structured_output → defaults to confidence=0
+// ---------------------------------------------------------------------------
+
+#[test]
+fn quality_gate_fails_when_source_step_has_no_structured_output() {
+    let engine = FlowEngineBuilder::new()
+        .action(Box::new(common::MockExecutor::new("prior")))
+        .build()
+        .expect("engine build failed");
+
+    let def = make_def(
+        "qg-no-output",
+        vec![
+            common::call_node("prior"),
+            quality_gate_node("quality_check", "prior", 1, OnFailAction::Fail),
+        ],
+    );
+
+    let persistence = make_persistence();
+    let run_id;
+    {
+        let mut state = make_state(
+            "qg-no-output",
+            Arc::clone(&persistence),
+            named_executors([Box::new(common::MockExecutor::new("prior")) as Box<dyn common::ActionExecutor>]),
+        );
+        run_id = state.workflow_run_id.clone();
+        let _ = engine.run(&def, &mut state);
+    }
+
+    let steps = persistence.get_steps(&run_id).expect("get_steps failed");
+    let gate_step = steps.iter().find(|s| s.step_name == "quality_check");
+    assert!(gate_step.is_some(), "quality_check step should be recorded");
+    assert_eq!(
+        gate_step.unwrap().status,
+        WorkflowStepStatus::Failed,
+        "gate should fail when source step has no structured_output (confidence defaults to 0)"
     );
 }

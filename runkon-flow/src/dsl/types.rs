@@ -751,3 +751,544 @@ pub(crate) fn collect_plugin_dirs(nodes: &[WorkflowNode]) -> Vec<String> {
     }
     dirs
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    fn simple_wf(body: Vec<WorkflowNode>) -> WorkflowDef {
+        WorkflowDef {
+            name: "test_wf".to_string(),
+            title: None,
+            description: String::new(),
+            trigger: WorkflowTrigger::Manual,
+            targets: vec![],
+            group: None,
+            inputs: vec![],
+            body,
+            always: vec![],
+            source_path: "test.wf".to_string(),
+        }
+    }
+
+    fn call(agent: &str) -> WorkflowNode {
+        WorkflowNode::Call(CallNode {
+            agent: AgentRef::Name(agent.to_string()),
+            retries: 0,
+            on_fail: None,
+            output: None,
+            with: vec![],
+            as_identity: None,
+            plugin_dirs: vec![],
+            timeout: None,
+            max_turns: None,
+        })
+    }
+
+    fn call_with_output(agent: &str, output: &str) -> WorkflowNode {
+        WorkflowNode::Call(CallNode {
+            agent: AgentRef::Name(agent.to_string()),
+            output: Some(output.to_string()),
+            retries: 0,
+            on_fail: None,
+            with: vec![],
+            as_identity: None,
+            plugin_dirs: vec![],
+            timeout: None,
+            max_turns: None,
+        })
+    }
+
+    fn call_with_snippets(agent: &str, snippets: &[&str]) -> WorkflowNode {
+        WorkflowNode::Call(CallNode {
+            agent: AgentRef::Name(agent.to_string()),
+            with: snippets.iter().map(|s| s.to_string()).collect(),
+            retries: 0,
+            on_fail: None,
+            output: None,
+            as_identity: None,
+            plugin_dirs: vec![],
+            timeout: None,
+            max_turns: None,
+        })
+    }
+
+    fn call_with_plugin_dirs(agent: &str, dirs: &[&str]) -> WorkflowNode {
+        WorkflowNode::Call(CallNode {
+            agent: AgentRef::Name(agent.to_string()),
+            plugin_dirs: dirs.iter().map(|s| s.to_string()).collect(),
+            retries: 0,
+            on_fail: None,
+            output: None,
+            with: vec![],
+            as_identity: None,
+            timeout: None,
+            max_turns: None,
+        })
+    }
+
+    fn call_with_identity(agent: &str, identity: &str) -> WorkflowNode {
+        WorkflowNode::Call(CallNode {
+            agent: AgentRef::Name(agent.to_string()),
+            as_identity: Some(identity.to_string()),
+            retries: 0,
+            on_fail: None,
+            output: None,
+            with: vec![],
+            plugin_dirs: vec![],
+            timeout: None,
+            max_turns: None,
+        })
+    }
+
+    fn do_while_node(step: &str, max_iter: u32, body: Vec<WorkflowNode>) -> WorkflowNode {
+        WorkflowNode::DoWhile(DoWhileNode {
+            step: step.to_string(),
+            marker: "done".to_string(),
+            max_iterations: max_iter,
+            stuck_after: None,
+            on_max_iter: OnMaxIter::Fail,
+            body,
+        })
+    }
+
+    fn while_node(step: &str, max_iter: u32, body: Vec<WorkflowNode>) -> WorkflowNode {
+        WorkflowNode::While(WhileNode {
+            step: step.to_string(),
+            marker: "needs_revision".to_string(),
+            max_iterations: max_iter,
+            stuck_after: None,
+            on_max_iter: OnMaxIter::Fail,
+            body,
+        })
+    }
+
+    fn if_node(step: &str, marker: &str, body: Vec<WorkflowNode>) -> WorkflowNode {
+        WorkflowNode::If(IfNode {
+            condition: Condition::StepMarker {
+                step: step.to_string(),
+                marker: marker.to_string(),
+            },
+            body,
+        })
+    }
+
+    fn call_workflow(name: &str) -> WorkflowNode {
+        WorkflowNode::CallWorkflow(CallWorkflowNode {
+            workflow: name.to_string(),
+            inputs: HashMap::new(),
+            retries: 0,
+            on_fail: None,
+            as_identity: None,
+        })
+    }
+
+    fn script_node(name: &str, run: &str) -> WorkflowNode {
+        WorkflowNode::Script(ScriptNode {
+            name: name.to_string(),
+            run: run.to_string(),
+            env: HashMap::new(),
+            timeout: None,
+            retries: 0,
+            on_fail: None,
+            as_identity: None,
+        })
+    }
+
+    // ── WorkflowDef::display_name ─────────────────────────────────────────────
+
+    #[test]
+    fn display_name_returns_title_when_set() {
+        let mut wf = simple_wf(vec![]);
+        wf.title = Some("My Workflow".to_string());
+        assert_eq!(wf.display_name(), "My Workflow");
+    }
+
+    #[test]
+    fn display_name_falls_back_to_name_when_no_title() {
+        let wf = simple_wf(vec![]);
+        assert_eq!(wf.display_name(), "test_wf");
+    }
+
+    // ── WorkflowDef::total_nodes ──────────────────────────────────────────────
+
+    #[test]
+    fn total_nodes_flat_list() {
+        let wf = simple_wf(vec![call("a"), call("b"), call("c")]);
+        assert_eq!(wf.total_nodes(), 3);
+    }
+
+    #[test]
+    fn total_nodes_includes_nested_nodes() {
+        let nested = if_node("a", "done", vec![call("b"), call("c")]);
+        let wf = simple_wf(vec![call("a"), nested]);
+        assert_eq!(wf.total_nodes(), 4);
+    }
+
+    #[test]
+    fn total_nodes_includes_always_block() {
+        let mut wf = simple_wf(vec![call("a")]);
+        wf.always = vec![call("cleanup")];
+        assert_eq!(wf.total_nodes(), 2);
+    }
+
+    // ── WorkflowDef::top_level_steps ─────────────────────────────────────────
+
+    #[test]
+    fn top_level_steps_returns_only_direct_children() {
+        let nested = if_node("a", "done", vec![call("b"), call("c")]);
+        let wf = simple_wf(vec![call("a"), nested]);
+        assert_eq!(wf.top_level_steps(), 2);
+    }
+
+    #[test]
+    fn top_level_steps_includes_always_block() {
+        let mut wf = simple_wf(vec![call("a"), call("b")]);
+        wf.always = vec![call("cleanup")];
+        assert_eq!(wf.top_level_steps(), 3);
+    }
+
+    // ── WorkflowDef::max_iterations_for_step ─────────────────────────────────
+
+    #[test]
+    fn max_iterations_for_step_found_in_do_while() {
+        let wf = simple_wf(vec![do_while_node("reviewer", 5, vec![call("reviewer")])]);
+        assert_eq!(wf.max_iterations_for_step("reviewer"), Some(5));
+    }
+
+    #[test]
+    fn max_iterations_for_step_found_in_while() {
+        let wf = simple_wf(vec![call("reviewer"), while_node("reviewer", 3, vec![call("fix")])]);
+        assert_eq!(wf.max_iterations_for_step("reviewer"), Some(3));
+    }
+
+    #[test]
+    fn max_iterations_for_step_not_found_returns_none() {
+        let wf = simple_wf(vec![call("a"), call("b")]);
+        assert_eq!(wf.max_iterations_for_step("a"), None);
+    }
+
+    #[test]
+    fn max_iterations_for_step_nested_loop() {
+        let inner = do_while_node("inner", 2, vec![call("inner")]);
+        let outer = while_node("outer", 10, vec![call("outer"), inner]);
+        let wf = simple_wf(vec![outer]);
+        assert_eq!(wf.max_iterations_for_step("inner"), Some(2));
+        assert_eq!(wf.max_iterations_for_step("outer"), Some(10));
+    }
+
+    // ── count_nodes ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn count_nodes_flat_list() {
+        let nodes = vec![call("a"), call("b")];
+        assert_eq!(count_nodes(&nodes), 2);
+    }
+
+    #[test]
+    fn count_nodes_parallel_counts_calls() {
+        let parallel = WorkflowNode::Parallel(ParallelNode {
+            fail_fast: true,
+            min_success: None,
+            calls: vec![
+                AgentRef::Name("a".to_string()),
+                AgentRef::Name("b".to_string()),
+            ],
+            output: None,
+            call_outputs: HashMap::new(),
+            with: vec![],
+            call_with: HashMap::new(),
+            call_if: HashMap::new(),
+            call_retries: HashMap::new(),
+        });
+        let nodes = vec![parallel];
+        assert_eq!(count_nodes(&nodes), 3); // 1 parallel node + 2 calls
+    }
+
+    #[test]
+    fn count_nodes_recursive_into_if_body() {
+        let nested = if_node("a", "done", vec![call("b"), call("c")]);
+        assert_eq!(count_nodes(&[nested]), 3); // if + 2 body
+    }
+
+    // ── collect_agent_names ───────────────────────────────────────────────────
+
+    #[test]
+    fn collect_agent_names_flat_call_nodes() {
+        let nodes = vec![call("agent_a"), call("agent_b")];
+        let refs = collect_agent_names(&nodes);
+        let names: Vec<&str> = refs.iter().map(|r| r.label()).collect();
+        assert!(names.contains(&"agent_a"));
+        assert!(names.contains(&"agent_b"));
+    }
+
+    #[test]
+    fn collect_agent_names_deduplication_when_sorted() {
+        let nodes = vec![call("agent_a"), call("agent_a"), call("agent_b")];
+        let mut refs = collect_agent_names(&nodes);
+        refs.sort();
+        refs.dedup();
+        assert_eq!(refs.len(), 2);
+    }
+
+    #[test]
+    fn collect_agent_names_parallel_node() {
+        let parallel = WorkflowNode::Parallel(ParallelNode {
+            fail_fast: true,
+            min_success: None,
+            calls: vec![
+                AgentRef::Name("par_a".to_string()),
+                AgentRef::Name("par_b".to_string()),
+            ],
+            output: None,
+            call_outputs: HashMap::new(),
+            with: vec![],
+            call_with: HashMap::new(),
+            call_if: HashMap::new(),
+            call_retries: HashMap::new(),
+        });
+        let refs = collect_agent_names(&[parallel]);
+        let names: Vec<&str> = refs.iter().map(|r| r.label()).collect();
+        assert!(names.contains(&"par_a"));
+        assert!(names.contains(&"par_b"));
+    }
+
+    #[test]
+    fn collect_all_agent_refs_deduplicates_and_sorts() {
+        let wf = simple_wf(vec![call("z_agent"), call("a_agent"), call("z_agent")]);
+        let refs = wf.collect_all_agent_refs();
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].label(), "a_agent");
+        assert_eq!(refs[1].label(), "z_agent");
+    }
+
+    // ── collect_snippet_refs ──────────────────────────────────────────────────
+
+    #[test]
+    fn collect_snippet_refs_from_call_with() {
+        let nodes = vec![call_with_snippets("agent", &["ctx_a", "ctx_b"])];
+        let refs = collect_snippet_refs(&nodes);
+        assert!(refs.contains(&"ctx_a".to_string()));
+        assert!(refs.contains(&"ctx_b".to_string()));
+    }
+
+    #[test]
+    fn collect_all_snippet_refs_deduplicates() {
+        let wf = simple_wf(vec![
+            call_with_snippets("a", &["shared"]),
+            call_with_snippets("b", &["shared", "unique"]),
+        ]);
+        let refs = wf.collect_all_snippet_refs();
+        assert_eq!(refs.iter().filter(|s| *s == "shared").count(), 1);
+        assert_eq!(refs.len(), 2);
+    }
+
+    // ── collect_workflow_refs ─────────────────────────────────────────────────
+
+    #[test]
+    fn collect_workflow_refs_from_call_workflow() {
+        let nodes = vec![call_workflow("child_wf"), call_workflow("other_wf")];
+        let refs = collect_workflow_refs(&nodes);
+        assert!(refs.contains(&"child_wf".to_string()));
+        assert!(refs.contains(&"other_wf".to_string()));
+    }
+
+    #[test]
+    fn collect_workflow_refs_skips_call_nodes() {
+        let nodes = vec![call("agent"), call_workflow("child_wf")];
+        let refs = collect_workflow_refs(&nodes);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0], "child_wf");
+    }
+
+    // ── collect_schema_refs ───────────────────────────────────────────────────
+
+    #[test]
+    fn collect_schema_refs_from_call_output() {
+        let nodes = vec![call_with_output("agent", "my_schema")];
+        let refs = collect_schema_refs(&nodes);
+        assert!(refs.contains(&"my_schema".to_string()));
+    }
+
+    #[test]
+    fn collect_all_schema_refs_deduplicates() {
+        let wf = simple_wf(vec![
+            call_with_output("a", "schema"),
+            call_with_output("b", "schema"),
+        ]);
+        let refs = wf.collect_all_schema_refs();
+        assert_eq!(refs.iter().filter(|s| *s == "schema").count(), 1);
+    }
+
+    // ── collect_as_identities ─────────────────────────────────────────────────
+
+    #[test]
+    fn collect_as_identities_from_call_nodes() {
+        let nodes = vec![call_with_identity("agent", "bot-app")];
+        let names = collect_as_identities(&nodes);
+        assert!(names.contains(&"bot-app".to_string()));
+    }
+
+    #[test]
+    fn collect_all_as_identities_deduplicates() {
+        let wf = simple_wf(vec![
+            call_with_identity("a", "bot"),
+            call_with_identity("b", "bot"),
+        ]);
+        let names = wf.collect_all_as_identities();
+        assert_eq!(names.iter().filter(|n| *n == "bot").count(), 1);
+    }
+
+    // ── collect_plugin_dirs ───────────────────────────────────────────────────
+
+    #[test]
+    fn collect_plugin_dirs_from_call_nodes() {
+        let nodes = vec![call_with_plugin_dirs("agent", &["/opt/plugins"])];
+        let dirs = collect_plugin_dirs(&nodes);
+        assert!(dirs.contains(&"/opt/plugins".to_string()));
+    }
+
+    #[test]
+    fn collect_all_plugin_dirs_deduplicates() {
+        let wf = simple_wf(vec![
+            call_with_plugin_dirs("a", &["/opt/shared"]),
+            call_with_plugin_dirs("b", &["/opt/shared", "/opt/unique"]),
+        ]);
+        let dirs = wf.collect_all_plugin_dirs();
+        assert_eq!(dirs.iter().filter(|d| *d == "/opt/shared").count(), 1);
+        assert_eq!(dirs.len(), 2);
+    }
+
+    // ── AgentRef::step_key ────────────────────────────────────────────────────
+
+    #[test]
+    fn agent_ref_name_step_key_returns_name() {
+        let r = AgentRef::Name("my_agent".to_string());
+        assert_eq!(r.step_key(), "my_agent");
+    }
+
+    #[test]
+    fn agent_ref_path_step_key_returns_file_stem() {
+        let r = AgentRef::Path(".claude/agents/plan.md".to_string());
+        assert_eq!(r.step_key(), "plan");
+    }
+
+    #[test]
+    fn agent_ref_label_returns_inner_string() {
+        assert_eq!(AgentRef::Name("foo".to_string()).label(), "foo");
+        assert_eq!(AgentRef::Path("bar/baz.md".to_string()).label(), "bar/baz.md");
+    }
+
+    // ── WorkflowTrigger serde ─────────────────────────────────────────────────
+
+    #[test]
+    fn workflow_trigger_serde_round_trip() {
+        for (variant, expected_json) in [
+            (WorkflowTrigger::Manual, r#""manual""#),
+            (WorkflowTrigger::Pr, r#""pr""#),
+            (WorkflowTrigger::Scheduled, r#""scheduled""#),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected_json, "display mismatch for {variant:?}");
+            let back: WorkflowTrigger = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    // ── Enum serde round-trips ────────────────────────────────────────────────
+
+    #[test]
+    fn on_max_iter_serde_round_trip() {
+        let json = serde_json::to_string(&OnMaxIter::Continue).unwrap();
+        assert_eq!(json, r#""continue""#);
+        let back: OnMaxIter = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, OnMaxIter::Continue);
+    }
+
+    #[test]
+    fn on_timeout_serde_round_trip() {
+        let json = serde_json::to_string(&OnTimeout::Fail).unwrap();
+        let back: OnTimeout = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, OnTimeout::Fail);
+    }
+
+    #[test]
+    fn on_child_fail_serde_all_variants() {
+        for variant in [
+            OnChildFail::Halt,
+            OnChildFail::Continue,
+            OnChildFail::SkipDependents,
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let back: OnChildFail = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
+    fn on_cycle_serde_all_variants() {
+        for variant in [OnCycle::Fail, OnCycle::Warn] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let back: OnCycle = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
+    fn approval_mode_serde_all_variants() {
+        for variant in [ApprovalMode::MinApprovals, ApprovalMode::ReviewDecision] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let back: ApprovalMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
+    fn on_fail_action_serde_all_variants() {
+        for variant in [OnFailAction::Fail, OnFailAction::Continue] {
+            let json = serde_json::to_string(&variant).unwrap();
+            let back: OnFailAction = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, variant);
+        }
+    }
+
+    #[test]
+    fn on_fail_agent_variant_serde() {
+        let val = OnFail::Agent(AgentRef::Name("fallback".to_string()));
+        let json = serde_json::to_string(&val).unwrap();
+        assert!(json.contains("agent"), "got: {json}");
+        let back: OnFail = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, OnFail::Agent(AgentRef::Name("fallback".to_string())));
+    }
+
+    #[test]
+    fn on_fail_continue_variant_serde() {
+        let json = serde_json::to_string(&OnFail::Continue).unwrap();
+        let back: OnFail = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, OnFail::Continue);
+    }
+
+    #[test]
+    fn input_type_serde_all_variants() {
+        assert_eq!(
+            serde_json::to_string(&InputType::String).unwrap(),
+            r#""string""#
+        );
+        assert_eq!(
+            serde_json::to_string(&InputType::Boolean).unwrap(),
+            r#""boolean""#
+        );
+    }
+
+    // ── Script node helper ────────────────────────────────────────────────────
+
+    #[test]
+    fn script_node_collect_included_in_total() {
+        let wf = simple_wf(vec![script_node("lint", "./scripts/lint.sh")]);
+        assert_eq!(wf.total_nodes(), 1);
+    }
+}

@@ -393,4 +393,57 @@ mod tests {
         let result = runtime.poll("no-such-run", None, Duration::from_millis(10));
         assert!(matches!(result, Err(PollError::Failed(_))));
     }
+
+    #[test]
+    fn parse_output_malformed_json_returns_plain_text() {
+        let config = RuntimeConfig::default();
+        let (result, tokens, _) = parse_output("not valid JSON at all", &config);
+        assert_eq!(result.as_deref(), Some("not valid JSON at all"));
+        assert!(tokens.is_none());
+    }
+
+    #[test]
+    fn parse_output_token_fields_extraction() {
+        let config = RuntimeConfig {
+            token_fields: Some("usage.total_tokens".to_string()),
+            ..RuntimeConfig::default()
+        };
+        let json = r#"{"usage": {"total_tokens": 42}, "response": "hello"}"#;
+        let (_, tokens, _) = parse_output(json, &config);
+        assert_eq!(tokens, Some(42));
+    }
+
+    #[test]
+    fn parse_output_result_field_non_string_falls_back_to_content() {
+        let config = RuntimeConfig {
+            result_field: Some("count".to_string()),
+            ..RuntimeConfig::default()
+        };
+        let json = r#"{"count": 42}"#;
+        let (result, _, _) = parse_output(json, &config);
+        // count is a number, not a string, so as_str() returns None → fallback to full content
+        assert_eq!(result.as_deref(), Some(r#"{"count": 42}"#));
+    }
+
+    #[test]
+    fn parse_output_missing_result_field_falls_back_to_content() {
+        let config = RuntimeConfig {
+            result_field: Some("nonexistent_field".to_string()),
+            ..RuntimeConfig::default()
+        };
+        let json = r#"{"other": "value"}"#;
+        let (result, _, _) = parse_output(json, &config);
+        assert_eq!(result.as_deref(), Some(r#"{"other": "value"}"#));
+    }
+
+    #[test]
+    fn parse_output_token_fields_not_a_number_returns_none() {
+        let config = RuntimeConfig {
+            token_fields: Some("stats.count".to_string()),
+            ..RuntimeConfig::default()
+        };
+        let json = r#"{"stats": {"count": "not-a-number"}}"#;
+        let (_, tokens, _) = parse_output(json, &config);
+        assert!(tokens.is_none());
+    }
 }

@@ -585,9 +585,14 @@ fn collect_script_nodes(nodes: &[WorkflowNode]) -> Vec<&ScriptNode> {
 
 #[cfg(test)]
 mod tests {
+    use std::any::Any;
+    use std::collections::HashMap;
+
     use super::{validate_script_steps, validate_workflow_semantics, ValidationContext};
     use crate::dsl::parse_workflow_str;
-    use crate::traits::item_provider::ItemProviderRegistry;
+    use crate::engine_error::EngineError;
+    use crate::traits::item_provider::{FanOutItem, ItemProvider, ItemProviderRegistry, ProviderInfo};
+    use crate::traits::run_context::RunContext;
 
     fn no_loader(name: &str) -> Result<crate::dsl::WorkflowDef, String> {
         Err(format!("sub-workflow '{}' not found", name))
@@ -863,6 +868,156 @@ workflow wf {
             2,
             "each unresolvable script should generate one error; got: {:?}",
             errors
+        );
+    }
+
+    // ---- foreach validation ----
+
+    struct BasicProvider {
+        provider_name: &'static str,
+        ordered: bool,
+    }
+
+    impl ItemProvider for BasicProvider {
+        fn name(&self) -> &str {
+            self.provider_name
+        }
+
+        fn supports_ordered(&self) -> bool {
+            self.ordered
+        }
+
+        fn items(
+            &self,
+            _ctx: &dyn RunContext,
+            _info: &ProviderInfo,
+            _scope: Option<&dyn Any>,
+            _filter: &HashMap<String, String>,
+        ) -> Result<Vec<FanOutItem>, EngineError> {
+            Ok(vec![])
+        }
+    }
+
+    #[test]
+    fn foreach_unregistered_provider_mentions_provider_name() {
+        let src = r#"
+workflow wf {
+    foreach fan {
+        over = unknown_provider
+        max_parallel = 2
+        workflow = child_wf
+    }
+}
+"#;
+        let def = parse_workflow_str(src, "test.wf").unwrap();
+        let registry = ItemProviderRegistry::new();
+        let ctx = empty_ctx(&registry);
+        let report = validate_workflow_semantics(&def, &no_loader, &ctx);
+        assert!(!report.is_ok(), "unregistered provider should fail");
+        assert!(
+            report.errors.iter().any(|e| e.message.contains("unknown_provider")),
+            "error should mention provider name; errors: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn foreach_ordered_with_unsupporting_provider_is_error() {
+        let src = r#"
+workflow wf {
+    foreach fan {
+        over = simple_provider
+        max_parallel = 2
+        workflow = child_wf
+        ordered = true
+    }
+}
+"#;
+        let def = parse_workflow_str(src, "test.wf").unwrap();
+        let mut registry = ItemProviderRegistry::new();
+        registry.register(BasicProvider { provider_name: "simple_provider", ordered: false });
+        let ctx = empty_ctx(&registry);
+        let report = validate_workflow_semantics(&def, &no_loader, &ctx);
+        assert!(!report.is_ok(), "ordered=true with unsupporting provider should fail");
+        assert!(
+            report.errors.iter().any(|e| e.message.contains("ordered")),
+            "error should mention ordered; errors: {:?}",
+            report.errors
+        );
+    }
+
+    // ---- quality gate source step validation ----
+
+    #[test]
+    fn quality_gate_source_step_exists_no_error() {
+        let src = r#"
+workflow wf {
+    call analyzer
+    gate quality_gate {
+        source = analyzer
+        threshold = 70
+    }
+}
+"#;
+        let def = parse_workflow_str(src, "test.wf").unwrap();
+        let registry = ItemProviderRegistry::new();
+        let ctx = empty_ctx(&registry);
+        let report = validate_workflow_semantics(&def, &no_loader, &ctx);
+        assert!(
+            report.is_ok(),
+            "quality gate referencing a prior step should have no errors; got: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn quality_gate_source_step_not_in_workflow_is_error() {
+        let src = r#"
+workflow wf {
+    gate quality_gate {
+        source = nonexistent_step
+        threshold = 70
+    }
+}
+"#;
+        let def = parse_workflow_str(src, "test.wf").unwrap();
+        let registry = ItemProviderRegistry::new();
+        let ctx = empty_ctx(&registry);
+        let report = validate_workflow_semantics(&def, &no_loader, &ctx);
+        assert!(!report.is_ok(), "quality gate with missing source step should fail");
+        assert!(
+            report.errors.iter().any(|e| e.message.contains("nonexistent_step")),
+            "error should mention the missing step; errors: {:?}",
+            report.errors
+        );
+    }
+
+    // ---- deeply nested workflow produce-set tracking ----
+
+    #[test]
+    fn deeply_nested_workflow_tracks_produce_set_correctly() {
+        let src = r#"
+workflow wf {
+    call outer_step
+    if outer_step.done {
+        while outer_step.done {
+            max_iterations = 3
+            call inner_step
+        }
+        if inner_step.ready {
+            call leaf_step
+        }
+    }
+}
+"#;
+        let def = parse_workflow_str(src, "test.wf").unwrap();
+        let registry = ItemProviderRegistry::new();
+        let ctx = empty_ctx(&registry);
+        let report = validate_workflow_semantics(&def, &no_loader, &ctx);
+        assert!(
+            report.is_ok(),
+            "deeply nested workflow with valid produce-set should have no errors; got: {:?}",
+            report.errors
         );
     }
 }
