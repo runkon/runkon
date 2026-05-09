@@ -20,11 +20,20 @@ fi
 
 # `gh pr list --head <branch>` keys on the explicit branch name and is not
 # affected by cwd or the currently checked-out HEAD of an unrelated repo.
+# Capture stderr so a transient gh failure (auth, network, 5xx) surfaces in
+# the run log instead of being indistinguishable from a real "no PR" result.
+GH_STDERR=$(mktemp)
+trap 'rm -f "${GH_STDERR}"' EXIT
 BASE_BRANCH=$(gh pr list --head "${BRANCH}" --state open \
-                --json baseRefName -q '.[0].baseRefName' 2>/dev/null || true)
+                --json baseRefName -q '.[0].baseRefName' 2>"${GH_STDERR}" || true)
+GH_ERR=$(cat "${GH_STDERR}")
 
 if [ -z "${BASE_BRANCH}" ]; then
   echo "ERROR: could not resolve PR base branch for branch '${BRANCH}'." >&2
+  if [ -n "${GH_ERR}" ]; then
+    echo "       gh stderr:" >&2
+    printf '%s\n' "${GH_ERR}" | sed 's/^/         /' >&2
+  fi
   echo "       Aborting rather than falling back to 'main' silently — a wrong" >&2
   echo "       base produces a fabricated diff that contaminates every reviewer." >&2
   exit 1
