@@ -79,9 +79,10 @@ impl PushSubscriptionStore for InMemoryPushStore {
     fn upsert(&self, endpoint: &str, p256dh: &str, auth: &str) -> Result<Subscription> {
         use crate::error::NotifyError;
 
-        let mut subs = self.inner.lock().map_err(|e| {
-            NotifyError::Subscription(format!("lock poisoned: {e}"))
-        })?;
+        let mut subs = self
+            .inner
+            .lock()
+            .map_err(|e| NotifyError::Subscription(format!("lock poisoned: {e}")))?;
 
         if let Some(existing) = subs.iter_mut().find(|s| s.endpoint == endpoint) {
             existing.p256dh = p256dh.to_string();
@@ -111,9 +112,10 @@ impl PushSubscriptionStore for InMemoryPushStore {
     fn delete(&self, endpoint: &str) -> Result<bool> {
         use crate::error::NotifyError;
 
-        let mut subs = self.inner.lock().map_err(|e| {
-            NotifyError::Subscription(format!("lock poisoned: {e}"))
-        })?;
+        let mut subs = self
+            .inner
+            .lock()
+            .map_err(|e| NotifyError::Subscription(format!("lock poisoned: {e}")))?;
         let len_before = subs.len();
         subs.retain(|s| s.endpoint != endpoint);
         Ok(subs.len() < len_before)

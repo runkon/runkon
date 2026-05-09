@@ -55,7 +55,10 @@ impl Event {
         map.insert("RUNKON_NOTIFY_BODY".into(), self.body.clone());
         map.insert("RUNKON_NOTIFY_SEVERITY".into(), self.severity.to_string());
         for (k, v) in &self.fields {
-            map.insert(format!("RUNKON_NOTIFY_FIELD_{}", k.to_uppercase()), v.clone());
+            map.insert(
+                format!("RUNKON_NOTIFY_FIELD_{}", k.to_uppercase()),
+                v.clone(),
+            );
         }
         map
     }

@@ -44,5 +44,8 @@ fn main() {
         "hook script must receive RUNKON_NOTIFY_KIND"
     );
 
-    println!("hook_fires example passed — hook received kind: {}", contents.trim());
+    println!(
+        "hook_fires example passed — hook received kind: {}",
+        contents.trim()
+    );
 }
