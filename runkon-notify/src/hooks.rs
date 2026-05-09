@@ -657,7 +657,9 @@ mod tests {
                             header_end = pos + 4;
                             let header_str = String::from_utf8_lossy(&buf[..pos]);
                             for line in header_str.split("\r\n") {
-                                if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                                if let Some(rest) =
+                                    line.to_ascii_lowercase().strip_prefix("content-length:")
+                                {
                                     content_length = rest.trim().parse().unwrap_or(0);
                                 }
                             }
@@ -716,7 +718,9 @@ mod tests {
 
         let received = rx.recv_timeout(Duration::from_secs(3)).unwrap();
         assert!(
-            received.to_ascii_lowercase().contains("authorization: bearer abc123"),
+            received
+                .to_ascii_lowercase()
+                .contains("authorization: bearer abc123"),
             "request: {received}"
         );
     }

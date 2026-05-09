@@ -79,3 +79,46 @@ pub struct RunHandle {
     pub cache_read_input_tokens: Option<i64>,
     pub cache_creation_input_tokens: Option<i64>,
 }
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use super::*;
+
+    #[test]
+    fn run_status_display_all_variants() {
+        assert_eq!(RunStatus::Running.to_string(), "running");
+        assert_eq!(RunStatus::Completed.to_string(), "completed");
+        assert_eq!(RunStatus::Failed.to_string(), "failed");
+        assert_eq!(RunStatus::Cancelled.to_string(), "cancelled");
+    }
+
+    #[test]
+    fn run_status_from_str_round_trips_all_variants() {
+        for variant in [
+            RunStatus::Running,
+            RunStatus::Completed,
+            RunStatus::Failed,
+            RunStatus::Cancelled,
+        ] {
+            let s = variant.to_string();
+            let parsed = RunStatus::from_str(&s).expect("should parse back");
+            assert_eq!(parsed, variant);
+        }
+    }
+
+    #[test]
+    fn run_status_from_str_unknown_returns_error() {
+        let err = RunStatus::from_str("pending").unwrap_err();
+        assert!(err.contains("unknown RunStatus: pending"), "got: {err}");
+    }
+
+    #[test]
+    fn run_status_serde_round_trip() {
+        let json = serde_json::to_string(&RunStatus::Completed).unwrap();
+        assert_eq!(json, r#""completed""#);
+        let back: RunStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, RunStatus::Completed);
+    }
+}

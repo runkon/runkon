@@ -1079,7 +1079,7 @@ pub fn parse_workflow_str(input: &str, source_path: &str) -> Result<WorkflowDef,
 
 #[cfg(test)]
 mod tests {
-    use super::parse_workflow_str;
+    use super::{parse_duration_str, parse_workflow_str};
     use crate::dsl::{AgentRef, Condition, InputType, WorkflowNode, WorkflowTrigger};
 
     // ---- basic workflow structure ----
@@ -1502,5 +1502,120 @@ workflow wf {
             }
             other => panic!("expected Gate node, got {other:?}"),
         }
+    }
+
+    // ---- parse_duration_str ----
+
+    #[test]
+    fn parse_duration_hours() {
+        assert_eq!(parse_duration_str("2h").unwrap(), 7200);
+    }
+
+    #[test]
+    fn parse_duration_minutes() {
+        assert_eq!(parse_duration_str("30m").unwrap(), 1800);
+    }
+
+    #[test]
+    fn parse_duration_seconds() {
+        assert_eq!(parse_duration_str("45s").unwrap(), 45);
+    }
+
+    #[test]
+    fn parse_duration_bare_number() {
+        assert_eq!(parse_duration_str("120").unwrap(), 120);
+    }
+
+    #[test]
+    fn parse_duration_quoted_value() {
+        assert_eq!(parse_duration_str("\"1h\"").unwrap(), 3600);
+    }
+
+    #[test]
+    fn parse_duration_invalid_input_returns_error() {
+        assert!(parse_duration_str("not_a_number").is_err());
+    }
+
+    #[test]
+    fn parse_duration_empty_string_returns_error() {
+        assert!(parse_duration_str("").is_err());
+    }
+
+    #[test]
+    fn parse_duration_overflow_returns_error() {
+        // u64::MAX hours would overflow
+        assert!(parse_duration_str("99999999999999999999h").is_err());
+    }
+
+    // ---- foreach node parsing ----
+
+    #[test]
+    fn parse_foreach_node() {
+        let src = r#"
+workflow wf {
+    foreach process_tickets {
+        over = tickets
+        max_parallel = 4
+        workflow = handle_ticket
+        filter = { status = "open" }
+    }
+}
+"#;
+        let def = parse_workflow_str(src, "t.wf").expect("foreach must parse");
+        match &def.body[0] {
+            WorkflowNode::ForEach(n) => {
+                assert_eq!(n.name, "process_tickets");
+                assert_eq!(n.over, "tickets");
+                assert_eq!(n.max_parallel, 4);
+                assert_eq!(n.workflow, "handle_ticket");
+                assert_eq!(n.filter.get("status").map(|s| s.as_str()), Some("open"));
+            }
+            other => panic!("expected ForEach node, got {other:?}"),
+        }
+    }
+
+    // ---- do-while node parsing ----
+
+    #[test]
+    fn parse_do_while_node() {
+        let src = r#"
+workflow wf {
+    call review
+    do {
+        max_iterations = 3
+        call fix
+    } while review.needs_revision
+}
+"#;
+        let def = parse_workflow_str(src, "t.wf").expect("do-while must parse");
+        match &def.body[1] {
+            WorkflowNode::DoWhile(n) => {
+                assert_eq!(n.step, "review");
+                assert_eq!(n.marker, "needs_revision");
+                assert_eq!(n.max_iterations, 3);
+                assert_eq!(n.body.len(), 1);
+            }
+            other => panic!("expected DoWhile node, got {other:?}"),
+        }
+    }
+
+    // ---- error message quality ----
+
+    #[test]
+    fn parse_error_contains_helpful_keyword() {
+        let src = r#"
+workflow wf {
+    while review.needs_revision {
+        call fix
+    }
+}
+"#;
+        // Missing max_iterations in while loop
+        let err = parse_workflow_str(src, "t.wf").expect_err("missing max_iterations must fail");
+        assert!(!err.is_empty(), "error message must not be empty");
+        assert!(
+            err.contains("max_iterations") || err.contains("while") || err.contains("requires"),
+            "error should mention max_iterations or while; got: {err}"
+        );
     }
 }
