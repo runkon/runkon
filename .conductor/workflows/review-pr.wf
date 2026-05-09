@@ -16,7 +16,8 @@ workflow review-pr {
   // Without this, reviewer agents and detect-* scripts each run their own
   // `gh pr view` and the silent fallback to `main` corrupts the diff. #2736.
   script resolve-pr-base {
-    run = ".conductor/scripts/resolve-pr-base.sh"
+    run     = ".conductor/scripts/resolve-pr-base.sh"
+    retries = 1
   }
   script detect-file-types {
     run = ".conductor/scripts/detect-file-types.sh"
