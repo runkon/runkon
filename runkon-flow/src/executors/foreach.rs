@@ -114,7 +114,9 @@ fn build_foreach_structured_output(
     step_id: &str,
     child_run_id_by_item: &HashMap<String, String>,
 ) -> Result<String> {
-    let all_items = persistence.get_fan_out_items(step_id, None).map_err(p_err)?;
+    let all_items = persistence
+        .get_fan_out_items(step_id, None)
+        .map_err(p_err)?;
     let mut terminal_items: Vec<_> = all_items
         .into_iter()
         .filter(|i| i.status != "pending" && i.status != "running")
@@ -125,12 +127,13 @@ fn build_foreach_structured_output(
     for item in &terminal_items {
         let output = if let Some(run_id) = child_run_id_by_item.get(&item.item_id) {
             let steps = persistence.get_steps(run_id).map_err(p_err)?;
-            let last_output = steps.iter().rev().find_map(|s| s.structured_output.as_deref());
+            let last_output = steps
+                .iter()
+                .rev()
+                .find_map(|s| s.structured_output.as_deref());
             match last_output {
-                Some(json_str) => {
-                    serde_json::from_str::<serde_json::Value>(json_str)
-                        .unwrap_or(serde_json::Value::Null)
-                }
+                Some(json_str) => serde_json::from_str::<serde_json::Value>(json_str)
+                    .unwrap_or(serde_json::Value::Null),
                 None => serde_json::Value::Null,
             }
         } else {
@@ -147,8 +150,11 @@ fn build_foreach_structured_output(
         }));
     }
 
-    serde_json::to_string(&serde_json::json!({ "items": entries }))
-        .map_err(|e| EngineError::Workflow(format!("foreach: failed to serialize structured_output: {e}")))
+    serde_json::to_string(&serde_json::json!({ "items": entries })).map_err(|e| {
+        EngineError::Workflow(format!(
+            "foreach: failed to serialize structured_output: {e}"
+        ))
+    })
 }
 
 /// Execute a `foreach` step: fan out a child workflow over a collection of items.
@@ -263,7 +269,14 @@ pub fn execute_foreach(
             empty_output.clone(),
         )?;
 
-        record_foreach_step_success(state, step_key, &node.name, context, iteration, empty_output);
+        record_foreach_step_success(
+            state,
+            step_key,
+            &node.name,
+            context,
+            iteration,
+            empty_output,
+        );
         return Ok(());
     }
 
@@ -622,7 +635,10 @@ pub fn execute_foreach(
     ) {
         Ok(json) => Some(json),
         Err(e) => {
-            tracing::warn!("foreach '{}': failed to build structured_output: {e}", node.name);
+            tracing::warn!(
+                "foreach '{}': failed to build structured_output: {e}",
+                node.name
+            );
             None
         }
     };
@@ -645,7 +661,14 @@ pub fn execute_foreach(
             },
         )?;
 
-        record_foreach_step_success(state, step_key, &node.name, context, iteration, structured_output);
+        record_foreach_step_success(
+            state,
+            step_key,
+            &node.name,
+            context,
+            iteration,
+            structured_output,
+        );
     } else {
         let error_msg = format!(
             "foreach '{}': {failed_count} of {total_items} items failed",
@@ -1525,7 +1548,10 @@ mod tests {
         assert_eq!(item_a["status"], "completed");
         assert_eq!(item_a["output"]["result"], "ok");
         assert_eq!(item_b["status"], "failed");
-        assert!(item_b["output"].is_null(), "failed child with no output → null");
+        assert!(
+            item_b["output"].is_null(),
+            "failed child with no output → null"
+        );
     }
 
     /// item-a fails with SkipDependents; item-b and item-c are skipped.
@@ -1676,7 +1702,11 @@ mod tests {
             .expect("structured_output must be set");
         let val: serde_json::Value = serde_json::from_str(so).unwrap();
         let items = val["items"].as_array().expect("items must be an array");
-        assert_eq!(items.len(), 3, "all 3 items must appear (failed + 2 skipped)");
+        assert_eq!(
+            items.len(),
+            3,
+            "all 3 items must appear (failed + 2 skipped)"
+        );
         let item_a = items.iter().find(|i| i["item_id"] == "item-a").unwrap();
         let item_b = items.iter().find(|i| i["item_id"] == "item-b").unwrap();
         let item_c = items.iter().find(|i| i["item_id"] == "item-c").unwrap();
