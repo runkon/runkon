@@ -86,6 +86,7 @@ fn record_foreach_step_success(
     step_name: &str,
     context: String,
     iteration: u32,
+    structured_output: Option<String>,
 ) {
     record_step_success(
         state,
@@ -95,9 +96,59 @@ fn record_foreach_step_success(
             result_text: Some(context.clone()),
             context,
             iteration,
+            structured_output,
             ..crate::types::StepSuccess::default()
         },
     );
+}
+
+/// Build the aggregate JSON for the parent foreach step's `structured_output`.
+///
+/// Queries all terminal fan-out items for `step_id`, looks up each child run's
+/// last completed step's `structured_output`, and serializes the result as
+/// `{"items": [{item_id, status, output}]}`. Items left as pending/running
+/// (e.g. after cancellation) are excluded. Items without a recorded
+/// child_run_id (e.g. skipped dependents) emit `output: null`.
+fn build_foreach_structured_output(
+    persistence: &Arc<dyn crate::traits::persistence::WorkflowPersistence>,
+    step_id: &str,
+    child_run_id_by_item: &HashMap<String, String>,
+) -> Result<String> {
+    let all_items = persistence.get_fan_out_items(step_id, None).map_err(p_err)?;
+    let mut terminal_items: Vec<_> = all_items
+        .into_iter()
+        .filter(|i| i.status != "pending" && i.status != "running")
+        .collect();
+    terminal_items.sort_by(|a, b| a.item_id.cmp(&b.item_id));
+
+    let mut entries: Vec<serde_json::Value> = Vec::with_capacity(terminal_items.len());
+    for item in &terminal_items {
+        let output = if let Some(run_id) = child_run_id_by_item.get(&item.item_id) {
+            let steps = persistence.get_steps(run_id).map_err(p_err)?;
+            let last_output = steps.iter().rev().find_map(|s| s.structured_output.as_deref());
+            match last_output {
+                Some(json_str) => {
+                    serde_json::from_str::<serde_json::Value>(json_str)
+                        .unwrap_or(serde_json::Value::Null)
+                }
+                None => serde_json::Value::Null,
+            }
+        } else {
+            tracing::debug!(
+                item_id = %item.item_id,
+                "foreach: no child_run_id recorded for item — output will be null"
+            );
+            serde_json::Value::Null
+        };
+        entries.push(serde_json::json!({
+            "item_id": item.item_id,
+            "status": item.status,
+            "output": output,
+        }));
+    }
+
+    serde_json::to_string(&serde_json::json!({ "items": entries }))
+        .map_err(|e| EngineError::Workflow(format!("foreach: failed to serialize structured_output: {e}")))
 }
 
 /// Execute a `foreach` step: fan out a child workflow over a collection of items.
@@ -200,6 +251,7 @@ pub fn execute_foreach(
 
     if total_items == 0 {
         let context = format!("foreach {}: no items to process", node.name);
+        let empty_output = Some(r#"{"items":[]}"#.to_string());
         super::persist_completed_step(
             state,
             &step_id,
@@ -208,10 +260,10 @@ pub fn execute_foreach(
             Some(context.clone()),
             None,
             0,
-            None,
+            empty_output.clone(),
         )?;
 
-        record_foreach_step_success(state, step_key, &node.name, context, iteration);
+        record_foreach_step_success(state, step_key, &node.name, context, iteration, empty_output);
         return Ok(());
     }
 
@@ -259,8 +311,9 @@ pub fn execute_foreach(
         item_ref_map.insert(i.item_id.clone(), i.item_ref.clone());
     }
 
-    // Channel: spawned threads send (fan_out_item_db_id, succeeded).
-    let (tx, rx) = mpsc::channel::<(String, bool)>();
+    // Channel: spawned threads send (fan_out_item_db_id, succeeded, child_run_id).
+    let (tx, rx) = mpsc::channel::<(String, bool, Option<String>)>();
+    let mut child_run_id_by_item: HashMap<String, String> = HashMap::new();
 
     // Snapshot the parent context once; shared via Arc across all thread spawns.
     let parent_ctx = Arc::new(ForeachParentCtx::from_state(
@@ -317,7 +370,7 @@ pub fn execute_foreach(
 
         // 1. When threads are in-flight, block briefly on the first result to yield
         //    the CPU instead of spinning. Then drain any additional ready results.
-        let mut completed: Vec<(String, bool)> = Vec::new();
+        let mut completed: Vec<(String, bool, Option<String>)> = Vec::new();
         if in_flight > 0 {
             match rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(m) => completed.push(m),
@@ -330,8 +383,14 @@ pub fn execute_foreach(
         }
 
         let mut batch: Vec<(String, FanOutItemUpdate)> = Vec::new();
-        for (item_db_id, succeeded) in completed {
+        for (item_db_id, succeeded, child_run_id) in completed {
             in_flight -= 1;
+
+            if let Some(run_id) = child_run_id {
+                if let Some(item_id) = db_id_to_item_id.get(&item_db_id) {
+                    child_run_id_by_item.insert(item_id.clone(), run_id);
+                }
+            }
 
             let item_id = db_id_to_item_id
                 .get(&item_db_id)
@@ -505,31 +564,30 @@ pub fn execute_foreach(
                 let depth = state.depth;
 
                 pool.execute(move || {
-                    let succeeded = ctx
-                        .child_runner
-                        .execute_child(
-                            &workflow_name,
-                            &ctx.parent_workflow_ctx,
-                            ChildWorkflowInput {
-                                inputs,
-                                iteration,
-                                as_identity: None,
-                                depth: depth + 1,
-                                parent_step_id: None,
-                                cancellation: child_cancellation,
-                            },
-                        )
-                        .map(|r| r.all_succeeded)
-                        .unwrap_or_else(|e| {
+                    let (succeeded, child_run_id) = match ctx.child_runner.execute_child(
+                        &workflow_name,
+                        &ctx.parent_workflow_ctx,
+                        ChildWorkflowInput {
+                            inputs,
+                            iteration,
+                            as_identity: None,
+                            depth: depth + 1,
+                            parent_step_id: None,
+                            cancellation: child_cancellation,
+                        },
+                    ) {
+                        Ok(r) => (r.all_succeeded, Some(r.workflow_run_id)),
+                        Err(e) => {
                             tracing::error!(
                                 item_db_id = %item_db_id,
                                 error = %e,
                                 "foreach: child workflow execution error; treating item as failed"
                             );
-                            false
-                        });
+                            (false, None)
+                        }
+                    };
 
-                    if let Err(e) = tx_clone.send((item_db_id, succeeded)) {
+                    if let Err(e) = tx_clone.send((item_db_id, succeeded, child_run_id)) {
                         tracing::error!(
                             "foreach: result channel broken (main thread dropped): {}",
                             e
@@ -557,6 +615,18 @@ pub fn execute_foreach(
 
     let step_succeeded = failed_count == 0;
 
+    let structured_output = match build_foreach_structured_output(
+        &state.persistence,
+        &step_id,
+        &child_run_id_by_item,
+    ) {
+        Ok(json) => Some(json),
+        Err(e) => {
+            tracing::warn!("foreach '{}': failed to build structured_output: {e}", node.name);
+            None
+        }
+    };
+
     let generation = state.expect_lease_generation();
 
     if step_succeeded {
@@ -570,12 +640,12 @@ pub fn execute_foreach(
                 context_out: Some(context.clone()),
                 markers_out: None,
                 retry_count: Some(0),
-                structured_output: None,
+                structured_output: structured_output.clone(),
                 step_error: None,
             },
         )?;
 
-        record_foreach_step_success(state, step_key, &node.name, context, iteration);
+        record_foreach_step_success(state, step_key, &node.name, context, iteration, structured_output);
     } else {
         let error_msg = format!(
             "foreach '{}': {failed_count} of {total_items} items failed",
@@ -592,7 +662,7 @@ pub fn execute_foreach(
                 context_out: Some(context),
                 markers_out: None,
                 retry_count: Some(0),
-                structured_output: None,
+                structured_output,
                 step_error: Some(error_msg.clone()),
             },
         )?;
@@ -1056,5 +1126,698 @@ mod tests {
         };
 
         super::execute_foreach(&mut state, &node, 0).unwrap();
+    }
+
+    /// All 3 children succeed and each writes a structured_output step.
+    /// The parent step's structured_output must be a JSON aggregate sorted by item_id.
+    #[test]
+    fn foreach_aggregates_all_success() {
+        use std::sync::Arc;
+
+        use crate::dsl::{ForEachNode, OnChildFail, OnCycle};
+        use crate::engine::{ChildWorkflowContext, ChildWorkflowInput, ChildWorkflowRunner};
+        use crate::engine_error::Result;
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use crate::status::WorkflowStepStatus;
+        use crate::traits::item_provider::{
+            FanOutItem, ItemProvider, ItemProviderRegistry, ProviderInfo,
+        };
+        use crate::traits::persistence::{NewRun, NewStep, StepUpdate, WorkflowPersistence};
+        use crate::types::WorkflowResult;
+
+        struct ThreeItemProvider;
+        impl ItemProvider for ThreeItemProvider {
+            fn name(&self) -> &str {
+                "three_items"
+            }
+            fn items(
+                &self,
+                _: &dyn crate::traits::run_context::RunContext,
+                _: &ProviderInfo,
+                _: Option<&dyn std::any::Any>,
+                _: &HashMap<String, String>,
+            ) -> Result<Vec<FanOutItem>> {
+                Ok(vec![
+                    FanOutItem {
+                        item_type: "t".into(),
+                        item_id: "item-a".into(),
+                        item_ref: "ref-a".into(),
+                        context: HashMap::new(),
+                    },
+                    FanOutItem {
+                        item_type: "t".into(),
+                        item_id: "item-b".into(),
+                        item_ref: "ref-b".into(),
+                        context: HashMap::new(),
+                    },
+                    FanOutItem {
+                        item_type: "t".into(),
+                        item_id: "item-c".into(),
+                        item_ref: "ref-c".into(),
+                        context: HashMap::new(),
+                    },
+                ])
+            }
+        }
+
+        struct SuccessRunner {
+            persistence: Arc<dyn WorkflowPersistence>,
+        }
+        impl ChildWorkflowRunner for SuccessRunner {
+            fn execute_child(
+                &self,
+                _: &str,
+                _: &ChildWorkflowContext,
+                input: ChildWorkflowInput,
+            ) -> Result<WorkflowResult> {
+                let item_id = input.inputs.get("item.id").cloned().unwrap_or_default();
+                let run = self
+                    .persistence
+                    .create_run(NewRun {
+                        workflow_name: "child-wf".into(),
+                        parent_run_id: String::new(),
+                        dry_run: false,
+                        trigger: "foreach".into(),
+                        definition_snapshot: None,
+                        parent_workflow_run_id: None,
+                    })
+                    .unwrap();
+                let step_id = self
+                    .persistence
+                    .insert_step(NewStep {
+                        workflow_run_id: run.id.clone(),
+                        step_name: "step-1".into(),
+                        role: "assistant".into(),
+                        can_commit: false,
+                        position: 0,
+                        iteration: 0,
+                        retry_count: Some(0),
+                    })
+                    .unwrap();
+                self.persistence
+                    .update_step(
+                        &step_id,
+                        StepUpdate {
+                            generation: 0,
+                            status: WorkflowStepStatus::Completed,
+                            child_run_id: None,
+                            result_text: None,
+                            context_out: None,
+                            markers_out: None,
+                            retry_count: Some(0),
+                            structured_output: Some(format!(
+                                r#"{{"value":"output-for-{item_id}"}}"#
+                            )),
+                            step_error: None,
+                        },
+                    )
+                    .unwrap();
+                Ok(WorkflowResult {
+                    workflow_run_id: run.id,
+                    workflow_name: "child-wf".into(),
+                    all_succeeded: true,
+                    total_cost: 0.0,
+                    total_turns: 0,
+                    total_duration_ms: 0,
+                    total_input_tokens: 0,
+                    total_output_tokens: 0,
+                    total_cache_read_input_tokens: 0,
+                    total_cache_creation_input_tokens: 0,
+                })
+            }
+            fn resume_child(
+                &self,
+                _: &str,
+                _: Option<&str>,
+                _: &ChildWorkflowContext,
+            ) -> Result<WorkflowResult> {
+                unimplemented!()
+            }
+            fn find_resumable_child(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Option<crate::types::WorkflowRun>> {
+                Ok(None)
+            }
+        }
+
+        let mem = Arc::new(InMemoryWorkflowPersistence::new());
+        let run_id = mem
+            .create_run(NewRun {
+                workflow_name: "wf".into(),
+                parent_run_id: String::new(),
+                dry_run: false,
+                trigger: "manual".into(),
+                definition_snapshot: None,
+                parent_workflow_run_id: None,
+            })
+            .unwrap()
+            .id;
+        let mem_dyn: Arc<dyn WorkflowPersistence> = mem;
+        let runner = Arc::new(SuccessRunner {
+            persistence: Arc::clone(&mem_dyn),
+        });
+
+        let mut registry = ItemProviderRegistry::new();
+        registry.register(ThreeItemProvider);
+
+        let mut state =
+            crate::test_helpers::make_test_execution_state(Arc::clone(&mem_dyn), run_id.clone());
+        state.child_runner = Some(runner);
+        state.registry = Arc::new(registry);
+
+        let node = ForEachNode {
+            name: "agg-success".into(),
+            over: "three_items".into(),
+            scope: None,
+            filter: HashMap::new(),
+            ordered: false,
+            on_cycle: OnCycle::Fail,
+            max_parallel: 3,
+            workflow: "child-wf".into(),
+            inputs: HashMap::new(),
+            on_child_fail: OnChildFail::Continue,
+        };
+
+        super::execute_foreach(&mut state, &node, 0).unwrap();
+
+        let steps = mem_dyn.get_steps(&run_id).unwrap();
+        let foreach_step = steps
+            .iter()
+            .find(|s| s.step_name == "foreach:agg-success")
+            .expect("foreach step must exist in persistence");
+        let so = foreach_step
+            .structured_output
+            .as_deref()
+            .expect("structured_output must be set on all-success foreach");
+        let val: serde_json::Value = serde_json::from_str(so).unwrap();
+        let items = val["items"].as_array().expect("items must be an array");
+        assert_eq!(items.len(), 3, "all 3 items must appear in aggregate");
+        assert_eq!(items[0]["item_id"], "item-a");
+        assert_eq!(items[0]["status"], "completed");
+        assert_eq!(items[0]["output"]["value"], "output-for-item-a");
+        assert_eq!(items[1]["item_id"], "item-b");
+        assert_eq!(items[1]["status"], "completed");
+        assert_eq!(items[1]["output"]["value"], "output-for-item-b");
+        assert_eq!(items[2]["item_id"], "item-c");
+        assert_eq!(items[2]["status"], "completed");
+        assert_eq!(items[2]["output"]["value"], "output-for-item-c");
+    }
+
+    /// 1 child succeeds with output, 1 child fails (no output).
+    /// Step fails but structured_output includes both items with their statuses.
+    #[test]
+    fn foreach_aggregates_partial_failure() {
+        use std::sync::Arc;
+
+        use crate::dsl::{ForEachNode, OnChildFail, OnCycle};
+        use crate::engine::{ChildWorkflowContext, ChildWorkflowInput, ChildWorkflowRunner};
+        use crate::engine_error::Result;
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use crate::status::WorkflowStepStatus;
+        use crate::traits::item_provider::{
+            FanOutItem, ItemProvider, ItemProviderRegistry, ProviderInfo,
+        };
+        use crate::traits::persistence::{NewRun, NewStep, StepUpdate, WorkflowPersistence};
+        use crate::types::WorkflowResult;
+
+        struct TwoItemProvider;
+        impl ItemProvider for TwoItemProvider {
+            fn name(&self) -> &str {
+                "two_items"
+            }
+            fn items(
+                &self,
+                _: &dyn crate::traits::run_context::RunContext,
+                _: &ProviderInfo,
+                _: Option<&dyn std::any::Any>,
+                _: &HashMap<String, String>,
+            ) -> Result<Vec<FanOutItem>> {
+                Ok(vec![
+                    FanOutItem {
+                        item_type: "t".into(),
+                        item_id: "item-a".into(),
+                        item_ref: "ref-a".into(),
+                        context: HashMap::new(),
+                    },
+                    FanOutItem {
+                        item_type: "t".into(),
+                        item_id: "item-b".into(),
+                        item_ref: "ref-b".into(),
+                        context: HashMap::new(),
+                    },
+                ])
+            }
+        }
+
+        struct PartialRunner {
+            persistence: Arc<dyn WorkflowPersistence>,
+        }
+        impl ChildWorkflowRunner for PartialRunner {
+            fn execute_child(
+                &self,
+                _: &str,
+                _: &ChildWorkflowContext,
+                input: ChildWorkflowInput,
+            ) -> Result<WorkflowResult> {
+                let item_id = input.inputs.get("item.id").cloned().unwrap_or_default();
+                let run = self
+                    .persistence
+                    .create_run(NewRun {
+                        workflow_name: "child-wf".into(),
+                        parent_run_id: String::new(),
+                        dry_run: false,
+                        trigger: "foreach".into(),
+                        definition_snapshot: None,
+                        parent_workflow_run_id: None,
+                    })
+                    .unwrap();
+                if item_id == "item-a" {
+                    let step_id = self
+                        .persistence
+                        .insert_step(NewStep {
+                            workflow_run_id: run.id.clone(),
+                            step_name: "step-1".into(),
+                            role: "assistant".into(),
+                            can_commit: false,
+                            position: 0,
+                            iteration: 0,
+                            retry_count: Some(0),
+                        })
+                        .unwrap();
+                    self.persistence
+                        .update_step(
+                            &step_id,
+                            StepUpdate {
+                                generation: 0,
+                                status: WorkflowStepStatus::Completed,
+                                child_run_id: None,
+                                result_text: None,
+                                context_out: None,
+                                markers_out: None,
+                                retry_count: Some(0),
+                                structured_output: Some(r#"{"result":"ok"}"#.into()),
+                                step_error: None,
+                            },
+                        )
+                        .unwrap();
+                    Ok(WorkflowResult {
+                        workflow_run_id: run.id,
+                        workflow_name: "child-wf".into(),
+                        all_succeeded: true,
+                        total_cost: 0.0,
+                        total_turns: 0,
+                        total_duration_ms: 0,
+                        total_input_tokens: 0,
+                        total_output_tokens: 0,
+                        total_cache_read_input_tokens: 0,
+                        total_cache_creation_input_tokens: 0,
+                    })
+                } else {
+                    // item-b: failed child with no structured_output
+                    Ok(WorkflowResult {
+                        workflow_run_id: run.id,
+                        workflow_name: "child-wf".into(),
+                        all_succeeded: false,
+                        total_cost: 0.0,
+                        total_turns: 0,
+                        total_duration_ms: 0,
+                        total_input_tokens: 0,
+                        total_output_tokens: 0,
+                        total_cache_read_input_tokens: 0,
+                        total_cache_creation_input_tokens: 0,
+                    })
+                }
+            }
+            fn resume_child(
+                &self,
+                _: &str,
+                _: Option<&str>,
+                _: &ChildWorkflowContext,
+            ) -> Result<WorkflowResult> {
+                unimplemented!()
+            }
+            fn find_resumable_child(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Option<crate::types::WorkflowRun>> {
+                Ok(None)
+            }
+        }
+
+        let mem = Arc::new(InMemoryWorkflowPersistence::new());
+        let run_id = mem
+            .create_run(NewRun {
+                workflow_name: "wf".into(),
+                parent_run_id: String::new(),
+                dry_run: false,
+                trigger: "manual".into(),
+                definition_snapshot: None,
+                parent_workflow_run_id: None,
+            })
+            .unwrap()
+            .id;
+        let mem_dyn: Arc<dyn WorkflowPersistence> = mem;
+        let runner = Arc::new(PartialRunner {
+            persistence: Arc::clone(&mem_dyn),
+        });
+
+        let mut registry = ItemProviderRegistry::new();
+        registry.register(TwoItemProvider);
+
+        let mut state =
+            crate::test_helpers::make_test_execution_state(Arc::clone(&mem_dyn), run_id.clone());
+        state.child_runner = Some(runner);
+        state.registry = Arc::new(registry);
+
+        let node = ForEachNode {
+            name: "agg-partial".into(),
+            over: "two_items".into(),
+            scope: None,
+            filter: HashMap::new(),
+            ordered: false,
+            on_cycle: OnCycle::Fail,
+            max_parallel: 2,
+            workflow: "child-wf".into(),
+            inputs: HashMap::new(),
+            on_child_fail: OnChildFail::Continue,
+        };
+
+        let result = super::execute_foreach(&mut state, &node, 0);
+        assert!(result.is_err(), "partial failure must cause step to fail");
+
+        let steps = mem_dyn.get_steps(&run_id).unwrap();
+        let foreach_step = steps
+            .iter()
+            .find(|s| s.step_name == "foreach:agg-partial")
+            .expect("foreach step must exist");
+        let so = foreach_step
+            .structured_output
+            .as_deref()
+            .expect("structured_output must be set even on failure");
+        let val: serde_json::Value = serde_json::from_str(so).unwrap();
+        let items = val["items"].as_array().expect("items must be an array");
+        assert_eq!(items.len(), 2, "both items must appear in aggregate");
+        let item_a = items.iter().find(|i| i["item_id"] == "item-a").unwrap();
+        let item_b = items.iter().find(|i| i["item_id"] == "item-b").unwrap();
+        assert_eq!(item_a["status"], "completed");
+        assert_eq!(item_a["output"]["result"], "ok");
+        assert_eq!(item_b["status"], "failed");
+        assert!(item_b["output"].is_null(), "failed child with no output → null");
+    }
+
+    /// item-a fails with SkipDependents; item-b and item-c are skipped.
+    /// All three appear in the aggregate: item-a as failed, b and c as skipped, all output null.
+    #[test]
+    fn foreach_aggregates_skipped_dependents() {
+        use std::sync::Arc;
+
+        use crate::dsl::{ForEachNode, OnChildFail, OnCycle};
+        use crate::engine::{ChildWorkflowContext, ChildWorkflowInput, ChildWorkflowRunner};
+        use crate::engine_error::Result;
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use crate::traits::item_provider::{
+            FanOutItem, ItemProvider, ItemProviderRegistry, ProviderInfo,
+        };
+        use crate::traits::persistence::{NewRun, WorkflowPersistence};
+        use crate::types::WorkflowResult;
+
+        struct OrderedThreeProvider;
+        impl ItemProvider for OrderedThreeProvider {
+            fn name(&self) -> &str {
+                "ordered_three"
+            }
+            fn items(
+                &self,
+                _: &dyn crate::traits::run_context::RunContext,
+                _: &ProviderInfo,
+                _: Option<&dyn std::any::Any>,
+                _: &HashMap<String, String>,
+            ) -> Result<Vec<FanOutItem>> {
+                Ok(vec![
+                    FanOutItem {
+                        item_type: "t".into(),
+                        item_id: "item-a".into(),
+                        item_ref: "ref-a".into(),
+                        context: HashMap::new(),
+                    },
+                    FanOutItem {
+                        item_type: "t".into(),
+                        item_id: "item-b".into(),
+                        item_ref: "ref-b".into(),
+                        context: HashMap::new(),
+                    },
+                    FanOutItem {
+                        item_type: "t".into(),
+                        item_id: "item-c".into(),
+                        item_ref: "ref-c".into(),
+                        context: HashMap::new(),
+                    },
+                ])
+            }
+            fn supports_ordered(&self) -> bool {
+                true
+            }
+            fn dependencies(&self, _step_id: &str) -> Result<Vec<(String, String)>> {
+                // item-b and item-c both depend on item-a
+                Ok(vec![
+                    ("item-a".into(), "item-b".into()),
+                    ("item-a".into(), "item-c".into()),
+                ])
+            }
+        }
+
+        struct FailRunner;
+        impl ChildWorkflowRunner for FailRunner {
+            fn execute_child(
+                &self,
+                _: &str,
+                _: &ChildWorkflowContext,
+                _: ChildWorkflowInput,
+            ) -> Result<WorkflowResult> {
+                Ok(WorkflowResult {
+                    workflow_run_id: "fail-child-run".into(),
+                    workflow_name: "child-wf".into(),
+                    all_succeeded: false,
+                    total_cost: 0.0,
+                    total_turns: 0,
+                    total_duration_ms: 0,
+                    total_input_tokens: 0,
+                    total_output_tokens: 0,
+                    total_cache_read_input_tokens: 0,
+                    total_cache_creation_input_tokens: 0,
+                })
+            }
+            fn resume_child(
+                &self,
+                _: &str,
+                _: Option<&str>,
+                _: &ChildWorkflowContext,
+            ) -> Result<WorkflowResult> {
+                unimplemented!()
+            }
+            fn find_resumable_child(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Option<crate::types::WorkflowRun>> {
+                Ok(None)
+            }
+        }
+
+        let mem = Arc::new(InMemoryWorkflowPersistence::new());
+        let run_id = mem
+            .create_run(NewRun {
+                workflow_name: "wf".into(),
+                parent_run_id: String::new(),
+                dry_run: false,
+                trigger: "manual".into(),
+                definition_snapshot: None,
+                parent_workflow_run_id: None,
+            })
+            .unwrap()
+            .id;
+        let mem_dyn: Arc<dyn WorkflowPersistence> = mem;
+
+        let mut registry = ItemProviderRegistry::new();
+        registry.register(OrderedThreeProvider);
+
+        let mut state =
+            crate::test_helpers::make_test_execution_state(Arc::clone(&mem_dyn), run_id.clone());
+        state.child_runner = Some(Arc::new(FailRunner));
+        state.registry = Arc::new(registry);
+
+        let node = ForEachNode {
+            name: "agg-skipped".into(),
+            over: "ordered_three".into(),
+            scope: None,
+            filter: HashMap::new(),
+            ordered: true,
+            on_cycle: OnCycle::Fail,
+            max_parallel: 1,
+            workflow: "child-wf".into(),
+            inputs: HashMap::new(),
+            on_child_fail: OnChildFail::SkipDependents,
+        };
+
+        let result = super::execute_foreach(&mut state, &node, 0);
+        assert!(result.is_err(), "failed item-a must cause step to fail");
+
+        let steps = mem_dyn.get_steps(&run_id).unwrap();
+        let foreach_step = steps
+            .iter()
+            .find(|s| s.step_name == "foreach:agg-skipped")
+            .expect("foreach step must exist");
+        let so = foreach_step
+            .structured_output
+            .as_deref()
+            .expect("structured_output must be set");
+        let val: serde_json::Value = serde_json::from_str(so).unwrap();
+        let items = val["items"].as_array().expect("items must be an array");
+        assert_eq!(items.len(), 3, "all 3 items must appear (failed + 2 skipped)");
+        let item_a = items.iter().find(|i| i["item_id"] == "item-a").unwrap();
+        let item_b = items.iter().find(|i| i["item_id"] == "item-b").unwrap();
+        let item_c = items.iter().find(|i| i["item_id"] == "item-c").unwrap();
+        assert_eq!(item_a["status"], "failed");
+        assert!(item_a["output"].is_null());
+        assert_eq!(item_b["status"], "skipped");
+        assert!(item_b["output"].is_null());
+        assert_eq!(item_c["status"], "skipped");
+        assert!(item_c["output"].is_null());
+    }
+
+    /// Child workflow runs successfully but produces no step with structured_output.
+    /// The aggregate must show output: null for that item.
+    #[test]
+    fn foreach_aggregates_child_without_structured_output() {
+        use std::sync::Arc;
+
+        use crate::dsl::{ForEachNode, OnChildFail, OnCycle};
+        use crate::engine::{ChildWorkflowContext, ChildWorkflowInput, ChildWorkflowRunner};
+        use crate::engine_error::Result;
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use crate::traits::item_provider::{
+            FanOutItem, ItemProvider, ItemProviderRegistry, ProviderInfo,
+        };
+        use crate::traits::persistence::{NewRun, WorkflowPersistence};
+        use crate::types::WorkflowResult;
+
+        struct OneItemProvider;
+        impl ItemProvider for OneItemProvider {
+            fn name(&self) -> &str {
+                "one_item"
+            }
+            fn items(
+                &self,
+                _: &dyn crate::traits::run_context::RunContext,
+                _: &ProviderInfo,
+                _: Option<&dyn std::any::Any>,
+                _: &HashMap<String, String>,
+            ) -> Result<Vec<FanOutItem>> {
+                Ok(vec![FanOutItem {
+                    item_type: "t".into(),
+                    item_id: "item-a".into(),
+                    item_ref: "ref-a".into(),
+                    context: HashMap::new(),
+                }])
+            }
+        }
+
+        // Runner succeeds but writes no steps (so get_steps returns empty).
+        struct NoOutputRunner;
+        impl ChildWorkflowRunner for NoOutputRunner {
+            fn execute_child(
+                &self,
+                _: &str,
+                _: &ChildWorkflowContext,
+                _: ChildWorkflowInput,
+            ) -> Result<WorkflowResult> {
+                Ok(WorkflowResult {
+                    workflow_run_id: "no-output-child".into(),
+                    workflow_name: "child-wf".into(),
+                    all_succeeded: true,
+                    total_cost: 0.0,
+                    total_turns: 0,
+                    total_duration_ms: 0,
+                    total_input_tokens: 0,
+                    total_output_tokens: 0,
+                    total_cache_read_input_tokens: 0,
+                    total_cache_creation_input_tokens: 0,
+                })
+            }
+            fn resume_child(
+                &self,
+                _: &str,
+                _: Option<&str>,
+                _: &ChildWorkflowContext,
+            ) -> Result<WorkflowResult> {
+                unimplemented!()
+            }
+            fn find_resumable_child(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Option<crate::types::WorkflowRun>> {
+                Ok(None)
+            }
+        }
+
+        let mem = Arc::new(InMemoryWorkflowPersistence::new());
+        let run_id = mem
+            .create_run(NewRun {
+                workflow_name: "wf".into(),
+                parent_run_id: String::new(),
+                dry_run: false,
+                trigger: "manual".into(),
+                definition_snapshot: None,
+                parent_workflow_run_id: None,
+            })
+            .unwrap()
+            .id;
+        let mem_dyn: Arc<dyn WorkflowPersistence> = mem;
+
+        let mut registry = ItemProviderRegistry::new();
+        registry.register(OneItemProvider);
+
+        let mut state =
+            crate::test_helpers::make_test_execution_state(Arc::clone(&mem_dyn), run_id.clone());
+        state.child_runner = Some(Arc::new(NoOutputRunner));
+        state.registry = Arc::new(registry);
+
+        let node = ForEachNode {
+            name: "agg-no-output".into(),
+            over: "one_item".into(),
+            scope: None,
+            filter: HashMap::new(),
+            ordered: false,
+            on_cycle: OnCycle::Fail,
+            max_parallel: 1,
+            workflow: "child-wf".into(),
+            inputs: HashMap::new(),
+            on_child_fail: OnChildFail::Continue,
+        };
+
+        super::execute_foreach(&mut state, &node, 0).unwrap();
+
+        let steps = mem_dyn.get_steps(&run_id).unwrap();
+        let foreach_step = steps
+            .iter()
+            .find(|s| s.step_name == "foreach:agg-no-output")
+            .expect("foreach step must exist");
+        let so = foreach_step
+            .structured_output
+            .as_deref()
+            .expect("structured_output must be set");
+        let val: serde_json::Value = serde_json::from_str(so).unwrap();
+        let items = val["items"].as_array().expect("items must be an array");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["item_id"], "item-a");
+        assert_eq!(items[0]["status"], "completed");
+        assert!(
+            items[0]["output"].is_null(),
+            "child without structured_output must yield null"
+        );
     }
 }
