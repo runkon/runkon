@@ -1388,7 +1388,7 @@ mod tests {
             on: "workflow_run.completed:root".into(),
             ..Default::default()
         };
-        let runner = HookRunner::new(&[hook.clone()]);
+        let runner = HookRunner::new(std::slice::from_ref(&hook));
         assert!(runner.hook_allows(&hook, &event_with_fields(&[("is_root", "true")])));
     }
 
@@ -1398,7 +1398,7 @@ mod tests {
             on: "workflow_run.completed:root".into(),
             ..Default::default()
         };
-        let runner = HookRunner::new(&[hook.clone()]);
+        let runner = HookRunner::new(std::slice::from_ref(&hook));
         assert!(!runner.hook_allows(&hook, &event_with_fields(&[("is_root", "false")])));
     }
 
@@ -1408,7 +1408,7 @@ mod tests {
             on: "workflow_run.completed:root".into(),
             ..Default::default()
         };
-        let runner = HookRunner::new(&[hook.clone()]);
+        let runner = HookRunner::new(std::slice::from_ref(&hook));
         assert!(!runner.hook_allows(&hook, &event_with_fields(&[])));
     }
 
@@ -1418,7 +1418,7 @@ mod tests {
             on: "workflow_run.completed".into(),
             ..Default::default()
         };
-        let runner = HookRunner::new(&[hook.clone()]);
+        let runner = HookRunner::new(std::slice::from_ref(&hook));
         assert!(runner.hook_allows(&hook, &event_with_fields(&[("is_root", "true")])));
         assert!(runner.hook_allows(&hook, &event_with_fields(&[("is_root", "false")])));
         assert!(runner.hook_allows(&hook, &event_with_fields(&[])));
@@ -1430,7 +1430,7 @@ mod tests {
             on: "workflow_run.completed:root,gate.waiting".into(),
             ..Default::default()
         };
-        let runner = HookRunner::new(&[hook.clone()]);
+        let runner = HookRunner::new(std::slice::from_ref(&hook));
 
         // :root arm with is_root=false → blocked
         let event_wrc_not_root = Event {
@@ -1461,7 +1461,7 @@ mod tests {
             when_field_eq: Some([("branch".into(), "main".into())].into_iter().collect()),
             ..Default::default()
         };
-        let runner = HookRunner::new(&[hook.clone()]);
+        let runner = HookRunner::new(std::slice::from_ref(&hook));
 
         // Both is_root=true and branch=main → fires
         assert!(runner.hook_allows(
