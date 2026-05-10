@@ -17,10 +17,12 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::dedup::DedupStore;
 use crate::event::Event;
 
 /// Result of matching an `on` pattern against an event kind.
@@ -30,8 +32,9 @@ pub(crate) enum OnMatch {
     None,
     /// Matched; fires for any event.
     Any,
-    /// Matched via a `:root` suffix. In this crate the `:root` modifier is
-    /// recognized but not enforced — generic events have no parent concept.
+    /// Matched via a `:root` suffix. The runner enforces this by checking
+    /// `event.fields["is_root"] == "true"`; hooks do not fire if the field
+    /// is absent or set to any other value.
     RootOnly,
 }
 
@@ -115,6 +118,23 @@ pub struct HookConfig {
     pub headers: Option<HashMap<String, String>>,
     /// Timeout in milliseconds for shell/HTTP hooks. Defaults to 10 000.
     pub timeout_ms: Option<u64>,
+
+    /// Fire only when every listed field's value is one of the given strings.
+    /// A missing field counts as no match.
+    pub when_field_in: Option<HashMap<String, Vec<String>>>,
+    /// Fire only when every listed field's value equals the given string exactly.
+    /// A missing field counts as no match.
+    pub when_field_eq: Option<HashMap<String, String>>,
+    /// Fire only when every listed field's value matches the given glob pattern.
+    /// Uses the same `*`, `prefix.*`, `prefix/*` semantics as the `on` field.
+    /// A missing field counts as no match.
+    pub when_field_glob: Option<HashMap<String, String>>,
+    /// Fire only when every listed field's value, parsed as `f64`, is ≥ the threshold.
+    /// A missing field or unparseable value counts as no match.
+    pub when_field_gte: Option<HashMap<String, f64>>,
+    /// Fire only when every listed field's value, parsed as `f64`, is ≤ the threshold.
+    /// A missing field or unparseable value counts as no match.
+    pub when_field_lte: Option<HashMap<String, f64>>,
 }
 
 /// Build a `sh -c <cmd>` base command with event env vars and stdin closed.
@@ -247,9 +267,75 @@ fn run_http_hook(hook: &HookConfig, event: &Event) {
     }
 }
 
+/// Evaluate all `when_field_*` predicates on `hook` against `event.fields`.
+///
+/// Returns `true` if every supplied predicate is satisfied (AND semantics).
+/// An absent filter map is treated as "no constraint" (passes). A missing
+/// event field, or an unparseable numeric value, counts as no match.
+fn field_filters_allow(hook: &HookConfig, event: &Event) -> bool {
+    if let Some(ref map) = hook.when_field_in {
+        for (key, values) in map {
+            match event.fields.get(key) {
+                Some(v) if values.contains(v) => {}
+                _ => return false,
+            }
+        }
+    }
+    if let Some(ref map) = hook.when_field_eq {
+        for (key, value) in map {
+            match event.fields.get(key) {
+                Some(v) if v == value => {}
+                _ => return false,
+            }
+        }
+    }
+    if let Some(ref map) = hook.when_field_glob {
+        for (key, pattern) in map {
+            match event.fields.get(key) {
+                Some(v) if glob_matches(pattern, v) => {}
+                _ => return false,
+            }
+        }
+    }
+    if let Some(ref map) = hook.when_field_gte {
+        for (key, threshold) in map {
+            match event.fields.get(key).and_then(|v| v.parse::<f64>().ok()) {
+                Some(n) if n >= *threshold => {}
+                _ => return false,
+            }
+        }
+    }
+    if let Some(ref map) = hook.when_field_lte {
+        for (key, threshold) in map {
+            match event.fields.get(key).and_then(|v| v.parse::<f64>().ok()) {
+                Some(n) if n <= *threshold => {}
+                _ => return false,
+            }
+        }
+    }
+    true
+}
+
+/// A custom predicate that controls whether a hook fires for a given event.
+///
+/// Implement this trait to handle domain-specific filtering that does not fit
+/// the declarative `when_field_*` form. The runner ANDs this filter with the
+/// `on:` glob match and all `when_field_*` predicates — all three must allow
+/// for the hook to fire.
+///
+/// # Thread safety
+///
+/// Implementations must be `Send + Sync` because hooks execute in spawned threads.
+pub trait HookFilter: Send + Sync {
+    /// Return `true` to allow the hook to fire, `false` to suppress it.
+    fn allow(&self, hook: &HookConfig, event: &Event) -> bool;
+}
+
 /// Fires user-configured notification hooks for a given event.
 pub struct HookRunner {
     hooks: Vec<HookConfig>,
+    dedup_store: Option<Arc<dyn DedupStore>>,
+    filter: Option<Arc<dyn HookFilter>>,
 }
 
 impl HookRunner {
@@ -257,7 +343,56 @@ impl HookRunner {
     pub fn new(hooks: &[HookConfig]) -> Self {
         Self {
             hooks: hooks.to_vec(),
+            dedup_store: None,
+            filter: None,
         }
+    }
+
+    /// Create a runner with a custom [`HookFilter`] applied to every hook.
+    ///
+    /// Equivalent to `HookRunner::new(hooks).with_filter(filter)`.
+    pub fn new_with_filter(hooks: &[HookConfig], filter: Arc<dyn HookFilter>) -> Self {
+        Self {
+            hooks: hooks.to_vec(),
+            dedup_store: None,
+            filter: Some(filter),
+        }
+    }
+
+    /// Attach a [`DedupStore`] so that [`fire_with_dedup`] can skip duplicate
+    /// `(entity_id, event_type)` pairs. Has no effect on [`fire`].
+    ///
+    /// [`fire_with_dedup`]: HookRunner::fire_with_dedup
+    /// [`fire`]: HookRunner::fire
+    pub fn with_dedup_store(mut self, store: Arc<dyn DedupStore>) -> Self {
+        self.dedup_store = Some(store);
+        self
+    }
+
+    /// Attach a custom [`HookFilter`] that is ANDed with `on:` and `when_field_*` checks.
+    pub fn with_filter(mut self, filter: Arc<dyn HookFilter>) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    /// Return `true` if all three predicates allow the hook to fire:
+    /// 1. `on:` glob matches `event.kind`
+    /// 2. All `when_field_*` constraints are satisfied
+    /// 3. The custom `HookFilter` (if any) allows it
+    fn hook_allows(&self, hook: &HookConfig, event: &Event) -> bool {
+        match on_pattern_match(&hook.on, &event.kind) {
+            OnMatch::None => return false,
+            OnMatch::RootOnly
+                if event.fields.get("is_root").map(String::as_str) != Some("true") =>
+            {
+                return false;
+            }
+            _ => {}
+        }
+        if !field_filters_allow(hook, event) {
+            return false;
+        }
+        self.filter.as_ref().is_none_or(|f| f.allow(hook, event))
     }
 
     /// Run the first matching hook synchronously and return the real exit result.
@@ -272,7 +407,7 @@ impl HookRunner {
     /// `Ok(())` — they already swallow errors internally.
     pub fn run_test(&self, event: &Event) -> Result<(), String> {
         for hook in &self.hooks {
-            if on_pattern_match(&hook.on, &event.kind) == OnMatch::None {
+            if !self.hook_allows(hook, event) {
                 continue;
             }
             if hook.run.is_some() {
@@ -286,15 +421,10 @@ impl HookRunner {
         Ok(())
     }
 
-    /// Fire all hooks whose `on` pattern matches `event.kind`.
-    ///
-    /// Each matching hook is executed in a separate OS thread (fire-and-forget).
-    /// Both `run` (shell) and `url` (HTTP) hooks can coexist in the same config
-    /// entry; both are attempted when present. Failures are logged as warnings
-    /// and never propagated.
-    pub fn fire(&self, event: &Event) {
+    /// Spawn threads for every hook that passes all predicates (`on:`, field filters, custom filter).
+    fn dispatch_all(&self, event: &Event) {
         for hook in &self.hooks {
-            if on_pattern_match(&hook.on, &event.kind) == OnMatch::None {
+            if !self.hook_allows(hook, event) {
                 continue;
             }
             let hook_clone = hook.clone();
@@ -308,6 +438,53 @@ impl HookRunner {
                 }
             });
         }
+    }
+
+    /// Fire all hooks whose `on` pattern matches `event.kind`.
+    ///
+    /// Each matching hook is executed in a separate OS thread (fire-and-forget).
+    /// Both `run` (shell) and `url` (HTTP) hooks can coexist in the same config
+    /// entry; both are attempted when present. Failures are logged as warnings
+    /// and never propagated.
+    ///
+    /// No deduplication is performed here — this method is equivalent to
+    /// `fire_with_dedup` with no key. See [`fire_with_dedup`] to opt into
+    /// deduplication.
+    ///
+    /// [`fire_with_dedup`]: HookRunner::fire_with_dedup
+    pub fn fire(&self, event: &Event) {
+        self.dispatch_all(event);
+    }
+
+    /// Fire hooks with optional deduplication via the configured [`DedupStore`].
+    ///
+    /// When a store is configured (via [`with_dedup_store`]):
+    /// - If `try_claim(entity_id, event_type)` returns `Ok(true)` (first claim),
+    ///   hooks are dispatched normally.
+    /// - If `try_claim` returns `Ok(false)` (already claimed), the call is a
+    ///   no-op and hooks are **not** fired.
+    /// - If `try_claim` returns `Err(_)`, a warning is logged and hooks **are**
+    ///   fired (fail-open — dedup is best-effort, not a correctness gate).
+    ///
+    /// When no store is configured, this method behaves identically to [`fire`].
+    ///
+    /// [`with_dedup_store`]: HookRunner::with_dedup_store
+    /// [`fire`]: HookRunner::fire
+    pub fn fire_with_dedup(&self, event: &Event, entity_id: &str, event_type: &str) {
+        if let Some(ref store) = self.dedup_store {
+            match store.try_claim(entity_id, event_type) {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(e) => {
+                    tracing::warn!(
+                        entity_id,
+                        event_type,
+                        "dedup store error, firing anyway: {e}"
+                    );
+                }
+            }
+        }
+        self.dispatch_all(event);
     }
 }
 
@@ -770,5 +947,649 @@ mod tests {
 
         let received = rx.recv_timeout(Duration::from_secs(3)).unwrap();
         assert!(received.starts_with("POST "), "request: {received}");
+    }
+
+    // ── fire_with_dedup ───────────────────────────────────────────────────
+
+    fn make_output_hook(cmd_template: &str) -> (HookConfig, tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let out_file = dir.path().join("out.txt");
+        let out_path = out_file.to_str().unwrap().to_string();
+        let hook = HookConfig {
+            on: "workflow_run.*".into(),
+            run: Some(cmd_template.replace("{path}", &out_path)),
+            timeout_ms: Some(5_000),
+            ..Default::default()
+        };
+        (hook, dir, out_file)
+    }
+
+    fn read_output(path: &std::path::Path) -> String {
+        use std::io::Read;
+        let mut s = String::new();
+        std::fs::File::open(path)
+            .unwrap()
+            .read_to_string(&mut s)
+            .unwrap();
+        s
+    }
+
+    #[test]
+    fn fire_with_dedup_first_claim_fires() {
+        use std::sync::Arc;
+
+        use crate::dedup::HashSetDedupStore;
+
+        let (hook, _dir, out_file) = make_output_hook("echo fired > '{path}'");
+        let store = Arc::new(HashSetDedupStore::new());
+        let runner = HookRunner::new(&[hook]).with_dedup_store(store);
+        runner.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
+
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(read_output(&out_file).trim(), "fired");
+    }
+
+    #[test]
+    fn fire_with_dedup_second_claim_skipped() {
+        use std::sync::Arc;
+
+        use crate::dedup::HashSetDedupStore;
+
+        let (hook, _dir, out_file) = make_output_hook("echo line >> '{path}'");
+        let store = Arc::new(HashSetDedupStore::new());
+        let runner = HookRunner::new(&[hook]).with_dedup_store(store);
+        runner.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
+        runner.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
+
+        std::thread::sleep(Duration::from_millis(500));
+        let contents = read_output(&out_file);
+        assert_eq!(
+            contents.lines().count(),
+            1,
+            "expected exactly one fire, got: {contents:?}"
+        );
+    }
+
+    #[test]
+    fn fire_with_dedup_no_store_always_fires() {
+        let (hook, _dir, out_file) = make_output_hook("echo line >> '{path}'");
+        let runner = HookRunner::new(&[hook]); // no dedup store
+        runner.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
+        runner.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
+
+        std::thread::sleep(Duration::from_millis(500));
+        let contents = read_output(&out_file);
+        assert_eq!(
+            contents.lines().count(),
+            2,
+            "expected two fires, got: {contents:?}"
+        );
+    }
+
+    #[test]
+    fn fire_with_dedup_distinct_keys_both_fire() {
+        use std::sync::Arc;
+
+        use crate::dedup::HashSetDedupStore;
+
+        // Sub-test 1: same entity, different event types — both fire.
+        let (hook1, _dir1, out_file1) = make_output_hook("echo line >> '{path}'");
+        let store1 = Arc::new(HashSetDedupStore::new());
+        let runner1 = HookRunner::new(&[hook1]).with_dedup_store(store1);
+        runner1.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
+        runner1.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.failed");
+
+        // Sub-test 2: different entities, same event type — both fire.
+        let (hook2, _dir2, out_file2) = make_output_hook("echo line >> '{path}'");
+        let store2 = Arc::new(HashSetDedupStore::new());
+        let runner2 = HookRunner::new(&[hook2]).with_dedup_store(store2);
+        runner2.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
+        runner2.fire_with_dedup(&demo_event(), "entity-2", "workflow_run.completed");
+
+        std::thread::sleep(Duration::from_millis(500));
+
+        let c1 = read_output(&out_file1);
+        assert_eq!(
+            c1.lines().count(),
+            2,
+            "same entity, different events: {c1:?}"
+        );
+
+        let c2 = read_output(&out_file2);
+        assert_eq!(
+            c2.lines().count(),
+            2,
+            "different entities, same event: {c2:?}"
+        );
+    }
+
+    #[test]
+    fn fire_with_dedup_store_error_fires_anyway() {
+        use std::sync::Arc;
+
+        use crate::error::NotifyError;
+
+        struct FailingDedupStore;
+        impl DedupStore for FailingDedupStore {
+            fn try_claim(&self, _entity_id: &str, _event_type: &str) -> crate::error::Result<bool> {
+                Err(NotifyError::Dispatch("simulated dedup failure".into()))
+            }
+        }
+
+        let (hook, _dir, out_file) = make_output_hook("echo fired > '{path}'");
+        let store = Arc::new(FailingDedupStore) as Arc<dyn DedupStore>;
+        let runner = HookRunner::new(&[hook]).with_dedup_store(store);
+        runner.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
+
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            read_output(&out_file).trim(),
+            "fired",
+            "hook should fire despite store error (fail-open)"
+        );
+    }
+
+    // ── field_filters_allow helpers ───────────────────────────────────────
+
+    fn event_with_fields(fields: &[(&str, &str)]) -> Event {
+        Event {
+            kind: "workflow_run.completed".into(),
+            title: "Workflow finished".into(),
+            body: "All steps passed.".into(),
+            severity: Severity::Info,
+            fields: fields
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    // ── when_field_in ─────────────────────────────────────────────────────
+
+    #[test]
+    fn when_field_in_matches_listed_value() {
+        let hook = HookConfig {
+            on: "*".into(),
+            when_field_in: Some(
+                [("branch".into(), vec!["main".into(), "dev".into()])]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+        assert!(field_filters_allow(
+            &hook,
+            &event_with_fields(&[("branch", "main")])
+        ));
+    }
+
+    #[test]
+    fn when_field_in_rejects_unlisted_value() {
+        let hook = HookConfig {
+            on: "*".into(),
+            when_field_in: Some(
+                [("branch".into(), vec!["main".into()])]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+        assert!(!field_filters_allow(
+            &hook,
+            &event_with_fields(&[("branch", "feat/foo")])
+        ));
+    }
+
+    #[test]
+    fn when_field_in_missing_field_blocks() {
+        let hook = HookConfig {
+            on: "*".into(),
+            when_field_in: Some(
+                [("branch".into(), vec!["main".into()])]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+        assert!(!field_filters_allow(&hook, &event_with_fields(&[])));
+    }
+
+    // ── when_field_eq ─────────────────────────────────────────────────────
+
+    #[test]
+    fn when_field_eq_matches() {
+        let hook = HookConfig {
+            on: "*".into(),
+            when_field_eq: Some([("branch".into(), "main".into())].into_iter().collect()),
+            ..Default::default()
+        };
+        assert!(field_filters_allow(
+            &hook,
+            &event_with_fields(&[("branch", "main")])
+        ));
+    }
+
+    #[test]
+    fn when_field_eq_rejects() {
+        let hook = HookConfig {
+            on: "*".into(),
+            when_field_eq: Some([("branch".into(), "main".into())].into_iter().collect()),
+            ..Default::default()
+        };
+        assert!(!field_filters_allow(
+            &hook,
+            &event_with_fields(&[("branch", "dev")])
+        ));
+    }
+
+    #[test]
+    fn when_field_eq_missing_field_blocks() {
+        let hook = HookConfig {
+            on: "*".into(),
+            when_field_eq: Some([("branch".into(), "main".into())].into_iter().collect()),
+            ..Default::default()
+        };
+        assert!(!field_filters_allow(&hook, &event_with_fields(&[])));
+    }
+
+    // ── when_field_glob ───────────────────────────────────────────────────
+
+    #[test]
+    fn when_field_glob_matches() {
+        let hook = HookConfig {
+            on: "*".into(),
+            when_field_glob: Some(
+                [("branch".into(), "feature/*".into())]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+        assert!(field_filters_allow(
+            &hook,
+            &event_with_fields(&[("branch", "feature/foo")])
+        ));
+    }
+
+    #[test]
+    fn when_field_glob_rejects() {
+        let hook = HookConfig {
+            on: "*".into(),
+            when_field_glob: Some(
+                [("branch".into(), "feature/*".into())]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+        assert!(!field_filters_allow(
+            &hook,
+            &event_with_fields(&[("branch", "main")])
+        ));
+    }
+
+    #[test]
+    fn when_field_glob_missing_field_blocks() {
+        let hook = HookConfig {
+            on: "*".into(),
+            when_field_glob: Some(
+                [("branch".into(), "feature/*".into())]
+                    .into_iter()
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+        assert!(!field_filters_allow(&hook, &event_with_fields(&[])));
+    }
+
+    // ── when_field_gte ────────────────────────────────────────────────────
+
+    #[test]
+    fn when_field_gte_passes_when_value_at_or_above() {
+        let hook = HookConfig {
+            on: "*".into(),
+            when_field_gte: Some([("duration_ms".into(), 60_000.0)].into_iter().collect()),
+            ..Default::default()
+        };
+        assert!(field_filters_allow(
+            &hook,
+            &event_with_fields(&[("duration_ms", "60000")])
+        ));
+        assert!(field_filters_allow(
+            &hook,
+            &event_with_fields(&[("duration_ms", "90000")])
+        ));
+    }
+
+    #[test]
+    fn when_field_gte_blocks_below() {
+        let hook = HookConfig {
+            on: "*".into(),
+            when_field_gte: Some([("duration_ms".into(), 60_000.0)].into_iter().collect()),
+            ..Default::default()
+        };
+        assert!(!field_filters_allow(
+            &hook,
+            &event_with_fields(&[("duration_ms", "5000")])
+        ));
+    }
+
+    #[test]
+    fn when_field_gte_blocks_unparseable_value() {
+        let hook = HookConfig {
+            on: "*".into(),
+            when_field_gte: Some([("duration_ms".into(), 60_000.0)].into_iter().collect()),
+            ..Default::default()
+        };
+        assert!(!field_filters_allow(
+            &hook,
+            &event_with_fields(&[("duration_ms", "not-a-number")])
+        ));
+    }
+
+    #[test]
+    fn when_field_gte_missing_field_blocks() {
+        let hook = HookConfig {
+            on: "*".into(),
+            when_field_gte: Some([("duration_ms".into(), 60_000.0)].into_iter().collect()),
+            ..Default::default()
+        };
+        assert!(!field_filters_allow(&hook, &event_with_fields(&[])));
+    }
+
+    // ── when_field_lte ────────────────────────────────────────────────────
+
+    #[test]
+    fn when_field_lte_passes_when_value_at_or_below() {
+        let hook = HookConfig {
+            on: "*".into(),
+            when_field_lte: Some([("error_count".into(), 10.0)].into_iter().collect()),
+            ..Default::default()
+        };
+        assert!(field_filters_allow(
+            &hook,
+            &event_with_fields(&[("error_count", "10")])
+        ));
+        assert!(field_filters_allow(
+            &hook,
+            &event_with_fields(&[("error_count", "3")])
+        ));
+    }
+
+    #[test]
+    fn when_field_lte_blocks_above() {
+        let hook = HookConfig {
+            on: "*".into(),
+            when_field_lte: Some([("error_count".into(), 10.0)].into_iter().collect()),
+            ..Default::default()
+        };
+        assert!(!field_filters_allow(
+            &hook,
+            &event_with_fields(&[("error_count", "11")])
+        ));
+    }
+
+    #[test]
+    fn when_field_lte_missing_field_blocks() {
+        let hook = HookConfig {
+            on: "*".into(),
+            when_field_lte: Some([("error_count".into(), 10.0)].into_iter().collect()),
+            ..Default::default()
+        };
+        assert!(!field_filters_allow(&hook, &event_with_fields(&[])));
+    }
+
+    // ── combinations ─────────────────────────────────────────────────────
+
+    #[test]
+    fn multiple_field_filters_all_must_match() {
+        let hook = HookConfig {
+            on: "*".into(),
+            when_field_eq: Some([("branch".into(), "main".into())].into_iter().collect()),
+            when_field_gte: Some([("duration_ms".into(), 60_000.0)].into_iter().collect()),
+            ..Default::default()
+        };
+        // Both satisfied → allowed.
+        assert!(field_filters_allow(
+            &hook,
+            &event_with_fields(&[("branch", "main"), ("duration_ms", "75000")])
+        ));
+        // Only branch satisfied; duration too low → blocked.
+        assert!(!field_filters_allow(
+            &hook,
+            &event_with_fields(&[("branch", "main"), ("duration_ms", "5000")])
+        ));
+        // Only duration satisfied; wrong branch → blocked.
+        assert!(!field_filters_allow(
+            &hook,
+            &event_with_fields(&[("branch", "dev"), ("duration_ms", "75000")])
+        ));
+    }
+
+    #[test]
+    fn field_filter_blocks_even_when_on_matches() {
+        let hook = HookConfig {
+            on: "*".into(),
+            when_field_eq: Some([("branch".into(), "main".into())].into_iter().collect()),
+            ..Default::default()
+        };
+        // `on: "*"` matches, but the field filter rejects the event.
+        assert!(!field_filters_allow(
+            &hook,
+            &event_with_fields(&[("branch", "dev")])
+        ));
+    }
+
+    // ── :root enforcement in hook_allows ─────────────────────────────────
+
+    #[test]
+    fn root_pattern_with_is_root_true_fires() {
+        let hook = HookConfig {
+            on: "workflow_run.completed:root".into(),
+            ..Default::default()
+        };
+        let runner = HookRunner::new(std::slice::from_ref(&hook));
+        assert!(runner.hook_allows(&hook, &event_with_fields(&[("is_root", "true")])));
+    }
+
+    #[test]
+    fn root_pattern_with_is_root_false_does_not_fire() {
+        let hook = HookConfig {
+            on: "workflow_run.completed:root".into(),
+            ..Default::default()
+        };
+        let runner = HookRunner::new(std::slice::from_ref(&hook));
+        assert!(!runner.hook_allows(&hook, &event_with_fields(&[("is_root", "false")])));
+    }
+
+    #[test]
+    fn root_pattern_with_is_root_missing_does_not_fire() {
+        let hook = HookConfig {
+            on: "workflow_run.completed:root".into(),
+            ..Default::default()
+        };
+        let runner = HookRunner::new(std::slice::from_ref(&hook));
+        assert!(!runner.hook_allows(&hook, &event_with_fields(&[])));
+    }
+
+    #[test]
+    fn plain_pattern_fires_regardless_of_is_root() {
+        let hook = HookConfig {
+            on: "workflow_run.completed".into(),
+            ..Default::default()
+        };
+        let runner = HookRunner::new(std::slice::from_ref(&hook));
+        assert!(runner.hook_allows(&hook, &event_with_fields(&[("is_root", "true")])));
+        assert!(runner.hook_allows(&hook, &event_with_fields(&[("is_root", "false")])));
+        assert!(runner.hook_allows(&hook, &event_with_fields(&[])));
+    }
+
+    #[test]
+    fn comma_pattern_root_arm_enforced_independently() {
+        let hook = HookConfig {
+            on: "workflow_run.completed:root,gate.waiting".into(),
+            ..Default::default()
+        };
+        let runner = HookRunner::new(std::slice::from_ref(&hook));
+
+        // :root arm with is_root=false → blocked
+        let event_wrc_not_root = Event {
+            kind: "workflow_run.completed".into(),
+            ..event_with_fields(&[("is_root", "false")])
+        };
+        assert!(!runner.hook_allows(&hook, &event_wrc_not_root));
+
+        // :root arm with is_root=true → allowed
+        let event_wrc_root = Event {
+            kind: "workflow_run.completed".into(),
+            ..event_with_fields(&[("is_root", "true")])
+        };
+        assert!(runner.hook_allows(&hook, &event_wrc_root));
+
+        // plain arm with no is_root → allowed
+        let event_gate = Event {
+            kind: "gate.waiting".into(),
+            ..event_with_fields(&[])
+        };
+        assert!(runner.hook_allows(&hook, &event_gate));
+    }
+
+    #[test]
+    fn root_pattern_anded_with_field_filters() {
+        let hook = HookConfig {
+            on: "workflow_run.completed:root".into(),
+            when_field_eq: Some([("branch".into(), "main".into())].into_iter().collect()),
+            ..Default::default()
+        };
+        let runner = HookRunner::new(std::slice::from_ref(&hook));
+
+        // Both is_root=true and branch=main → fires
+        assert!(runner.hook_allows(
+            &hook,
+            &event_with_fields(&[("is_root", "true"), ("branch", "main")])
+        ));
+        // is_root=true but wrong branch → blocked by field filter
+        assert!(!runner.hook_allows(
+            &hook,
+            &event_with_fields(&[("is_root", "true"), ("branch", "dev")])
+        ));
+        // is_root=false but right branch → blocked by :root gate
+        assert!(!runner.hook_allows(
+            &hook,
+            &event_with_fields(&[("is_root", "false"), ("branch", "main")])
+        ));
+    }
+
+    // ── default / backwards-compat ────────────────────────────────────────
+
+    #[test]
+    fn default_hook_config_has_no_field_filters() {
+        let hook = HookConfig::default();
+        assert!(field_filters_allow(&hook, &demo_event()));
+    }
+
+    #[test]
+    fn old_shape_hook_config_deserializes_with_defaults() {
+        let json = r#"{"on": "stage.*", "run": "echo hi"}"#;
+        let config: HookConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.on, "stage.*");
+        assert!(config.when_field_in.is_none());
+        assert!(config.when_field_eq.is_none());
+        assert!(config.when_field_glob.is_none());
+        assert!(config.when_field_gte.is_none());
+        assert!(config.when_field_lte.is_none());
+    }
+
+    // ── custom HookFilter ─────────────────────────────────────────────────
+
+    struct NeverAllow;
+    impl HookFilter for NeverAllow {
+        fn allow(&self, _hook: &HookConfig, _event: &Event) -> bool {
+            false
+        }
+    }
+
+    struct AlwaysAllow;
+    impl HookFilter for AlwaysAllow {
+        fn allow(&self, _hook: &HookConfig, _event: &Event) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn custom_filter_can_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_file = dir.path().join("out.txt");
+        let out_path = out_file.to_str().unwrap().to_string();
+
+        let hook = HookConfig {
+            on: "*".into(),
+            run: Some(format!("echo fired > '{out_path}'")),
+            ..Default::default()
+        };
+        let runner = HookRunner::new_with_filter(&[hook], Arc::new(NeverAllow));
+        runner.run_test(&demo_event()).unwrap();
+
+        assert!(!out_file.exists(), "filter should have blocked the hook");
+    }
+
+    #[test]
+    fn custom_filter_can_allow() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_file = dir.path().join("out.txt");
+        let out_path = out_file.to_str().unwrap().to_string();
+
+        let hook = HookConfig {
+            on: "*".into(),
+            run: Some(format!("echo fired > '{out_path}'")),
+            ..Default::default()
+        };
+        let runner = HookRunner::new_with_filter(&[hook], Arc::new(AlwaysAllow));
+        runner.run_test(&demo_event()).unwrap();
+
+        let contents = std::fs::read_to_string(&out_file).unwrap_or_default();
+        assert_eq!(contents.trim(), "fired");
+    }
+
+    #[test]
+    fn custom_filter_anded_with_field_filters() {
+        // Field filter blocks + custom allows → blocked.
+        let hook_blocked_by_field = HookConfig {
+            on: "*".into(),
+            when_field_eq: Some([("branch".into(), "main".into())].into_iter().collect()),
+            ..Default::default()
+        };
+        let runner = HookRunner::new_with_filter(&[hook_blocked_by_field], Arc::new(AlwaysAllow));
+        // Event has wrong branch value → field filter blocks even though custom allows.
+        assert!(!runner.hook_allows(
+            &HookConfig {
+                on: "*".into(),
+                when_field_eq: Some([("branch".into(), "main".into())].into_iter().collect(),),
+                ..Default::default()
+            },
+            &event_with_fields(&[("branch", "dev")])
+        ));
+
+        // Field filter allows + custom blocks → blocked.
+        let hook_good_fields = HookConfig {
+            on: "*".into(),
+            when_field_eq: Some([("branch".into(), "main".into())].into_iter().collect()),
+            ..Default::default()
+        };
+        let runner2 = HookRunner::new_with_filter(
+            std::slice::from_ref(&hook_good_fields),
+            Arc::new(NeverAllow),
+        );
+        assert!(!runner2.hook_allows(&hook_good_fields, &event_with_fields(&[("branch", "main")])));
+    }
+
+    #[test]
+    fn new_with_filter_constructor_works() {
+        let hook = HookConfig {
+            on: "*".into(),
+            ..Default::default()
+        };
+        let runner = HookRunner::new_with_filter(&[hook], Arc::new(AlwaysAllow));
+        runner.fire(&demo_event()); // must not panic
     }
 }
