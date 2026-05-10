@@ -15,6 +15,8 @@ Domain-neutral notification dispatch primitives — generic event envelope, shel
 - **`HookConfig` / `HookRunner`** — glob-based pattern matching, fire-and-forget shell/HTTP hooks, and synchronous test-capture mode
 - **`PushSubscriptionStore`** — trait for web-push subscription storage (CRUD)
 - **`InMemoryPushStore`** — in-memory impl for tests and examples (enabled by the `test-utils` feature)
+- **`DedupStore`** — trait for "fire at most once per `(entity_id, event_type)`" deduplication; storage stays in the consumer
+- **`HashSetDedupStore`** — in-memory dedup impl for tests and examples (enabled by the `test-utils` feature)
 
 Each harness maps its own domain events to `Event` before calling `HookRunner::fire`. Hook scripts and HTTP endpoints always receive the generic envelope.
 
@@ -27,7 +29,7 @@ runkon-notify = "0.2.0-alpha"
 
 Optional features:
 
-- `test-utils` — enables `InMemoryPushStore` for use in tests and examples
+- `test-utils` — enables `InMemoryPushStore` and `HashSetDedupStore` for use in tests and examples
 
 ## Examples
 
@@ -61,6 +63,24 @@ let hooks = vec![HookConfig {
 
 HookRunner::new(&hooks).fire(&event);
 ```
+
+### Deduplication (`DedupStore`)
+
+Use `fire_with_dedup` to skip duplicate `(entity_id, event_type)` pairs — useful when the same event may be produced multiple times (e.g. retries, fan-out pipelines):
+
+```rust
+use std::sync::Arc;
+use runkon_notify::{DedupStore, HookConfig, HookRunner, Event, Severity};
+use std::collections::HashMap;
+
+// In production: implement DedupStore against SQLite, Redis, Postgres, etc.
+// In tests: use HashSetDedupStore from the `test-utils` feature.
+
+// runner.fire_with_dedup(&event, "run-42", "stage.completed");
+// ^ fires on first call; subsequent calls with the same key are no-ops.
+```
+
+When no store is attached (`HookRunner::new` without `with_dedup_store`), `fire_with_dedup` behaves identically to `fire` — no dedup guard, every call fires.
 
 ## Hook-script protocol
 

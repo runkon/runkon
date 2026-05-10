@@ -17,10 +17,12 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::dedup::DedupStore;
 use crate::event::Event;
 
 /// Result of matching an `on` pattern against an event kind.
@@ -250,6 +252,7 @@ fn run_http_hook(hook: &HookConfig, event: &Event) {
 /// Fires user-configured notification hooks for a given event.
 pub struct HookRunner {
     hooks: Vec<HookConfig>,
+    dedup_store: Option<Arc<dyn DedupStore>>,
 }
 
 impl HookRunner {
@@ -257,7 +260,18 @@ impl HookRunner {
     pub fn new(hooks: &[HookConfig]) -> Self {
         Self {
             hooks: hooks.to_vec(),
+            dedup_store: None,
         }
+    }
+
+    /// Attach a [`DedupStore`] so that [`fire_with_dedup`] can skip duplicate
+    /// `(entity_id, event_type)` pairs. Has no effect on [`fire`].
+    ///
+    /// [`fire_with_dedup`]: HookRunner::fire_with_dedup
+    /// [`fire`]: HookRunner::fire
+    pub fn with_dedup_store(mut self, store: Arc<dyn DedupStore>) -> Self {
+        self.dedup_store = Some(store);
+        self
     }
 
     /// Run the first matching hook synchronously and return the real exit result.
@@ -286,13 +300,8 @@ impl HookRunner {
         Ok(())
     }
 
-    /// Fire all hooks whose `on` pattern matches `event.kind`.
-    ///
-    /// Each matching hook is executed in a separate OS thread (fire-and-forget).
-    /// Both `run` (shell) and `url` (HTTP) hooks can coexist in the same config
-    /// entry; both are attempted when present. Failures are logged as warnings
-    /// and never propagated.
-    pub fn fire(&self, event: &Event) {
+    /// Spawn threads for every hook whose `on` pattern matches `event.kind`.
+    fn dispatch_all(&self, event: &Event) {
         for hook in &self.hooks {
             if on_pattern_match(&hook.on, &event.kind) == OnMatch::None {
                 continue;
@@ -308,6 +317,53 @@ impl HookRunner {
                 }
             });
         }
+    }
+
+    /// Fire all hooks whose `on` pattern matches `event.kind`.
+    ///
+    /// Each matching hook is executed in a separate OS thread (fire-and-forget).
+    /// Both `run` (shell) and `url` (HTTP) hooks can coexist in the same config
+    /// entry; both are attempted when present. Failures are logged as warnings
+    /// and never propagated.
+    ///
+    /// No deduplication is performed here — this method is equivalent to
+    /// `fire_with_dedup` with no key. See [`fire_with_dedup`] to opt into
+    /// deduplication.
+    ///
+    /// [`fire_with_dedup`]: HookRunner::fire_with_dedup
+    pub fn fire(&self, event: &Event) {
+        self.dispatch_all(event);
+    }
+
+    /// Fire hooks with optional deduplication via the configured [`DedupStore`].
+    ///
+    /// When a store is configured (via [`with_dedup_store`]):
+    /// - If `try_claim(entity_id, event_type)` returns `Ok(true)` (first claim),
+    ///   hooks are dispatched normally.
+    /// - If `try_claim` returns `Ok(false)` (already claimed), the call is a
+    ///   no-op and hooks are **not** fired.
+    /// - If `try_claim` returns `Err(_)`, a warning is logged and hooks **are**
+    ///   fired (fail-open — dedup is best-effort, not a correctness gate).
+    ///
+    /// When no store is configured, this method behaves identically to [`fire`].
+    ///
+    /// [`with_dedup_store`]: HookRunner::with_dedup_store
+    /// [`fire`]: HookRunner::fire
+    pub fn fire_with_dedup(&self, event: &Event, entity_id: &str, event_type: &str) {
+        if let Some(ref store) = self.dedup_store {
+            match store.try_claim(entity_id, event_type) {
+                Ok(true) => {}
+                Ok(false) => return,
+                Err(e) => {
+                    tracing::warn!(
+                        entity_id,
+                        event_type,
+                        "dedup store error, firing anyway: {e}"
+                    );
+                }
+            }
+        }
+        self.dispatch_all(event);
     }
 }
 
@@ -770,5 +826,145 @@ mod tests {
 
         let received = rx.recv_timeout(Duration::from_secs(3)).unwrap();
         assert!(received.starts_with("POST "), "request: {received}");
+    }
+
+    // ── fire_with_dedup ───────────────────────────────────────────────────
+
+    fn make_output_hook(cmd_template: &str) -> (HookConfig, tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let out_file = dir.path().join("out.txt");
+        let out_path = out_file.to_str().unwrap().to_string();
+        let hook = HookConfig {
+            on: "workflow_run.*".into(),
+            run: Some(cmd_template.replace("{path}", &out_path)),
+            timeout_ms: Some(5_000),
+            ..Default::default()
+        };
+        (hook, dir, out_file)
+    }
+
+    fn read_output(path: &std::path::Path) -> String {
+        use std::io::Read;
+        let mut s = String::new();
+        std::fs::File::open(path)
+            .unwrap()
+            .read_to_string(&mut s)
+            .unwrap();
+        s
+    }
+
+    #[test]
+    fn fire_with_dedup_first_claim_fires() {
+        use std::sync::Arc;
+
+        use crate::dedup::HashSetDedupStore;
+
+        let (hook, _dir, out_file) = make_output_hook("echo fired > '{path}'");
+        let store = Arc::new(HashSetDedupStore::new());
+        let runner = HookRunner::new(&[hook]).with_dedup_store(store);
+        runner.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
+
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(read_output(&out_file).trim(), "fired");
+    }
+
+    #[test]
+    fn fire_with_dedup_second_claim_skipped() {
+        use std::sync::Arc;
+
+        use crate::dedup::HashSetDedupStore;
+
+        let (hook, _dir, out_file) = make_output_hook("echo line >> '{path}'");
+        let store = Arc::new(HashSetDedupStore::new());
+        let runner = HookRunner::new(&[hook]).with_dedup_store(store);
+        runner.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
+        runner.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
+
+        std::thread::sleep(Duration::from_millis(500));
+        let contents = read_output(&out_file);
+        assert_eq!(
+            contents.lines().count(),
+            1,
+            "expected exactly one fire, got: {contents:?}"
+        );
+    }
+
+    #[test]
+    fn fire_with_dedup_no_store_always_fires() {
+        let (hook, _dir, out_file) = make_output_hook("echo line >> '{path}'");
+        let runner = HookRunner::new(&[hook]); // no dedup store
+        runner.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
+        runner.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
+
+        std::thread::sleep(Duration::from_millis(500));
+        let contents = read_output(&out_file);
+        assert_eq!(
+            contents.lines().count(),
+            2,
+            "expected two fires, got: {contents:?}"
+        );
+    }
+
+    #[test]
+    fn fire_with_dedup_distinct_keys_both_fire() {
+        use std::sync::Arc;
+
+        use crate::dedup::HashSetDedupStore;
+
+        // Sub-test 1: same entity, different event types — both fire.
+        let (hook1, _dir1, out_file1) = make_output_hook("echo line >> '{path}'");
+        let store1 = Arc::new(HashSetDedupStore::new());
+        let runner1 = HookRunner::new(&[hook1]).with_dedup_store(store1);
+        runner1.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
+        runner1.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.failed");
+
+        // Sub-test 2: different entities, same event type — both fire.
+        let (hook2, _dir2, out_file2) = make_output_hook("echo line >> '{path}'");
+        let store2 = Arc::new(HashSetDedupStore::new());
+        let runner2 = HookRunner::new(&[hook2]).with_dedup_store(store2);
+        runner2.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
+        runner2.fire_with_dedup(&demo_event(), "entity-2", "workflow_run.completed");
+
+        std::thread::sleep(Duration::from_millis(500));
+
+        let c1 = read_output(&out_file1);
+        assert_eq!(
+            c1.lines().count(),
+            2,
+            "same entity, different events: {c1:?}"
+        );
+
+        let c2 = read_output(&out_file2);
+        assert_eq!(
+            c2.lines().count(),
+            2,
+            "different entities, same event: {c2:?}"
+        );
+    }
+
+    #[test]
+    fn fire_with_dedup_store_error_fires_anyway() {
+        use std::sync::Arc;
+
+        use crate::error::NotifyError;
+
+        struct FailingDedupStore;
+        impl DedupStore for FailingDedupStore {
+            fn try_claim(&self, _entity_id: &str, _event_type: &str) -> crate::error::Result<bool> {
+                Err(NotifyError::Dispatch("simulated dedup failure".into()))
+            }
+        }
+
+        let (hook, _dir, out_file) = make_output_hook("echo fired > '{path}'");
+        let store = Arc::new(FailingDedupStore) as Arc<dyn DedupStore>;
+        let runner = HookRunner::new(&[hook]).with_dedup_store(store);
+        runner.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
+
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            read_output(&out_file).trim(),
+            "fired",
+            "hook should fire despite store error (fail-open)"
+        );
     }
 }
