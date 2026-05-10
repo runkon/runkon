@@ -112,6 +112,7 @@ pub struct ChildWorkflowInput {
 /// here is something the bridge actually reads when constructing the child
 /// run. Build via [`ExecutionState::child_workflow_context`].
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct ChildWorkflowContext {
     pub run_ctx: Arc<dyn RunContext>,
     pub extra_plugin_dirs: Vec<String>,
@@ -120,6 +121,28 @@ pub struct ChildWorkflowContext {
     pub exec_config: WorkflowExecConfig,
     pub inputs: HashMap<String, String>,
     pub event_sinks: Arc<[Arc<dyn EventSink>]>,
+}
+
+impl ChildWorkflowContext {
+    pub fn new(
+        run_ctx: Arc<dyn RunContext>,
+        extra_plugin_dirs: Vec<String>,
+        workflow_run_id: String,
+        model: Option<String>,
+        exec_config: WorkflowExecConfig,
+        inputs: HashMap<String, String>,
+        event_sinks: Arc<[Arc<dyn EventSink>]>,
+    ) -> Self {
+        Self {
+            run_ctx,
+            extra_plugin_dirs,
+            workflow_run_id,
+            model,
+            exec_config,
+            inputs,
+            event_sinks,
+        }
+    }
 }
 
 /// Trait for executing child workflows — allows conductor-core to inject its adapter.

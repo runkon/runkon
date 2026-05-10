@@ -95,15 +95,15 @@ impl RunContext for StubCtx {
 fn main() {
     let runner = LoggingChildRunner;
     let ctx = Arc::new(StubCtx(std::env::temp_dir()));
-    let parent_ctx = ChildWorkflowContext {
-        run_ctx: Arc::clone(&ctx) as Arc<dyn RunContext>,
-        extra_plugin_dirs: vec![],
-        workflow_run_id: "parent-run-001".into(),
-        model: None,
-        exec_config: WorkflowExecConfig::default(),
-        inputs: HashMap::new(),
-        event_sinks: Arc::from(vec![]),
-    };
+    let parent_ctx = ChildWorkflowContext::new(
+        Arc::clone(&ctx) as Arc<dyn RunContext>,
+        vec![],
+        "parent-run-001".into(),
+        None,
+        WorkflowExecConfig::default(),
+        HashMap::new(),
+        Arc::from(vec![]),
+    );
     let params = ChildWorkflowInput {
         inputs: HashMap::new(),
         iteration: 0,
