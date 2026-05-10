@@ -28,7 +28,7 @@ Optional features:
 
 - `sqlite` — SQLite-backed `WorkflowPersistence`
 - `diagnostics` — per-run engine log + panic capture (pulls in `tracing-subscriber`)
-- `test-utils` — in-memory test helpers (mostly for downstream integration tests)
+- `test-utils` — additional test fixtures (`test_helpers`, `CountingPersistence`) for downstream integration tests. The in-memory persistence backend (`persistence_memory::InMemoryWorkflowPersistence`) is available without this feature.
 - `utoipa` — OpenAPI schema derives on shared types
 
 ## Minimal example
