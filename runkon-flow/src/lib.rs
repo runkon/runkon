@@ -12,7 +12,6 @@ pub mod extensions;
 pub mod flow_engine;
 pub mod helpers;
 pub mod output_schema;
-#[cfg(any(test, feature = "test-utils"))]
 pub mod persistence_memory;
 #[cfg(feature = "sqlite")]
 pub mod persistence_sqlite;
