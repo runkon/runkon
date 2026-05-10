@@ -3202,4 +3202,47 @@ mod tests {
         assert!(!input.triggered_by_hook);
         assert!(input.inputs_override.is_none());
     }
+
+    #[test]
+    fn run_input_new_sets_required_fields_and_zeros_optional() {
+        use crate::cancellation::CancellationToken;
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use crate::traits::action_executor::ActionRegistry;
+        use crate::traits::item_provider::ItemProviderRegistry;
+        use crate::traits::run_context::NoopRunContext;
+        use crate::traits::script_env_provider::NoOpScriptEnvProvider;
+
+        let persistence = Arc::new(InMemoryWorkflowPersistence::new());
+        let action_registry = Arc::new(ActionRegistry::new(HashMap::new(), None));
+        let item_provider_registry = Arc::new(ItemProviderRegistry::new());
+        let script_env_provider = Arc::new(NoOpScriptEnvProvider);
+        let run_ctx = Arc::new(NoopRunContext::default());
+        let cancellation = CancellationToken::new();
+
+        let input = RunInput::new(
+            Arc::clone(&persistence) as Arc<dyn crate::traits::persistence::WorkflowPersistence>,
+            "run-top-1".to_string(),
+            "my-workflow".to_string(),
+            Arc::clone(&action_registry),
+            Arc::clone(&item_provider_registry),
+            Arc::clone(&script_env_provider)
+                as Arc<dyn crate::traits::script_env_provider::ScriptEnvProvider>,
+            run_ctx as Arc<dyn crate::traits::run_context::RunContext>,
+            cancellation,
+        );
+
+        assert_eq!(input.workflow_run_id, "run-top-1");
+        assert_eq!(input.workflow_name, "my-workflow");
+        assert!(input.extra_plugin_dirs.is_empty());
+        assert!(input.model.is_none());
+        assert!(input.inputs.is_empty());
+        assert_eq!(input.parent_run_id, "");
+        assert_eq!(input.depth, 0);
+        assert!(input.target_label.is_none());
+        assert!(input.default_as_identity.is_none());
+        assert!(!input.triggered_by_hook);
+        assert!(input.schema_resolver.is_none());
+        assert!(input.child_runner.is_none());
+        assert!(input.event_sinks.is_empty());
+    }
 }
