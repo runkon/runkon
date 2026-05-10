@@ -12,7 +12,6 @@ pub mod extensions;
 pub mod flow_engine;
 pub mod helpers;
 pub mod output_schema;
-#[cfg(any(test, feature = "test-utils"))]
 pub mod persistence_memory;
 #[cfg(feature = "sqlite")]
 pub mod persistence_sqlite;
@@ -37,10 +36,11 @@ pub use cancellation_reason::CancellationReason;
 pub use diagnostics::run_with_per_run_log;
 pub use dsl::ValidationContext;
 pub use dsl::ValidationError;
+pub use engine::{ChildWorkflowContext, ChildWorkflowRunner};
 pub use events::{EngineEvent, EngineEventData, EventSink};
 pub use extensions::ClaudeActionParams;
 pub use extensions::Extensions;
-pub use flow_engine::{FlowEngine, FlowEngineBuilder};
+pub use flow_engine::{ChildRunInput, FlowEngine, FlowEngineBuilder, RunInput};
 pub use traits::action_executor::ActionRegistry;
 pub use traits::gate_resolver::GateResolverRegistry;
 pub use traits::item_provider::ItemProviderRegistry;

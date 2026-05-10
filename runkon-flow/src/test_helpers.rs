@@ -100,11 +100,16 @@ pub fn call_node(agent: &str) -> WorkflowNode {
     })
 }
 
-/// Build a minimal `ExecutionState` for tests — empty-ish defaults across all
-/// the fields tests don't usually care about. Caller passes the persistence and
-/// a `workflow_run_id` (the two fields nearly every test customizes); other
-/// fields can be overridden after construction since `ExecutionState`'s fields
-/// are `pub`.
+/// **Test-only.** Constructs an `ExecutionState` with `lease_generation: Some(0)` to
+/// satisfy [`CountingPersistence`] invariants in unit tests. Do not use this from
+/// production code — use [`crate::flow_engine::FlowEngine::run_workflow`] or
+/// [`crate::flow_engine::FlowEngine::run_child`] instead. Production callers that
+/// reach for this helper inherit a fake-acquired lease and bypass the
+/// lease-acquisition codepath.
+///
+/// Caller passes the persistence and a `workflow_run_id` (the two fields nearly every
+/// test customizes); other fields can be overridden after construction since
+/// `ExecutionState`'s fields are `pub`.
 pub fn make_test_execution_state(
     persistence: Arc<dyn crate::traits::persistence::WorkflowPersistence>,
     workflow_run_id: String,

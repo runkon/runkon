@@ -69,6 +69,7 @@ impl Default for InMemoryWorkflowPersistence {
 impl InMemoryWorkflowPersistence {
     /// Inject a failure into `get_fan_out_items`. When `fail` is `true`, the next
     /// call to `get_fan_out_items` returns `EngineError::Persistence`.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn set_fail_get_fan_out_items(&self, fail: bool) {
         self.fail_get_fan_out_items
             .store(fail, std::sync::atomic::Ordering::Relaxed);
@@ -76,6 +77,7 @@ impl InMemoryWorkflowPersistence {
 
     /// Inject a failure into `get_steps`. When `fail` is `true`, every call to
     /// `get_steps` returns `EngineError::Workflow`.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn set_fail_get_steps(&self, fail: bool) {
         self.fail_get_steps
             .store(fail, std::sync::atomic::Ordering::Relaxed);

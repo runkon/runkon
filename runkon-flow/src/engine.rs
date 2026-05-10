@@ -111,6 +111,7 @@ pub struct ChildWorkflowInput {
 /// `ChildWorkflowContext` is the narrow, stable surface: every field listed
 /// here is something the bridge actually reads when constructing the child
 /// run. Build via [`ExecutionState::child_workflow_context`].
+#[non_exhaustive]
 #[derive(Clone)]
 pub struct ChildWorkflowContext {
     pub run_ctx: Arc<dyn RunContext>,
@@ -120,6 +121,28 @@ pub struct ChildWorkflowContext {
     pub exec_config: WorkflowExecConfig,
     pub inputs: HashMap<String, String>,
     pub event_sinks: Arc<[Arc<dyn EventSink>]>,
+}
+
+impl ChildWorkflowContext {
+    pub fn new(
+        run_ctx: Arc<dyn RunContext>,
+        extra_plugin_dirs: Vec<String>,
+        workflow_run_id: String,
+        model: Option<String>,
+        exec_config: WorkflowExecConfig,
+        inputs: HashMap<String, String>,
+        event_sinks: Arc<[Arc<dyn EventSink>]>,
+    ) -> Self {
+        Self {
+            run_ctx,
+            extra_plugin_dirs,
+            workflow_run_id,
+            model,
+            exec_config,
+            inputs,
+            event_sinks,
+        }
+    }
 }
 
 /// Trait for executing child workflows — allows conductor-core to inject its adapter.
@@ -1505,5 +1528,28 @@ mod tests {
         assert!(context.is_empty());
         assert!(step_results.is_empty());
         assert!(child_contexts.is_empty());
+    }
+
+    #[test]
+    fn child_workflow_context_new_sets_required_fields_and_zeros_optional() {
+        use crate::traits::run_context::NoopRunContext;
+        use crate::types::WorkflowExecConfig;
+
+        let run_ctx = Arc::new(NoopRunContext::default()) as Arc<dyn RunContext>;
+        let ctx = ChildWorkflowContext::new(
+            Arc::clone(&run_ctx),
+            vec!["plugins".to_string()],
+            "run-42".to_string(),
+            Some("gpt-4".to_string()),
+            WorkflowExecConfig::default(),
+            HashMap::new(),
+            Arc::from(vec![]),
+        );
+
+        assert_eq!(ctx.workflow_run_id, "run-42");
+        assert_eq!(ctx.extra_plugin_dirs, vec!["plugins"]);
+        assert_eq!(ctx.model.as_deref(), Some("gpt-4"));
+        assert!(ctx.inputs.is_empty());
+        assert_eq!(ctx.event_sinks.len(), 0);
     }
 }
