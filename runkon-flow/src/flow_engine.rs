@@ -8,7 +8,9 @@ use crate::cancellation_reason::CancellationReason;
 use crate::dsl::{
     detect_workflow_cycles, ValidationError, WorkflowDef, WorkflowNode, QUALITY_GATE_TYPE,
 };
-use crate::engine::{run_workflow_engine, ChildWorkflowContext, ChildWorkflowRunner, ExecutionState};
+use crate::engine::{
+    run_workflow_engine, ChildWorkflowContext, ChildWorkflowRunner, ExecutionState,
+};
 use crate::engine_error::EngineError;
 use crate::events::EventSink;
 use crate::output_schema::OutputSchema;
