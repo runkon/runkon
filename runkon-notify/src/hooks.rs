@@ -830,66 +830,58 @@ mod tests {
 
     // ── fire_with_dedup ───────────────────────────────────────────────────
 
+    fn make_output_hook(cmd_template: &str) -> (HookConfig, tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let out_file = dir.path().join("out.txt");
+        let out_path = out_file.to_str().unwrap().to_string();
+        let hook = HookConfig {
+            on: "workflow_run.*".into(),
+            run: Some(cmd_template.replace("{path}", &out_path)),
+            timeout_ms: Some(5_000),
+            ..Default::default()
+        };
+        (hook, dir, out_file)
+    }
+
+    fn read_output(path: &std::path::Path) -> String {
+        use std::io::Read;
+        let mut s = String::new();
+        std::fs::File::open(path)
+            .unwrap()
+            .read_to_string(&mut s)
+            .unwrap();
+        s
+    }
+
     #[test]
     fn fire_with_dedup_first_claim_fires() {
-        use std::io::Read;
         use std::sync::Arc;
 
         use crate::dedup::HashSetDedupStore;
 
+        let (hook, _dir, out_file) = make_output_hook("echo fired > '{path}'");
         let store = Arc::new(HashSetDedupStore::new());
-        let dir = tempfile::tempdir().unwrap();
-        let out_file = dir.path().join("fired.txt");
-        let out_path = out_file.to_str().unwrap().to_string();
-
-        let hook = HookConfig {
-            on: "workflow_run.*".into(),
-            run: Some(format!("echo fired > '{out_path}'")),
-            timeout_ms: Some(5_000),
-            ..Default::default()
-        };
         let runner = HookRunner::new(&[hook]).with_dedup_store(store);
         runner.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
 
         std::thread::sleep(Duration::from_millis(500));
-
-        let mut contents = String::new();
-        std::fs::File::open(&out_file)
-            .unwrap()
-            .read_to_string(&mut contents)
-            .unwrap();
-        assert_eq!(contents.trim(), "fired");
+        assert_eq!(read_output(&out_file).trim(), "fired");
     }
 
     #[test]
     fn fire_with_dedup_second_claim_skipped() {
-        use std::io::Read;
         use std::sync::Arc;
 
         use crate::dedup::HashSetDedupStore;
 
+        let (hook, _dir, out_file) = make_output_hook("echo line >> '{path}'");
         let store = Arc::new(HashSetDedupStore::new());
-        let dir = tempfile::tempdir().unwrap();
-        let out_file = dir.path().join("count.txt");
-        let out_path = out_file.to_str().unwrap().to_string();
-
-        let hook = HookConfig {
-            on: "workflow_run.*".into(),
-            run: Some(format!("echo line >> '{out_path}'")),
-            timeout_ms: Some(5_000),
-            ..Default::default()
-        };
         let runner = HookRunner::new(&[hook]).with_dedup_store(store);
         runner.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
         runner.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
 
         std::thread::sleep(Duration::from_millis(500));
-
-        let mut contents = String::new();
-        std::fs::File::open(&out_file)
-            .unwrap()
-            .read_to_string(&mut contents)
-            .unwrap();
+        let contents = read_output(&out_file);
         assert_eq!(
             contents.lines().count(),
             1,
@@ -899,29 +891,13 @@ mod tests {
 
     #[test]
     fn fire_with_dedup_no_store_always_fires() {
-        use std::io::Read;
-
-        let dir = tempfile::tempdir().unwrap();
-        let out_file = dir.path().join("count.txt");
-        let out_path = out_file.to_str().unwrap().to_string();
-
-        let hook = HookConfig {
-            on: "workflow_run.*".into(),
-            run: Some(format!("echo line >> '{out_path}'")),
-            timeout_ms: Some(5_000),
-            ..Default::default()
-        };
+        let (hook, _dir, out_file) = make_output_hook("echo line >> '{path}'");
         let runner = HookRunner::new(&[hook]); // no dedup store
         runner.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
         runner.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
 
         std::thread::sleep(Duration::from_millis(500));
-
-        let mut contents = String::new();
-        std::fs::File::open(&out_file)
-            .unwrap()
-            .read_to_string(&mut contents)
-            .unwrap();
+        let contents = read_output(&out_file);
         assert_eq!(
             contents.lines().count(),
             2,
@@ -931,36 +907,19 @@ mod tests {
 
     #[test]
     fn fire_with_dedup_distinct_keys_both_fire() {
-        use std::io::Read;
         use std::sync::Arc;
 
         use crate::dedup::HashSetDedupStore;
 
-        let dir = tempfile::tempdir().unwrap();
-
         // Sub-test 1: same entity, different event types — both fire.
-        let out_file1 = dir.path().join("same_entity.txt");
-        let out_path1 = out_file1.to_str().unwrap().to_string();
-        let hook1 = HookConfig {
-            on: "workflow_run.*".into(),
-            run: Some(format!("echo line >> '{out_path1}'")),
-            timeout_ms: Some(5_000),
-            ..Default::default()
-        };
+        let (hook1, _dir1, out_file1) = make_output_hook("echo line >> '{path}'");
         let store1 = Arc::new(HashSetDedupStore::new());
         let runner1 = HookRunner::new(&[hook1]).with_dedup_store(store1);
         runner1.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
         runner1.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.failed");
 
         // Sub-test 2: different entities, same event type — both fire.
-        let out_file2 = dir.path().join("diff_entities.txt");
-        let out_path2 = out_file2.to_str().unwrap().to_string();
-        let hook2 = HookConfig {
-            on: "workflow_run.*".into(),
-            run: Some(format!("echo line >> '{out_path2}'")),
-            timeout_ms: Some(5_000),
-            ..Default::default()
-        };
+        let (hook2, _dir2, out_file2) = make_output_hook("echo line >> '{path}'");
         let store2 = Arc::new(HashSetDedupStore::new());
         let runner2 = HookRunner::new(&[hook2]).with_dedup_store(store2);
         runner2.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
@@ -968,26 +927,44 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(500));
 
-        let mut c1 = String::new();
-        std::fs::File::open(&out_file1)
-            .unwrap()
-            .read_to_string(&mut c1)
-            .unwrap();
-        assert_eq!(
-            c1.lines().count(),
-            2,
-            "same entity, different events: {c1:?}"
-        );
+        let c1 = read_output(&out_file1);
+        assert_eq!(c1.lines().count(), 2, "same entity, different events: {c1:?}");
 
-        let mut c2 = String::new();
-        std::fs::File::open(&out_file2)
-            .unwrap()
-            .read_to_string(&mut c2)
-            .unwrap();
+        let c2 = read_output(&out_file2);
         assert_eq!(
             c2.lines().count(),
             2,
             "different entities, same event: {c2:?}"
+        );
+    }
+
+    #[test]
+    fn fire_with_dedup_store_error_fires_anyway() {
+        use std::sync::Arc;
+
+        use crate::error::NotifyError;
+
+        struct FailingDedupStore;
+        impl DedupStore for FailingDedupStore {
+            fn try_claim(
+                &self,
+                _entity_id: &str,
+                _event_type: &str,
+            ) -> crate::error::Result<bool> {
+                Err(NotifyError::Dispatch("simulated dedup failure".into()))
+            }
+        }
+
+        let (hook, _dir, out_file) = make_output_hook("echo fired > '{path}'");
+        let store = Arc::new(FailingDedupStore) as Arc<dyn DedupStore>;
+        let runner = HookRunner::new(&[hook]).with_dedup_store(store);
+        runner.fire_with_dedup(&demo_event(), "entity-1", "workflow_run.completed");
+
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            read_output(&out_file).trim(),
+            "fired",
+            "hook should fire despite store error (fail-open)"
         );
     }
 }
