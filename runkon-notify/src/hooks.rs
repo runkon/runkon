@@ -32,8 +32,9 @@ pub(crate) enum OnMatch {
     None,
     /// Matched; fires for any event.
     Any,
-    /// Matched via a `:root` suffix. In this crate the `:root` modifier is
-    /// recognized but not enforced — generic events have no parent concept.
+    /// Matched via a `:root` suffix. The runner enforces this by checking
+    /// `event.fields["is_root"] == "true"`; hooks do not fire if the field
+    /// is absent or set to any other value.
     RootOnly,
 }
 
@@ -379,8 +380,14 @@ impl HookRunner {
     /// 2. All `when_field_*` constraints are satisfied
     /// 3. The custom `HookFilter` (if any) allows it
     fn hook_allows(&self, hook: &HookConfig, event: &Event) -> bool {
-        if on_pattern_match(&hook.on, &event.kind) == OnMatch::None {
-            return false;
+        match on_pattern_match(&hook.on, &event.kind) {
+            OnMatch::None => return false,
+            OnMatch::RootOnly
+                if event.fields.get("is_root").map(String::as_str) != Some("true") =>
+            {
+                return false;
+            }
+            _ => {}
         }
         if !field_filters_allow(hook, event) {
             return false;
@@ -1370,6 +1377,106 @@ mod tests {
         assert!(!field_filters_allow(
             &hook,
             &event_with_fields(&[("branch", "dev")])
+        ));
+    }
+
+    // ── :root enforcement in hook_allows ─────────────────────────────────
+
+    #[test]
+    fn root_pattern_with_is_root_true_fires() {
+        let hook = HookConfig {
+            on: "workflow_run.completed:root".into(),
+            ..Default::default()
+        };
+        let runner = HookRunner::new(&[hook.clone()]);
+        assert!(runner.hook_allows(&hook, &event_with_fields(&[("is_root", "true")])));
+    }
+
+    #[test]
+    fn root_pattern_with_is_root_false_does_not_fire() {
+        let hook = HookConfig {
+            on: "workflow_run.completed:root".into(),
+            ..Default::default()
+        };
+        let runner = HookRunner::new(&[hook.clone()]);
+        assert!(!runner.hook_allows(&hook, &event_with_fields(&[("is_root", "false")])));
+    }
+
+    #[test]
+    fn root_pattern_with_is_root_missing_does_not_fire() {
+        let hook = HookConfig {
+            on: "workflow_run.completed:root".into(),
+            ..Default::default()
+        };
+        let runner = HookRunner::new(&[hook.clone()]);
+        assert!(!runner.hook_allows(&hook, &event_with_fields(&[])));
+    }
+
+    #[test]
+    fn plain_pattern_fires_regardless_of_is_root() {
+        let hook = HookConfig {
+            on: "workflow_run.completed".into(),
+            ..Default::default()
+        };
+        let runner = HookRunner::new(&[hook.clone()]);
+        assert!(runner.hook_allows(&hook, &event_with_fields(&[("is_root", "true")])));
+        assert!(runner.hook_allows(&hook, &event_with_fields(&[("is_root", "false")])));
+        assert!(runner.hook_allows(&hook, &event_with_fields(&[])));
+    }
+
+    #[test]
+    fn comma_pattern_root_arm_enforced_independently() {
+        let hook = HookConfig {
+            on: "workflow_run.completed:root,gate.waiting".into(),
+            ..Default::default()
+        };
+        let runner = HookRunner::new(&[hook.clone()]);
+
+        // :root arm with is_root=false → blocked
+        let event_wrc_not_root = Event {
+            kind: "workflow_run.completed".into(),
+            ..event_with_fields(&[("is_root", "false")])
+        };
+        assert!(!runner.hook_allows(&hook, &event_wrc_not_root));
+
+        // :root arm with is_root=true → allowed
+        let event_wrc_root = Event {
+            kind: "workflow_run.completed".into(),
+            ..event_with_fields(&[("is_root", "true")])
+        };
+        assert!(runner.hook_allows(&hook, &event_wrc_root));
+
+        // plain arm with no is_root → allowed
+        let event_gate = Event {
+            kind: "gate.waiting".into(),
+            ..event_with_fields(&[])
+        };
+        assert!(runner.hook_allows(&hook, &event_gate));
+    }
+
+    #[test]
+    fn root_pattern_anded_with_field_filters() {
+        let hook = HookConfig {
+            on: "workflow_run.completed:root".into(),
+            when_field_eq: Some([("branch".into(), "main".into())].into_iter().collect()),
+            ..Default::default()
+        };
+        let runner = HookRunner::new(&[hook.clone()]);
+
+        // Both is_root=true and branch=main → fires
+        assert!(runner.hook_allows(
+            &hook,
+            &event_with_fields(&[("is_root", "true"), ("branch", "main")])
+        ));
+        // is_root=true but wrong branch → blocked by field filter
+        assert!(!runner.hook_allows(
+            &hook,
+            &event_with_fields(&[("is_root", "true"), ("branch", "dev")])
+        ));
+        // is_root=false but right branch → blocked by :root gate
+        assert!(!runner.hook_allows(
+            &hook,
+            &event_with_fields(&[("is_root", "false"), ("branch", "main")])
         ));
     }
 
