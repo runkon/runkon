@@ -928,7 +928,11 @@ mod tests {
         std::thread::sleep(Duration::from_millis(500));
 
         let c1 = read_output(&out_file1);
-        assert_eq!(c1.lines().count(), 2, "same entity, different events: {c1:?}");
+        assert_eq!(
+            c1.lines().count(),
+            2,
+            "same entity, different events: {c1:?}"
+        );
 
         let c2 = read_output(&out_file2);
         assert_eq!(
@@ -946,11 +950,7 @@ mod tests {
 
         struct FailingDedupStore;
         impl DedupStore for FailingDedupStore {
-            fn try_claim(
-                &self,
-                _entity_id: &str,
-                _event_type: &str,
-            ) -> crate::error::Result<bool> {
+            fn try_claim(&self, _entity_id: &str, _event_type: &str) -> crate::error::Result<bool> {
                 Err(NotifyError::Dispatch("simulated dedup failure".into()))
             }
         }
