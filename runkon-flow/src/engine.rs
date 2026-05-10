@@ -111,6 +111,7 @@ pub struct ChildWorkflowInput {
 /// `ChildWorkflowContext` is the narrow, stable surface: every field listed
 /// here is something the bridge actually reads when constructing the child
 /// run. Build via [`ExecutionState::child_workflow_context`].
+#[non_exhaustive]
 #[derive(Clone)]
 pub struct ChildWorkflowContext {
     pub run_ctx: Arc<dyn RunContext>,
@@ -1527,5 +1528,28 @@ mod tests {
         assert!(context.is_empty());
         assert!(step_results.is_empty());
         assert!(child_contexts.is_empty());
+    }
+
+    #[test]
+    fn child_workflow_context_new_sets_required_fields_and_zeros_optional() {
+        use crate::traits::run_context::NoopRunContext;
+        use crate::types::WorkflowExecConfig;
+
+        let run_ctx = Arc::new(NoopRunContext::default()) as Arc<dyn RunContext>;
+        let ctx = ChildWorkflowContext::new(
+            Arc::clone(&run_ctx),
+            vec!["plugins".to_string()],
+            "run-42".to_string(),
+            Some("gpt-4".to_string()),
+            WorkflowExecConfig::default(),
+            HashMap::new(),
+            Arc::from(vec![]),
+        );
+
+        assert_eq!(ctx.workflow_run_id, "run-42");
+        assert_eq!(ctx.extra_plugin_dirs, vec!["plugins"]);
+        assert_eq!(ctx.model.as_deref(), Some("gpt-4"));
+        assert!(ctx.inputs.is_empty());
+        assert_eq!(ctx.event_sinks.len(), 0);
     }
 }

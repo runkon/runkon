@@ -3167,4 +3167,38 @@ mod tests {
             "run_child with inputs_override should succeed"
         );
     }
+
+    #[test]
+    fn child_run_input_new_sets_required_fields_and_zeros_optional() {
+        use crate::cancellation::CancellationToken;
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use crate::traits::action_executor::ActionRegistry;
+        use crate::traits::item_provider::ItemProviderRegistry;
+        use crate::traits::script_env_provider::NoOpScriptEnvProvider;
+
+        let persistence = Arc::new(InMemoryWorkflowPersistence::new());
+        let action_registry = Arc::new(ActionRegistry::new(HashMap::new(), None));
+        let item_provider_registry = Arc::new(ItemProviderRegistry::new());
+        let script_env_provider = Arc::new(NoOpScriptEnvProvider);
+        let cancellation = CancellationToken::new();
+
+        let input = ChildRunInput::new(
+            "run-child-1".to_string(),
+            Arc::clone(&persistence) as Arc<dyn crate::traits::persistence::WorkflowPersistence>,
+            Arc::clone(&action_registry),
+            Arc::clone(&item_provider_registry),
+            Arc::clone(&script_env_provider) as Arc<dyn crate::traits::script_env_provider::ScriptEnvProvider>,
+            2,
+            cancellation,
+        );
+
+        assert_eq!(input.workflow_run_id, "run-child-1");
+        assert_eq!(input.depth, 2);
+        assert!(input.child_runner.is_none());
+        assert!(input.schema_resolver.is_none());
+        assert!(input.as_identity.is_none());
+        assert!(input.target_label.is_none());
+        assert!(!input.triggered_by_hook);
+        assert!(input.inputs_override.is_none());
+    }
 }
