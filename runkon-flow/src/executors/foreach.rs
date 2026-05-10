@@ -126,6 +126,7 @@ fn build_foreach_structured_output(
     let mut entries: Vec<serde_json::Value> = Vec::with_capacity(terminal_items.len());
     for item in &terminal_items {
         let output = if let Some(run_id) = child_run_id_by_item.get(&item.item_id) {
+            // TODO(perf): N+1 — batch via WorkflowPersistence::get_steps_for_run_ids when trait surface can change.
             let steps = persistence.get_steps(run_id).map_err(p_err)?;
             let last_output = steps
                 .iter()
