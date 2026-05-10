@@ -124,17 +124,23 @@ use std::sync::Arc;
 use runkon_notify::{HookConfig, HookFilter, HookRunner, Event, Severity};
 use std::collections::HashMap;
 
-struct OnlyRootWorkflows;
+/// Only fire hooks between 08:00 and 18:00 UTC (business hours).
+struct BusinessHoursOnly;
 
-impl HookFilter for OnlyRootWorkflows {
-    fn allow(&self, _hook: &HookConfig, event: &Event) -> bool {
-        event.fields.get("is_root").map(|v| v == "true").unwrap_or(false)
+impl HookFilter for BusinessHoursOnly {
+    fn allow(&self, _hook: &HookConfig, _event: &Event) -> bool {
+        // Replace with a timezone-aware crate (e.g. `chrono`) in production.
+        let hour = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| (d.as_secs() / 3600) % 24)
+            .unwrap_or(0);
+        hour >= 8 && hour < 18
     }
 }
 
 # let hooks: Vec<HookConfig> = vec![];
-let runner = HookRunner::new_with_filter(&hooks, Arc::new(OnlyRootWorkflows));
-// or: HookRunner::new(&hooks).with_filter(Arc::new(OnlyRootWorkflows))
+let runner = HookRunner::new_with_filter(&hooks, Arc::new(BusinessHoursOnly));
+// or: HookRunner::new(&hooks).with_filter(Arc::new(BusinessHoursOnly))
 ```
 
 The custom filter is ANDed with `on:` and all `when_field_*` predicates — all three must allow for the hook to fire. Implementations must be `Send + Sync` because hooks execute in spawned threads.
@@ -169,8 +175,16 @@ The `on` field accepts a comma-separated list of glob patterns:
 | `*` | All events |
 | `stage.*` | Any `stage.` event |
 | `permit.approved` | Exact event kind |
-| `stage.*:root` | `:root` suffix recognized (no-op in generic context) |
+| `stage.*:root` | Fires only when `event.fields["is_root"] == "true"` |
 | `feature/*` | Branch-style glob |
+
+#### `:root` enforcement
+
+When a pattern includes the `:root` suffix (e.g. `workflow_run.completed:root`), the runner fires the hook only if the event carries `fields["is_root"] == "true"` (case-sensitive, exact string match). Any other value — including `"false"`, missing, or empty — is treated as "not root" and the hook does not fire.
+
+Consumers should set `event.fields["is_root"] = "true"` for any event type where root-vs-sub distinction matters. Events without `is_root` are treated as not root — the runner fails closed, matching the missing-field semantics of `when_field_*` predicates.
+
+**Migration note:** Prior to this change, `:root` was silently a no-op — hooks fired regardless of whether the event was root. If you use `:root` patterns, set `event.fields["is_root"] = "true"` for root events to preserve the intended behavior.
 
 ### Security model
 
