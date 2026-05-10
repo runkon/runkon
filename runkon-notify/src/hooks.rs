@@ -973,13 +973,21 @@ mod tests {
             .unwrap()
             .read_to_string(&mut c1)
             .unwrap();
-        assert_eq!(c1.lines().count(), 2, "same entity, different events: {c1:?}");
+        assert_eq!(
+            c1.lines().count(),
+            2,
+            "same entity, different events: {c1:?}"
+        );
 
         let mut c2 = String::new();
         std::fs::File::open(&out_file2)
             .unwrap()
             .read_to_string(&mut c2)
             .unwrap();
-        assert_eq!(c2.lines().count(), 2, "different entities, same event: {c2:?}");
+        assert_eq!(
+            c2.lines().count(),
+            2,
+            "different entities, same event: {c2:?}"
+        );
     }
 }
