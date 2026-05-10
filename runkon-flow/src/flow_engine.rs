@@ -138,6 +138,7 @@ pub struct FlowEngine {
 ///
 /// When adding new fields to [`crate::engine::ExecutionState`], add the corresponding slot here
 /// so production callers can supply them without reaching into `test_helpers`.
+#[non_exhaustive]
 pub struct RunInput {
     pub persistence: Arc<dyn WorkflowPersistence>,
     pub workflow_run_id: String,
@@ -173,6 +174,7 @@ pub struct RunInput {
 /// **Note on `child_runner`:** pass `Some(Arc::clone(&self_runner))` from a
 /// `ChildWorkflowRunner::execute_child` implementation so grandchild workflow calls work.
 /// A `None` value produces a child run that cannot fan out further.
+#[non_exhaustive]
 pub struct ChildRunInput {
     /// The pre-created child run ID (from persistence).
     pub workflow_run_id: String,
@@ -185,19 +187,156 @@ pub struct ChildRunInput {
     #[allow(clippy::type_complexity)]
     pub schema_resolver:
         Option<Arc<dyn Fn(&str) -> crate::engine_error::Result<OutputSchema> + Send + Sync>>,
-    /// Forwarded from [`ChildWorkflowInput::iteration`]; not stored in `ExecutionState` but
-    /// available for the caller to use when creating the persistence run record.
-    pub iteration: u32,
     /// Maps to `ExecutionState::default_as_identity`.
     pub as_identity: Option<String>,
     pub depth: u32,
-    /// Forwarded from [`ChildWorkflowInput::parent_step_id`]; available for persistence use.
-    pub parent_step_id: Option<String>,
     pub cancellation: CancellationToken,
     pub target_label: Option<String>,
     pub triggered_by_hook: bool,
     /// When `Some`, replaces the parent context's `inputs`; when `None`, parent inputs flow through.
     pub inputs_override: Option<HashMap<String, String>>,
+}
+
+impl RunInput {
+    /// Construct a `RunInput` with required fields; all optional/defaultable fields are zeroed.
+    ///
+    /// Use direct field assignment (`input.model = Some(...)`) to set any optional fields.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        persistence: Arc<dyn WorkflowPersistence>,
+        workflow_run_id: String,
+        workflow_name: String,
+        action_registry: Arc<ActionRegistry>,
+        item_provider_registry: Arc<ItemProviderRegistry>,
+        script_env_provider: Arc<dyn ScriptEnvProvider>,
+        run_ctx: Arc<dyn RunContext>,
+        cancellation: CancellationToken,
+    ) -> Self {
+        Self {
+            persistence,
+            workflow_run_id,
+            workflow_name,
+            action_registry,
+            item_provider_registry,
+            script_env_provider,
+            run_ctx,
+            extra_plugin_dirs: vec![],
+            model: None,
+            exec_config: WorkflowExecConfig::default(),
+            inputs: HashMap::new(),
+            parent_run_id: String::new(),
+            depth: 0,
+            target_label: None,
+            default_as_identity: None,
+            triggered_by_hook: false,
+            schema_resolver: None,
+            child_runner: None,
+            cancellation,
+            event_sinks: vec![],
+        }
+    }
+}
+
+impl ChildRunInput {
+    /// Construct a `ChildRunInput` with required fields; all optional/defaultable fields are zeroed.
+    ///
+    /// Use direct field assignment (`input.as_identity = Some(...)`) to set any optional fields.
+    pub fn new(
+        workflow_run_id: String,
+        persistence: Arc<dyn WorkflowPersistence>,
+        action_registry: Arc<ActionRegistry>,
+        item_provider_registry: Arc<ItemProviderRegistry>,
+        script_env_provider: Arc<dyn ScriptEnvProvider>,
+        depth: u32,
+        cancellation: CancellationToken,
+    ) -> Self {
+        Self {
+            workflow_run_id,
+            persistence,
+            action_registry,
+            item_provider_registry,
+            script_env_provider,
+            child_runner: None,
+            schema_resolver: None,
+            as_identity: None,
+            depth,
+            cancellation,
+            target_label: None,
+            triggered_by_hook: false,
+            inputs_override: None,
+        }
+    }
+}
+
+/// Build an `ExecutionState` from caller-supplied config fields with all runtime accumulators
+/// zeroed. Centralises the accumulator defaults so `run_workflow` and `run_child` stay in sync.
+#[allow(clippy::too_many_arguments)]
+fn make_fresh_execution_state(
+    persistence: Arc<dyn WorkflowPersistence>,
+    action_registry: Arc<ActionRegistry>,
+    item_provider_registry: Arc<ItemProviderRegistry>,
+    script_env_provider: Arc<dyn ScriptEnvProvider>,
+    workflow_run_id: String,
+    workflow_name: String,
+    run_ctx: Arc<dyn RunContext>,
+    extra_plugin_dirs: Vec<String>,
+    model: Option<String>,
+    exec_config: WorkflowExecConfig,
+    inputs: HashMap<String, String>,
+    parent_run_id: String,
+    depth: u32,
+    target_label: Option<String>,
+    default_as_identity: Option<String>,
+    triggered_by_hook: bool,
+    #[allow(clippy::type_complexity)] schema_resolver: Option<
+        Arc<dyn Fn(&str) -> crate::engine_error::Result<OutputSchema> + Send + Sync>,
+    >,
+    child_runner: Option<Arc<dyn ChildWorkflowRunner>>,
+    cancellation: CancellationToken,
+    event_sinks: Arc<[Arc<dyn EventSink>]>,
+) -> ExecutionState {
+    ExecutionState {
+        persistence,
+        action_registry,
+        script_env_provider,
+        workflow_run_id,
+        workflow_name,
+        run_ctx,
+        extra_plugin_dirs,
+        model,
+        exec_config,
+        inputs,
+        parent_run_id,
+        depth,
+        target_label,
+        default_as_identity,
+        triggered_by_hook,
+        schema_resolver,
+        child_runner,
+        cancellation,
+        event_sinks,
+        registry: item_provider_registry,
+        // Runtime accumulators — zeroed for a fresh run.
+        step_results: HashMap::new(),
+        contexts: vec![],
+        position: 0,
+        all_succeeded: true,
+        total_cost: 0.0,
+        total_turns: 0,
+        total_duration_ms: 0,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_read_input_tokens: 0,
+        total_cache_creation_input_tokens: 0,
+        last_gate_feedback: None,
+        block_output: None,
+        block_with: vec![],
+        resume_ctx: None,
+        last_heartbeat_at: ExecutionState::new_heartbeat(),
+        current_execution_id: Arc::new(Mutex::new(None)),
+        owner_token: None,
+        lease_generation: None,
+    }
 }
 
 impl FlowEngine {
@@ -387,48 +526,28 @@ impl FlowEngine {
         input: RunInput,
     ) -> crate::engine_error::Result<WorkflowResult> {
         let event_sinks = self.build_event_sinks(&input.event_sinks);
-        let mut state = ExecutionState {
-            persistence: input.persistence,
-            action_registry: input.action_registry,
-            script_env_provider: input.script_env_provider,
-            workflow_run_id: input.workflow_run_id,
-            workflow_name: input.workflow_name,
-            run_ctx: input.run_ctx,
-            extra_plugin_dirs: input.extra_plugin_dirs,
-            model: input.model,
-            exec_config: input.exec_config,
-            inputs: input.inputs,
-            parent_run_id: input.parent_run_id,
-            depth: input.depth,
-            target_label: input.target_label,
-            default_as_identity: input.default_as_identity,
-            triggered_by_hook: input.triggered_by_hook,
-            schema_resolver: input.schema_resolver,
-            child_runner: input.child_runner,
-            cancellation: input.cancellation,
+        let mut state = make_fresh_execution_state(
+            input.persistence,
+            input.action_registry,
+            input.item_provider_registry,
+            input.script_env_provider,
+            input.workflow_run_id,
+            input.workflow_name,
+            input.run_ctx,
+            input.extra_plugin_dirs,
+            input.model,
+            input.exec_config,
+            input.inputs,
+            input.parent_run_id,
+            input.depth,
+            input.target_label,
+            input.default_as_identity,
+            input.triggered_by_hook,
+            input.schema_resolver,
+            input.child_runner,
+            input.cancellation,
             event_sinks,
-            registry: input.item_provider_registry,
-            // Runtime accumulators — zeroed for a fresh run.
-            step_results: HashMap::new(),
-            contexts: vec![],
-            position: 0,
-            all_succeeded: true,
-            total_cost: 0.0,
-            total_turns: 0,
-            total_duration_ms: 0,
-            total_input_tokens: 0,
-            total_output_tokens: 0,
-            total_cache_read_input_tokens: 0,
-            total_cache_creation_input_tokens: 0,
-            last_gate_feedback: None,
-            block_output: None,
-            block_with: vec![],
-            resume_ctx: None,
-            last_heartbeat_at: ExecutionState::new_heartbeat(),
-            current_execution_id: Arc::new(Mutex::new(None)),
-            owner_token: None,
-            lease_generation: None,
-        };
+        );
         self.run_inner(def, &mut state)
     }
 
@@ -452,48 +571,28 @@ impl FlowEngine {
         let inputs = input
             .inputs_override
             .unwrap_or_else(|| parent_ctx.inputs.clone());
-        let mut state = ExecutionState {
-            persistence: input.persistence,
-            action_registry: input.action_registry,
-            script_env_provider: input.script_env_provider,
-            workflow_run_id: input.workflow_run_id,
-            workflow_name: def.name.clone(),
-            run_ctx: Arc::clone(&parent_ctx.run_ctx),
-            extra_plugin_dirs: parent_ctx.extra_plugin_dirs.clone(),
-            model: parent_ctx.model.clone(),
-            exec_config: parent_ctx.exec_config.clone(),
+        let mut state = make_fresh_execution_state(
+            input.persistence,
+            input.action_registry,
+            input.item_provider_registry,
+            input.script_env_provider,
+            input.workflow_run_id,
+            def.name.clone(),
+            Arc::clone(&parent_ctx.run_ctx),
+            parent_ctx.extra_plugin_dirs.clone(),
+            parent_ctx.model.clone(),
+            parent_ctx.exec_config.clone(),
             inputs,
-            parent_run_id: parent_ctx.workflow_run_id.clone(),
-            depth: input.depth,
-            target_label: input.target_label,
-            default_as_identity: input.as_identity,
-            triggered_by_hook: input.triggered_by_hook,
-            schema_resolver: input.schema_resolver,
-            child_runner: input.child_runner,
-            cancellation: input.cancellation,
+            parent_ctx.workflow_run_id.clone(),
+            input.depth,
+            input.target_label,
+            input.as_identity,
+            input.triggered_by_hook,
+            input.schema_resolver,
+            input.child_runner,
+            input.cancellation,
             event_sinks,
-            registry: input.item_provider_registry,
-            // Runtime accumulators — zeroed for a fresh run.
-            step_results: HashMap::new(),
-            contexts: vec![],
-            position: 0,
-            all_succeeded: true,
-            total_cost: 0.0,
-            total_turns: 0,
-            total_duration_ms: 0,
-            total_input_tokens: 0,
-            total_output_tokens: 0,
-            total_cache_read_input_tokens: 0,
-            total_cache_creation_input_tokens: 0,
-            last_gate_feedback: None,
-            block_output: None,
-            block_with: vec![],
-            resume_ctx: None,
-            last_heartbeat_at: ExecutionState::new_heartbeat(),
-            current_execution_id: Arc::new(Mutex::new(None)),
-            owner_token: None,
-            lease_generation: None,
-        };
+        );
         self.run_inner(def, &mut state)
     }
 
@@ -3003,10 +3102,8 @@ mod tests {
                     script_env_provider: Arc::new(NoOpScriptEnvProvider),
                     child_runner: None,
                     schema_resolver: None,
-                    iteration: 0,
                     as_identity: None,
                     depth: 1,
-                    parent_step_id: None,
                     cancellation: CancellationToken::new(),
                     target_label: None,
                     triggered_by_hook: false,
@@ -3066,10 +3163,8 @@ mod tests {
                     script_env_provider: Arc::new(NoOpScriptEnvProvider),
                     child_runner: None,
                     schema_resolver: None,
-                    iteration: 0,
                     as_identity: None,
                     depth: 1,
-                    parent_step_id: None,
                     cancellation: CancellationToken::new(),
                     target_label: None,
                     triggered_by_hook: false,

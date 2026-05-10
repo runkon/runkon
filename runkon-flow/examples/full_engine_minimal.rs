@@ -19,7 +19,6 @@ use runkon_flow::traits::action_executor::{ActionExecutor, ActionOutput, ActionP
 use runkon_flow::traits::persistence::{NewRun, WorkflowPersistence};
 use runkon_flow::traits::run_context::{NoopRunContext, RunContext};
 use runkon_flow::traits::script_env_provider::NoOpScriptEnvProvider;
-use runkon_flow::types::WorkflowExecConfig;
 use runkon_flow::ActionRegistry;
 use runkon_flow::CancellationToken;
 use runkon_flow::FlowEngineBuilder;
@@ -100,28 +99,16 @@ fn main() {
     let result = engine
         .run_workflow(
             &def,
-            RunInput {
-                persistence: Arc::clone(&persistence) as Arc<dyn WorkflowPersistence>,
-                workflow_run_id: run.id,
-                workflow_name: "two-step".into(),
+            RunInput::new(
+                Arc::clone(&persistence) as Arc<dyn WorkflowPersistence>,
+                run.id,
+                "two-step".into(),
                 action_registry,
-                item_provider_registry: Arc::new(ItemProviderRegistry::new()),
-                script_env_provider: Arc::new(NoOpScriptEnvProvider),
-                run_ctx: Arc::new(NoopRunContext::default()),
-                extra_plugin_dirs: vec![],
-                model: None,
-                exec_config: WorkflowExecConfig::default(),
-                inputs: HashMap::new(),
-                parent_run_id: String::new(),
-                depth: 0,
-                target_label: None,
-                default_as_identity: None,
-                triggered_by_hook: false,
-                schema_resolver: None,
-                child_runner: None,
-                cancellation: CancellationToken::new(),
-                event_sinks: vec![],
-            },
+                Arc::new(ItemProviderRegistry::new()),
+                Arc::new(NoOpScriptEnvProvider),
+                Arc::new(NoopRunContext::default()),
+                CancellationToken::new(),
+            ),
         )
         .expect("run failed");
 
