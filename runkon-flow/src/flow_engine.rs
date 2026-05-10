@@ -3187,7 +3187,8 @@ mod tests {
             Arc::clone(&persistence) as Arc<dyn crate::traits::persistence::WorkflowPersistence>,
             Arc::clone(&action_registry),
             Arc::clone(&item_provider_registry),
-            Arc::clone(&script_env_provider) as Arc<dyn crate::traits::script_env_provider::ScriptEnvProvider>,
+            Arc::clone(&script_env_provider)
+                as Arc<dyn crate::traits::script_env_provider::ScriptEnvProvider>,
             2,
             cancellation,
         );
