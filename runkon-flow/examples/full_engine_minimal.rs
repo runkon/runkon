@@ -1,18 +1,30 @@
 //! End-to-end example: build a `FlowEngine`, define a 2-step workflow, and run it.
 //!
-//! Requires: `cargo run --example full_engine_minimal -p runkon-flow --features test-utils`
+//! Demonstrates the production entry point `FlowEngine::run_workflow` so no
+//! `test-utils` feature is needed for the entry point itself.
+//!
+//! `InMemoryWorkflowPersistence` still requires `--features test-utils` because
+//! it is a test-only persistence backend. A real deployment would supply a
+//! `SqliteWorkflowPersistence` or a custom `WorkflowPersistence` impl instead.
+//!
+//! Run with:
+//!   cargo run --example full_engine_minimal -p runkon-flow --features test-utils
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use runkon_flow::engine_error::EngineError;
 use runkon_flow::persistence_memory::InMemoryWorkflowPersistence;
-use runkon_flow::test_helpers::make_test_execution_state;
 use runkon_flow::traits::action_executor::{ActionExecutor, ActionOutput, ActionParams, StepInfo};
 use runkon_flow::traits::persistence::{NewRun, WorkflowPersistence};
-use runkon_flow::traits::run_context::RunContext;
+use runkon_flow::traits::run_context::{NoopRunContext, RunContext};
+use runkon_flow::traits::script_env_provider::NoOpScriptEnvProvider;
+use runkon_flow::types::WorkflowExecConfig;
 use runkon_flow::ActionRegistry;
+use runkon_flow::CancellationToken;
 use runkon_flow::FlowEngineBuilder;
+use runkon_flow::ItemProviderRegistry;
+use runkon_flow::RunInput;
 
 // Inline EchoExecutor — each example has its own main(), so we can't reuse
 // the definition from echo_executor.rs via #[path] (that would duplicate main).
@@ -73,13 +85,8 @@ fn main() {
         })
         .expect("create_run failed");
 
-    // 4. Build ExecutionState via test helper, then wire in the matching executor registry.
-    let mut state = make_test_execution_state(
-        Arc::clone(&persistence) as Arc<dyn WorkflowPersistence>,
-        run.id,
-    );
-    state.workflow_name = "two-step".into();
-    state.action_registry = Arc::new(ActionRegistry::from_executors(
+    // 4. Build a per-run ActionRegistry with the EchoExecutor.
+    let action_registry = Arc::new(ActionRegistry::from_executors(
         [(
             "echo".to_string(),
             Box::new(EchoExecutor) as Box<dyn ActionExecutor>,
@@ -89,8 +96,35 @@ fn main() {
         None,
     ));
 
-    // 5. Run the workflow end-to-end.
-    let result = engine.run(&def, &mut state).expect("run failed");
+    // 5. Run the workflow via the production entry point — no test_helpers needed.
+    let result = engine
+        .run_workflow(
+            &def,
+            RunInput {
+                persistence: Arc::clone(&persistence) as Arc<dyn WorkflowPersistence>,
+                workflow_run_id: run.id,
+                workflow_name: "two-step".into(),
+                action_registry,
+                item_provider_registry: Arc::new(ItemProviderRegistry::new()),
+                script_env_provider: Arc::new(NoOpScriptEnvProvider),
+                run_ctx: Arc::new(NoopRunContext::default()),
+                extra_plugin_dirs: vec![],
+                model: None,
+                exec_config: WorkflowExecConfig::default(),
+                inputs: HashMap::new(),
+                parent_run_id: String::new(),
+                depth: 0,
+                target_label: None,
+                default_as_identity: None,
+                triggered_by_hook: false,
+                schema_resolver: None,
+                child_runner: None,
+                cancellation: CancellationToken::new(),
+                event_sinks: vec![],
+            },
+        )
+        .expect("run failed");
+
     println!("workflow:   {}", result.workflow_name);
     println!("run_id:     {}", result.workflow_run_id);
     println!("succeeded:  {}", result.all_succeeded);
