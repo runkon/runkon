@@ -270,7 +270,7 @@ impl ChildRunInput {
 
 /// Build an `ExecutionState` from caller-supplied config fields with all runtime accumulators
 /// zeroed. Centralises the accumulator defaults so `run_workflow` and `run_child` stay in sync.
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn make_fresh_execution_state(
     persistence: Arc<dyn WorkflowPersistence>,
     action_registry: Arc<ActionRegistry>,
