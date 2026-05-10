@@ -27,15 +27,22 @@ last_idx=$(( ${#crates[@]} - 1 ))
 for i in "${!crates[@]}"; do
   crate="${crates[$i]}"
   echo
-  # Idempotence: skip if this version is already on crates.io. The 404 path
-  # also covers brand-new crates (the index returns "does not exist").
-  if [[ ${#dry_run[@]} -eq 0 ]] && curl -sfo /dev/null \
-      "https://crates.io/api/v1/crates/${crate}/${version}"; then
-    echo "=== ${crate} ${version} already on crates.io, skipping ==="
-    continue
-  fi
   echo "=== publishing ${crate} ${dry_run[*]+${dry_run[*]}} ==="
-  cargo publish -p "${crate}" ${dry_run[@]+"${dry_run[@]}"}
+  # Idempotence: if cargo reports this version is already on crates.io,
+  # treat it as success and skip the post-publish index wait. Any other
+  # failure mode is propagated.
+  set +e
+  out=$(cargo publish -p "${crate}" ${dry_run[@]+"${dry_run[@]}"} 2>&1)
+  rc=$?
+  set -e
+  echo "${out}"
+  if [[ $rc -ne 0 ]]; then
+    if echo "${out}" | grep -q "already exists on crates.io index"; then
+      echo "=== ${crate} ${version} already on crates.io, skipping ==="
+      continue
+    fi
+    exit $rc
+  fi
   if [[ ${#dry_run[@]} -eq 0 && $i -lt $last_idx ]]; then
     echo "waiting 30s for crates.io index to update before next publish..."
     sleep 30
