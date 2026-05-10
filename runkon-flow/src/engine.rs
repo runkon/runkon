@@ -112,7 +112,6 @@ pub struct ChildWorkflowInput {
 /// here is something the bridge actually reads when constructing the child
 /// run. Build via [`ExecutionState::child_workflow_context`].
 #[derive(Clone)]
-#[non_exhaustive]
 pub struct ChildWorkflowContext {
     pub run_ctx: Arc<dyn RunContext>,
     pub extra_plugin_dirs: Vec<String>,

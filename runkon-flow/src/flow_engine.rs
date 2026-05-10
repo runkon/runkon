@@ -2966,28 +2966,16 @@ mod tests {
     ) -> RunInput {
         use crate::traits::run_context::NoopRunContext;
         use crate::traits::script_env_provider::NoOpScriptEnvProvider;
-        RunInput {
+        RunInput::new(
             persistence,
-            workflow_run_id: run_id,
-            workflow_name: "wf".to_string(),
-            action_registry: make_alpha_registry(),
-            item_provider_registry: Arc::new(ItemProviderRegistry::new()),
-            script_env_provider: Arc::new(NoOpScriptEnvProvider),
-            run_ctx: Arc::new(NoopRunContext::default()),
-            extra_plugin_dirs: vec![],
-            model: None,
-            exec_config: crate::types::WorkflowExecConfig::default(),
-            inputs: HashMap::new(),
-            parent_run_id: String::new(),
-            depth: 0,
-            target_label: None,
-            default_as_identity: None,
-            triggered_by_hook: false,
-            schema_resolver: None,
-            child_runner: None,
-            cancellation: CancellationToken::new(),
-            event_sinks: vec![],
-        }
+            run_id,
+            "wf".to_string(),
+            make_alpha_registry(),
+            Arc::new(ItemProviderRegistry::new()),
+            Arc::new(NoOpScriptEnvProvider),
+            Arc::new(NoopRunContext::default()),
+            CancellationToken::new(),
+        )
     }
 
     #[test]
