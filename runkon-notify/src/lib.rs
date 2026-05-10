@@ -37,7 +37,7 @@ pub mod push;
 pub use dedup::DedupStore;
 pub use error::{NotifyError, Result};
 pub use event::{Event, Severity};
-pub use hooks::{HookConfig, HookRunner};
+pub use hooks::{HookConfig, HookFilter, HookRunner};
 pub use push::{PushSubscriptionStore, Subscription};
 
 #[cfg(any(test, feature = "test-utils"))]
