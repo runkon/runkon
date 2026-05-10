@@ -50,11 +50,13 @@ jobs:
         if: inputs.dry_run != 'true'
         run: |
           version="${{ inputs.version }}"
-          git push origin \
-            "runkon-flow-v${version}" \
-            "runkon-flow-executors-v${version}" \
-            "runkon-runtimes-v${version}" \
-            "runkon-anthropic-v${version}"
+          mapfile -t tags < <(git tag --list "*-v${version}")
+          if [[ ${#tags[@]} -eq 0 ]]; then
+            echo "::error::no local tags matching *-v${version}"
+            exit 1
+          fi
+          # Idempotent: re-pushing an existing tag at the same commit is a no-op.
+          git push origin "${tags[@]}"
 
       - name: Publish to crates.io
         env:

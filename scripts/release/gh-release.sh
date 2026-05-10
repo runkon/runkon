@@ -38,12 +38,14 @@ Crates published to crates.io:
 - [runkon-flow ${version}](https://crates.io/crates/runkon-flow/${version})
 - [runkon-flow-executors ${version}](https://crates.io/crates/runkon-flow-executors/${version})
 - [runkon-anthropic ${version}](https://crates.io/crates/runkon-anthropic/${version})
+- [runkon-notify ${version}](https://crates.io/crates/runkon-notify/${version})
 
 Per-crate tags pointing at this release commit:
 - \`runkon-flow-v${version}\`
 - \`runkon-flow-executors-v${version}\`
 - \`runkon-runtimes-v${version}\`
 - \`runkon-anthropic-v${version}\`
+- \`runkon-notify-v${version}\`
 
 EOF
 
@@ -56,7 +58,15 @@ if [[ -n "${prev_tag}" ]]; then
   } >> "${notes}"
 fi
 
-gh release create "${anchor_tag}" \
-  --title "runkon ${version}" \
-  --notes-file "${notes}" \
-  "${prerelease_flag[@]}"
+if gh release view "${anchor_tag}" >/dev/null 2>&1; then
+  echo "release ${anchor_tag} already exists, updating notes"
+  gh release edit "${anchor_tag}" \
+    --title "runkon ${version}" \
+    --notes-file "${notes}" \
+    "${prerelease_flag[@]}"
+else
+  gh release create "${anchor_tag}" \
+    --title "runkon ${version}" \
+    --notes-file "${notes}" \
+    "${prerelease_flag[@]}"
+fi
