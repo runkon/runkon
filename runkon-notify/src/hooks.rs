@@ -385,7 +385,7 @@ impl HookRunner {
         if !field_filters_allow(hook, event) {
             return false;
         }
-        self.filter.as_ref().map_or(true, |f| f.allow(hook, event))
+        self.filter.as_ref().is_none_or(|f| f.allow(hook, event))
     }
 
     /// Run the first matching hook synchronously and return the real exit result.
@@ -1110,7 +1110,10 @@ mod tests {
             ),
             ..Default::default()
         };
-        assert!(field_filters_allow(&hook, &event_with_fields(&[("branch", "main")])));
+        assert!(field_filters_allow(
+            &hook,
+            &event_with_fields(&[("branch", "main")])
+        ));
     }
 
     #[test]
@@ -1118,7 +1121,9 @@ mod tests {
         let hook = HookConfig {
             on: "*".into(),
             when_field_in: Some(
-                [("branch".into(), vec!["main".into()])].into_iter().collect(),
+                [("branch".into(), vec!["main".into()])]
+                    .into_iter()
+                    .collect(),
             ),
             ..Default::default()
         };
@@ -1133,7 +1138,9 @@ mod tests {
         let hook = HookConfig {
             on: "*".into(),
             when_field_in: Some(
-                [("branch".into(), vec!["main".into()])].into_iter().collect(),
+                [("branch".into(), vec!["main".into()])]
+                    .into_iter()
+                    .collect(),
             ),
             ..Default::default()
         };
@@ -1146,21 +1153,20 @@ mod tests {
     fn when_field_eq_matches() {
         let hook = HookConfig {
             on: "*".into(),
-            when_field_eq: Some(
-                [("branch".into(), "main".into())].into_iter().collect(),
-            ),
+            when_field_eq: Some([("branch".into(), "main".into())].into_iter().collect()),
             ..Default::default()
         };
-        assert!(field_filters_allow(&hook, &event_with_fields(&[("branch", "main")])));
+        assert!(field_filters_allow(
+            &hook,
+            &event_with_fields(&[("branch", "main")])
+        ));
     }
 
     #[test]
     fn when_field_eq_rejects() {
         let hook = HookConfig {
             on: "*".into(),
-            when_field_eq: Some(
-                [("branch".into(), "main".into())].into_iter().collect(),
-            ),
+            when_field_eq: Some([("branch".into(), "main".into())].into_iter().collect()),
             ..Default::default()
         };
         assert!(!field_filters_allow(
@@ -1173,9 +1179,7 @@ mod tests {
     fn when_field_eq_missing_field_blocks() {
         let hook = HookConfig {
             on: "*".into(),
-            when_field_eq: Some(
-                [("branch".into(), "main".into())].into_iter().collect(),
-            ),
+            when_field_eq: Some([("branch".into(), "main".into())].into_iter().collect()),
             ..Default::default()
         };
         assert!(!field_filters_allow(&hook, &event_with_fields(&[])));
@@ -1188,7 +1192,9 @@ mod tests {
         let hook = HookConfig {
             on: "*".into(),
             when_field_glob: Some(
-                [("branch".into(), "feature/*".into())].into_iter().collect(),
+                [("branch".into(), "feature/*".into())]
+                    .into_iter()
+                    .collect(),
             ),
             ..Default::default()
         };
@@ -1203,7 +1209,9 @@ mod tests {
         let hook = HookConfig {
             on: "*".into(),
             when_field_glob: Some(
-                [("branch".into(), "feature/*".into())].into_iter().collect(),
+                [("branch".into(), "feature/*".into())]
+                    .into_iter()
+                    .collect(),
             ),
             ..Default::default()
         };
@@ -1218,7 +1226,9 @@ mod tests {
         let hook = HookConfig {
             on: "*".into(),
             when_field_glob: Some(
-                [("branch".into(), "feature/*".into())].into_iter().collect(),
+                [("branch".into(), "feature/*".into())]
+                    .into_iter()
+                    .collect(),
             ),
             ..Default::default()
         };
@@ -1231,9 +1241,7 @@ mod tests {
     fn when_field_gte_passes_when_value_at_or_above() {
         let hook = HookConfig {
             on: "*".into(),
-            when_field_gte: Some(
-                [("duration_ms".into(), 60_000.0)].into_iter().collect(),
-            ),
+            when_field_gte: Some([("duration_ms".into(), 60_000.0)].into_iter().collect()),
             ..Default::default()
         };
         assert!(field_filters_allow(
@@ -1250,9 +1258,7 @@ mod tests {
     fn when_field_gte_blocks_below() {
         let hook = HookConfig {
             on: "*".into(),
-            when_field_gte: Some(
-                [("duration_ms".into(), 60_000.0)].into_iter().collect(),
-            ),
+            when_field_gte: Some([("duration_ms".into(), 60_000.0)].into_iter().collect()),
             ..Default::default()
         };
         assert!(!field_filters_allow(
@@ -1265,9 +1271,7 @@ mod tests {
     fn when_field_gte_blocks_unparseable_value() {
         let hook = HookConfig {
             on: "*".into(),
-            when_field_gte: Some(
-                [("duration_ms".into(), 60_000.0)].into_iter().collect(),
-            ),
+            when_field_gte: Some([("duration_ms".into(), 60_000.0)].into_iter().collect()),
             ..Default::default()
         };
         assert!(!field_filters_allow(
@@ -1280,9 +1284,7 @@ mod tests {
     fn when_field_gte_missing_field_blocks() {
         let hook = HookConfig {
             on: "*".into(),
-            when_field_gte: Some(
-                [("duration_ms".into(), 60_000.0)].into_iter().collect(),
-            ),
+            when_field_gte: Some([("duration_ms".into(), 60_000.0)].into_iter().collect()),
             ..Default::default()
         };
         assert!(!field_filters_allow(&hook, &event_with_fields(&[])));
@@ -1294,9 +1296,7 @@ mod tests {
     fn when_field_lte_passes_when_value_at_or_below() {
         let hook = HookConfig {
             on: "*".into(),
-            when_field_lte: Some(
-                [("error_count".into(), 10.0)].into_iter().collect(),
-            ),
+            when_field_lte: Some([("error_count".into(), 10.0)].into_iter().collect()),
             ..Default::default()
         };
         assert!(field_filters_allow(
@@ -1313,9 +1313,7 @@ mod tests {
     fn when_field_lte_blocks_above() {
         let hook = HookConfig {
             on: "*".into(),
-            when_field_lte: Some(
-                [("error_count".into(), 10.0)].into_iter().collect(),
-            ),
+            when_field_lte: Some([("error_count".into(), 10.0)].into_iter().collect()),
             ..Default::default()
         };
         assert!(!field_filters_allow(
@@ -1328,9 +1326,7 @@ mod tests {
     fn when_field_lte_missing_field_blocks() {
         let hook = HookConfig {
             on: "*".into(),
-            when_field_lte: Some(
-                [("error_count".into(), 10.0)].into_iter().collect(),
-            ),
+            when_field_lte: Some([("error_count".into(), 10.0)].into_iter().collect()),
             ..Default::default()
         };
         assert!(!field_filters_allow(&hook, &event_with_fields(&[])));
@@ -1342,12 +1338,8 @@ mod tests {
     fn multiple_field_filters_all_must_match() {
         let hook = HookConfig {
             on: "*".into(),
-            when_field_eq: Some(
-                [("branch".into(), "main".into())].into_iter().collect(),
-            ),
-            when_field_gte: Some(
-                [("duration_ms".into(), 60_000.0)].into_iter().collect(),
-            ),
+            when_field_eq: Some([("branch".into(), "main".into())].into_iter().collect()),
+            when_field_gte: Some([("duration_ms".into(), 60_000.0)].into_iter().collect()),
             ..Default::default()
         };
         // Both satisfied → allowed.
@@ -1371,9 +1363,7 @@ mod tests {
     fn field_filter_blocks_even_when_on_matches() {
         let hook = HookConfig {
             on: "*".into(),
-            when_field_eq: Some(
-                [("branch".into(), "main".into())].into_iter().collect(),
-            ),
+            when_field_eq: Some([("branch".into(), "main".into())].into_iter().collect()),
             ..Default::default()
         };
         // `on: "*"` matches, but the field filter rejects the event.
@@ -1459,9 +1449,7 @@ mod tests {
         // Field filter blocks + custom allows → blocked.
         let hook_blocked_by_field = HookConfig {
             on: "*".into(),
-            when_field_eq: Some(
-                [("branch".into(), "main".into())].into_iter().collect(),
-            ),
+            when_field_eq: Some([("branch".into(), "main".into())].into_iter().collect()),
             ..Default::default()
         };
         let runner = HookRunner::new_with_filter(&[hook_blocked_by_field], Arc::new(AlwaysAllow));
@@ -1469,9 +1457,7 @@ mod tests {
         assert!(!runner.hook_allows(
             &HookConfig {
                 on: "*".into(),
-                when_field_eq: Some(
-                    [("branch".into(), "main".into())].into_iter().collect(),
-                ),
+                when_field_eq: Some([("branch".into(), "main".into())].into_iter().collect(),),
                 ..Default::default()
             },
             &event_with_fields(&[("branch", "dev")])
@@ -1480,16 +1466,14 @@ mod tests {
         // Field filter allows + custom blocks → blocked.
         let hook_good_fields = HookConfig {
             on: "*".into(),
-            when_field_eq: Some(
-                [("branch".into(), "main".into())].into_iter().collect(),
-            ),
+            when_field_eq: Some([("branch".into(), "main".into())].into_iter().collect()),
             ..Default::default()
         };
-        let runner2 = HookRunner::new_with_filter(&[hook_good_fields.clone()], Arc::new(NeverAllow));
-        assert!(!runner2.hook_allows(
-            &hook_good_fields,
-            &event_with_fields(&[("branch", "main")])
-        ));
+        let runner2 = HookRunner::new_with_filter(
+            std::slice::from_ref(&hook_good_fields),
+            Arc::new(NeverAllow),
+        );
+        assert!(!runner2.hook_allows(&hook_good_fields, &event_with_fields(&[("branch", "main")])));
     }
 
     #[test]
