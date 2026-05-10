@@ -28,15 +28,19 @@
 //! HookRunner::new(&hooks).fire(&event);
 //! ```
 
+pub mod dedup;
 pub mod error;
 pub mod event;
 pub mod hooks;
 pub mod push;
 
+pub use dedup::DedupStore;
 pub use error::{NotifyError, Result};
 pub use event::{Event, Severity};
 pub use hooks::{HookConfig, HookRunner};
 pub use push::{PushSubscriptionStore, Subscription};
 
+#[cfg(any(test, feature = "test-utils"))]
+pub use dedup::HashSetDedupStore;
 #[cfg(any(test, feature = "test-utils"))]
 pub use push::InMemoryPushStore;
