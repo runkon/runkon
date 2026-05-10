@@ -82,6 +82,63 @@ use std::collections::HashMap;
 
 When no store is attached (`HookRunner::new` without `with_dedup_store`), `fire_with_dedup` behaves identically to `fire` — no dedup guard, every call fires.
 
+## Filtering
+
+### Declarative field predicates
+
+`HookConfig` supports five optional `when_field_*` predicates that match against `Event::fields`. All predicates AND together with the `on:` glob — every constraint must pass for the hook to fire.
+
+| Field | Semantics |
+|---|---|
+| `when_field_in` | Field value must be one of the listed strings |
+| `when_field_eq` | Field value must equal the given string exactly |
+| `when_field_glob` | Field value must match the given glob (`*`, `prefix.*`, `prefix/*`) |
+| `when_field_gte` | Field value, parsed as `f64`, must be ≥ the threshold |
+| `when_field_lte` | Field value, parsed as `f64`, must be ≤ the threshold |
+
+**Missing-field semantics:** if a constrained field is absent from `Event::fields`, the hook does **not** fire. An unconstrained hook (no `when_field_*` set) fires for everything that matches `on:`.
+
+Example — fire only on `workflow_run.completed` events for `main`, in the `runkon/runkon` repo, when the run took ≥ 60 seconds:
+
+```toml
+[[hooks]]
+on = "workflow_run.completed"
+url = "https://example.com/notify"
+
+[hooks.when_field_eq]
+branch = "main"
+repo   = "runkon/runkon"
+
+[hooks.when_field_gte]
+duration_ms = 60000
+```
+
+Conductor (or any consumer) maps its domain fields — `branch`, `repo`, `step`, etc. — into `Event::fields` before calling `fire`. The runner does the filtering; no pre-`fire()` resolver needed.
+
+### Custom filter escape hatch
+
+For predicates that don't fit the declarative form, implement the `HookFilter` trait:
+
+```rust
+use std::sync::Arc;
+use runkon_notify::{HookConfig, HookFilter, HookRunner, Event, Severity};
+use std::collections::HashMap;
+
+struct OnlyRootWorkflows;
+
+impl HookFilter for OnlyRootWorkflows {
+    fn allow(&self, _hook: &HookConfig, event: &Event) -> bool {
+        event.fields.get("is_root").map(|v| v == "true").unwrap_or(false)
+    }
+}
+
+# let hooks: Vec<HookConfig> = vec![];
+let runner = HookRunner::new_with_filter(&hooks, Arc::new(OnlyRootWorkflows));
+// or: HookRunner::new(&hooks).with_filter(Arc::new(OnlyRootWorkflows))
+```
+
+The custom filter is ANDed with `on:` and all `when_field_*` predicates — all three must allow for the hook to fire. Implementations must be `Send + Sync` because hooks execute in spawned threads.
+
 ## Hook-script protocol
 
 Shell hooks are invoked via `sh -c <command>` with the following environment variables injected. All keys are `RUNKON_NOTIFY_*`-prefixed.
