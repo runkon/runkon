@@ -1,0 +1,9 @@
+name: gemini-cli-demo
+description: Minimal workflow exercising the Gemini CLI recipe via CliRuntime.
+
+steps:
+  - name: ask-gemini
+    type: agent
+    agent: sample-agent-gemini
+    inputs:
+      prompt: "What is the capital of France?"

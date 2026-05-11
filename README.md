@@ -17,6 +17,10 @@ Portable workflow execution engine and supporting harness crates for building ag
 
 Future vendor integrations (`runkon-openai`, `runkon-codex`, etc.) follow the same shape — depend on `runkon-flow`/`runkon-flow-executors`/`runkon-runtimes`, export vendor-specific executors.
 
+## Recipes
+
+- **Gemini CLI** — see [docs/recipes/gemini-cli.md](docs/recipes/gemini-cli.md) for a ready-to-use `CliRuntime` binding and the Phase 2 `GeminiRuntime` (stream-json, per-turn telemetry).
+
 Status: pre-1.0 alpha. APIs may change between minor versions until 0.1.0 stable.
 
 ## Build

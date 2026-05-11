@@ -12,7 +12,7 @@ Portable agent runtime harness — spawn, poll, and cancel agents without depend
 `runkon-runtimes` provides the lifecycle primitives needed to run an agent process and observe its progress:
 
 - **`AgentRuntime` trait** — the common shape of "spawn, poll, cancel"
-- **Built-in runtimes** — `cli` (generic CLI tool), `script` (shell-script step). Vendor-specific runtimes (Claude CLI, Gemini CLI, …) live in their respective vendor crates and are wired in via the `RuntimeResolver` trait.
+- **Built-in runtimes** — `cli` (generic CLI tool), `script` (shell-script step). Vendor-specific runtimes (Claude CLI, Gemini CLI, …) live in their respective vendor crates and are wired in via the `RuntimeResolver` trait. See [docs/recipes/gemini-cli.md](../docs/recipes/gemini-cli.md) for a ready-to-use Gemini binding via the `cli` runtime.
 - **`RunTracker`** — process liveness + last-event timestamp, with stall detection
 - **`RunEventSink`** — streaming output capture during agent execution
 
