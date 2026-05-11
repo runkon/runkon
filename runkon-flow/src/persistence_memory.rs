@@ -8,6 +8,7 @@ use chrono::Utc;
 
 use crate::cancellation_reason::CancellationReason;
 use crate::engine_error::EngineError;
+use crate::extensions::Extensions;
 use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
 use crate::traits::gate_approval_store::{
     gate_approval_state_from_fields, GateApprovalState, GateApprovalStore,
@@ -15,7 +16,6 @@ use crate::traits::gate_approval_store::{
 use crate::traits::persistence::{
     FanOutItemStatus, FanOutItemUpdate, NewRun, NewStep, StepUpdate, WorkflowPersistence,
 };
-use crate::extensions::Extensions;
 use crate::types::{FanOutItemRow, WorkflowRun, WorkflowRunStep};
 
 struct InMemoryStore {

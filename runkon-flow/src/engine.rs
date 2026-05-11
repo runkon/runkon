@@ -5,10 +5,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::cancellation::CancellationToken;
 use crate::constants::FLOW_OUTPUT_INSTRUCTION;
-use crate::extensions::{Extensions, LlmRunMetrics};
 use crate::dsl::{InputType, OnFail, WorkflowDef, WorkflowNode};
 use crate::engine_error::{EngineError, Result};
 use crate::events::{EngineEvent, EventSink};
+use crate::extensions::{Extensions, LlmRunMetrics};
 use crate::output_schema::OutputSchema;
 use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
 use crate::traits::action_executor::ActionRegistry;
@@ -520,8 +520,7 @@ pub fn run_workflow_engine(
     let mut result_extensions = Extensions::default();
     if state.has_llm_metrics {
         let metrics = LlmRunMetrics {
-            total_input_tokens: (state.total_input_tokens != 0)
-                .then_some(state.total_input_tokens),
+            total_input_tokens: (state.total_input_tokens != 0).then_some(state.total_input_tokens),
             total_output_tokens: (state.total_output_tokens != 0)
                 .then_some(state.total_output_tokens),
             total_cache_read_input_tokens: (state.total_cache_read_input_tokens != 0)
@@ -1215,7 +1214,10 @@ mod tests {
         assert_eq!(child.total_output_tokens, 0);
         assert_eq!(child.total_cache_read_input_tokens, 0);
         assert_eq!(child.total_cache_creation_input_tokens, 0);
-        assert!(!child.has_llm_metrics, "has_llm_metrics should be reset in fork_child");
+        assert!(
+            !child.has_llm_metrics,
+            "has_llm_metrics should be reset in fork_child"
+        );
         assert!(child.last_gate_feedback.is_none());
         assert!(child.block_output.is_none());
         assert!(child.block_with.is_empty());

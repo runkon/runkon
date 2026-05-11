@@ -14,6 +14,7 @@ use rusqlite::{named_params, Connection, OptionalExtension};
 use crate::cancellation_reason::CancellationReason;
 use crate::constants::{RUN_COLUMNS, STEP_COLUMNS, TERMINAL_STATUSES_SQL};
 use crate::engine_error::EngineError;
+use crate::extensions::Extensions;
 use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
 use crate::traits::gate_approval_store::{
     gate_approval_state_from_fields, GateApprovalState, GateApprovalStore,
@@ -22,7 +23,6 @@ use crate::traits::persistence::{
     FanOutItemRow, FanOutItemStatus, FanOutItemUpdate, NewRun, NewStep, StepUpdate,
     WorkflowPersistence,
 };
-use crate::extensions::Extensions;
 use crate::types::{extract_workflow_title, BlockedOn, WorkflowRun, WorkflowRunStep};
 
 /// `s.`-prefixed variant of [`STEP_COLUMNS`] for queries that JOIN additional
