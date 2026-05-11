@@ -206,8 +206,7 @@ printf '{{"response": "ok"}}\n'
     // Give the stub a moment to flush the file before reading.
     std::thread::sleep(Duration::from_millis(50));
 
-    let captured = std::fs::read_to_string(&args_file)
-        .unwrap_or_default();
+    let captured = std::fs::read_to_string(&args_file).unwrap_or_default();
 
     let args: Vec<&str> = captured.lines().collect();
     let has_resume_flag = args.contains(&"--resume");

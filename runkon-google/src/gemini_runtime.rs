@@ -115,8 +115,7 @@ impl AgentRuntime for GeminiRuntime {
             })?;
 
             *self.handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(h);
-            *self.tracker.lock().unwrap_or_else(|e| e.into_inner()) =
-                Some(request.tracker.clone());
+            *self.tracker.lock().unwrap_or_else(|e| e.into_inner()) = Some(request.tracker.clone());
             *self.event_sink.lock().unwrap_or_else(|e| e.into_inner()) =
                 Some(request.event_sink.clone());
             Ok(())
@@ -293,9 +292,7 @@ fn poll_unix(
         .unwrap_or_else(|e| e.into_inner())
         .take()
         .ok_or_else(|| {
-            PollError::Failed(
-                "GeminiRuntime::poll called before spawn (tracker missing)".into(),
-            )
+            PollError::Failed("GeminiRuntime::poll called before spawn (tracker missing)".into())
         })?;
 
     let event_sink = rt
@@ -304,9 +301,7 @@ fn poll_unix(
         .unwrap_or_else(|e| e.into_inner())
         .take()
         .ok_or_else(|| {
-            PollError::Failed(
-                "GeminiRuntime::poll called before spawn (event_sink missing)".into(),
-            )
+            PollError::Failed("GeminiRuntime::poll called before spawn (event_sink missing)".into())
         })?;
 
     let pid = handle.pid();
@@ -390,9 +385,7 @@ fn poll_unix(
         DrainOutcome::Completed => tracker
             .get_run(run_id)
             .map_err(|e| PollError::Failed(format!("DB error after drain: {e}")))?
-            .ok_or_else(|| {
-                PollError::Failed(format!("run {run_id} not found in DB after drain"))
-            }),
+            .ok_or_else(|| PollError::Failed(format!("run {run_id} not found in DB after drain"))),
         DrainOutcome::NoResult => {
             if let Err(e) = tracker.mark_failed_if_running(run_id, "agent exited without result") {
                 tracing::warn!(
@@ -405,9 +398,7 @@ fn poll_unix(
             let msg = format!("stall_timeout: no events for {}s", elapsed.as_secs());
             tracing::warn!("GeminiRuntime: {msg} for run {run_id}");
             if let Err(e) = tracker.mark_failed_if_running(run_id, &msg) {
-                tracing::warn!(
-                    "GeminiRuntime: failed to persist stall failure for {run_id}: {e}"
-                );
+                tracing::warn!("GeminiRuntime: failed to persist stall failure for {run_id}: {e}");
             }
             Err(PollError::Failed(msg))
         }
@@ -436,12 +427,7 @@ fn mark_cancelled_via_tracker(
     }
 }
 
-fn mark_cancelled_with_reason(
-    tracker: &dyn RunTracker,
-    run_id: &str,
-    context: &str,
-    reason: &str,
-) {
+fn mark_cancelled_with_reason(tracker: &dyn RunTracker, run_id: &str, context: &str, reason: &str) {
     if let Err(e) = tracker.mark_cancelled(run_id) {
         tracing::warn!("{context}: failed to mark run {run_id} cancelled on {reason}: {e}");
     }
@@ -510,17 +496,12 @@ mod tests {
         }
     }
 
-    fn make_runtime(
-        stall_threshold: Option<Duration>,
-        max_turns: Option<u32>,
-    ) -> GeminiRuntime {
+    fn make_runtime(stall_threshold: Option<Duration>, max_turns: Option<u32>) -> GeminiRuntime {
         GeminiRuntime::new(GeminiRuntimeOptions {
             binary_path: PathBuf::from("/nonexistent/gemini"),
             env: HashMap::new(),
             permission_mode: PermissionMode::Default,
-            log_path_for_run: Arc::new(|run_id| {
-                std::env::temp_dir().join(format!("{run_id}.log"))
-            }),
+            log_path_for_run: Arc::new(|run_id| std::env::temp_dir().join(format!("{run_id}.log"))),
             stall_threshold,
             max_turns,
         })
@@ -582,7 +563,11 @@ mod tests {
             r#"{"type":"message","role":"assistant","content":"hi there","delta":true,"timestamp":"2024-01-01T00:00:00Z"}"#,
         ]);
         let events = sink.events.lock().unwrap();
-        assert_eq!(events.len(), 0, "assistant message must be ignored regardless of delta flag");
+        assert_eq!(
+            events.len(),
+            0,
+            "assistant message must be ignored regardless of delta flag"
+        );
     }
 
     #[test]
@@ -637,7 +622,10 @@ mod tests {
                 assert_eq!(*input_tokens, Some(100));
                 assert_eq!(*output_tokens, Some(50));
                 assert_eq!(*cache_read_input_tokens, Some(20));
-                assert_eq!(*cache_creation_input_tokens, None, "Gemini doesn't report cache creation");
+                assert_eq!(
+                    *cache_creation_input_tokens, None,
+                    "Gemini doesn't report cache creation"
+                );
                 assert_eq!(*num_turns, Some(2));
                 assert_eq!(*duration_ms, Some(1234));
                 assert_eq!(*cost_usd, None, "Gemini reports tokens only, no cost");
@@ -733,6 +721,7 @@ mod tests {
 
     /// Helper: inject a Unix child that outputs Gemini stream-json events.
     #[cfg(unix)]
+    #[allow(dead_code)]
     fn inject_script_child(runtime: &GeminiRuntime) -> (u32, tempfile::NamedTempFile) {
         use std::io::Write as _;
         use std::os::unix::process::CommandExt;
@@ -816,9 +805,7 @@ mod tests {
             binary_path: script_path.clone(),
             env: HashMap::new(),
             permission_mode: PermissionMode::Default,
-            log_path_for_run: Arc::new(|run_id| {
-                std::env::temp_dir().join(format!("{run_id}.log"))
-            }),
+            log_path_for_run: Arc::new(|run_id| std::env::temp_dir().join(format!("{run_id}.log"))),
             stall_threshold: None,
             max_turns: None,
         });
@@ -874,9 +861,7 @@ mod tests {
             binary_path: script_path.clone(),
             env: HashMap::new(),
             permission_mode: PermissionMode::Other(Cow::Borrowed("yolo")),
-            log_path_for_run: Arc::new(|run_id| {
-                std::env::temp_dir().join(format!("{run_id}.log"))
-            }),
+            log_path_for_run: Arc::new(|run_id| std::env::temp_dir().join(format!("{run_id}.log"))),
             stall_threshold: None,
             max_turns: None,
         });
@@ -924,9 +909,7 @@ mod tests {
             binary_path: script_path.clone(),
             env: HashMap::new(),
             permission_mode: PermissionMode::Default,
-            log_path_for_run: Arc::new(|run_id| {
-                std::env::temp_dir().join(format!("{run_id}.log"))
-            }),
+            log_path_for_run: Arc::new(|run_id| std::env::temp_dir().join(format!("{run_id}.log"))),
             stall_threshold: None,
             max_turns: None,
         });

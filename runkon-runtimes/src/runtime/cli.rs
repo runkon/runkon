@@ -571,9 +571,7 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
         let (runtime, mut request, workspace) =
             make_request_with_sink("extra-args-test", script.to_str().unwrap(), sink.clone());
-        request.extra_cli_args = vec![
-            (Cow::Borrowed("approval-mode"), Cow::Borrowed("yolo")),
-        ];
+        request.extra_cli_args = vec![(Cow::Borrowed("approval-mode"), Cow::Borrowed("yolo"))];
 
         runtime.spawn_validated(&request).unwrap();
         let _ = runtime.poll("extra-args-test", None, std::time::Duration::from_secs(5));
