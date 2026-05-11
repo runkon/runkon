@@ -40,6 +40,7 @@ pub use engine::{ChildWorkflowContext, ChildWorkflowRunner};
 pub use events::{EngineEvent, EngineEventData, EventSink};
 pub use extensions::ClaudeActionParams;
 pub use extensions::Extensions;
+pub use extensions::LlmRunMetrics;
 pub use flow_engine::{ChildRunInput, FlowEngine, FlowEngineBuilder, RunInput};
 pub use traits::action_executor::ActionRegistry;
 pub use traits::gate_resolver::GateResolverRegistry;

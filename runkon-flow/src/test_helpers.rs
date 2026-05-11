@@ -148,6 +148,7 @@ pub fn make_test_execution_state(
         total_output_tokens: 0,
         total_cache_read_input_tokens: 0,
         total_cache_creation_input_tokens: 0,
+        has_llm_metrics: false,
         last_gate_feedback: None,
         block_output: None,
         block_with: vec![],

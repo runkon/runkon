@@ -8,6 +8,7 @@ use crate::constants::FLOW_OUTPUT_INSTRUCTION;
 use crate::dsl::{InputType, OnFail, WorkflowDef, WorkflowNode};
 use crate::engine_error::{EngineError, Result};
 use crate::events::{EngineEvent, EventSink};
+use crate::extensions::{Extensions, LlmRunMetrics};
 use crate::output_schema::OutputSchema;
 use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
 use crate::traits::action_executor::ActionRegistry;
@@ -59,6 +60,7 @@ pub struct ExecutionState {
     pub total_output_tokens: i64,
     pub total_cache_read_input_tokens: i64,
     pub total_cache_creation_input_tokens: i64,
+    pub has_llm_metrics: bool,
     pub last_gate_feedback: Option<String>,
     pub block_output: Option<String>,
     pub block_with: Vec<String>,
@@ -275,6 +277,7 @@ impl ExecutionState {
         child.total_output_tokens = 0;
         child.total_cache_read_input_tokens = 0;
         child.total_cache_creation_input_tokens = 0;
+        child.has_llm_metrics = false;
         child.last_gate_feedback = None;
         child.block_output = None;
         child.block_with.clear();
@@ -514,17 +517,38 @@ pub fn run_workflow_engine(
         state.total_duration_ms as f64 / 1000.0
     );
 
+    let mut result_extensions = Extensions::default();
+    if state.has_llm_metrics {
+        let metrics = LlmRunMetrics {
+            total_input_tokens: (state.total_input_tokens != 0).then_some(state.total_input_tokens),
+            total_output_tokens: (state.total_output_tokens != 0)
+                .then_some(state.total_output_tokens),
+            total_cache_read_input_tokens: (state.total_cache_read_input_tokens != 0)
+                .then_some(state.total_cache_read_input_tokens),
+            total_cache_creation_input_tokens: (state.total_cache_creation_input_tokens != 0)
+                .then_some(state.total_cache_creation_input_tokens),
+            total_turns: (state.total_turns != 0).then_some(state.total_turns),
+            total_cost_usd: (state.total_cost != 0.0).then_some(state.total_cost),
+            model: state.model.clone(),
+        };
+        if metrics.total_input_tokens.is_some()
+            || metrics.total_output_tokens.is_some()
+            || metrics.total_cache_read_input_tokens.is_some()
+            || metrics.total_cache_creation_input_tokens.is_some()
+            || metrics.total_turns.is_some()
+            || metrics.total_cost_usd.is_some()
+            || metrics.model.is_some()
+        {
+            result_extensions.insert(metrics);
+        }
+    }
+
     Ok(WorkflowResult {
         workflow_run_id: wf_run_id,
         workflow_name: workflow.name.clone(),
         all_succeeded: state.all_succeeded,
-        total_cost: state.total_cost,
-        total_turns: state.total_turns,
         total_duration_ms: state.total_duration_ms,
-        total_input_tokens: state.total_input_tokens,
-        total_output_tokens: state.total_output_tokens,
-        total_cache_read_input_tokens: state.total_cache_read_input_tokens,
-        total_cache_creation_input_tokens: state.total_cache_creation_input_tokens,
+        extensions: result_extensions,
     })
 }
 
@@ -649,7 +673,7 @@ pub fn record_step_success(
         &success.metadata,
         metadata_keys::CACHE_CREATION_INPUT_TOKENS,
     );
-    let _metrics_changed = state.accumulate_metrics(
+    if state.accumulate_metrics(
         cost_usd,
         num_turns,
         duration_ms,
@@ -657,7 +681,9 @@ pub fn record_step_success(
         output_tokens,
         cache_read,
         cache_creation,
-    );
+    ) {
+        state.has_llm_metrics = true;
+    }
 
     let step_result = StepResult::completed(&success);
     state.step_results.insert(step_key, step_result);
@@ -1141,6 +1167,7 @@ mod tests {
             total_output_tokens: 200,
             total_cache_read_input_tokens: 50,
             total_cache_creation_input_tokens: 25,
+            has_llm_metrics: false,
             last_gate_feedback: Some("feedback".to_string()),
             block_output: Some("output".to_string()),
             block_with: vec!["with".to_string()],
@@ -1187,6 +1214,10 @@ mod tests {
         assert_eq!(child.total_output_tokens, 0);
         assert_eq!(child.total_cache_read_input_tokens, 0);
         assert_eq!(child.total_cache_creation_input_tokens, 0);
+        assert!(
+            !child.has_llm_metrics,
+            "has_llm_metrics should be reset in fork_child"
+        );
         assert!(child.last_gate_feedback.is_none());
         assert!(child.block_output.is_none());
         assert!(child.block_with.is_empty());
@@ -1272,6 +1303,7 @@ mod tests {
             total_output_tokens: 0,
             total_cache_read_input_tokens: 0,
             total_cache_creation_input_tokens: 0,
+            has_llm_metrics: false,
             last_gate_feedback: None,
             block_output: None,
             block_with: vec![],
