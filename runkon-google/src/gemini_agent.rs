@@ -601,9 +601,7 @@ mod tests {
             "gemini-local".to_string(),
             rt_config_with_models(&["gemini-1.5-pro"]),
         );
-        assert!(
-            check_supported_models("gemini-local", "my-agent", None, None, &runtimes).is_ok()
-        );
+        assert!(check_supported_models("gemini-local", "my-agent", None, None, &runtimes).is_ok());
     }
 
     #[test]

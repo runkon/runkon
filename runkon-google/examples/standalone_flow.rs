@@ -77,7 +77,5 @@ fn main() {
         .build()
         .expect("FlowEngine construction failed");
 
-    println!(
-        "runkon-google is self-contained — FlowEngine built with zero conductor_* imports"
-    );
+    println!("runkon-google is self-contained — FlowEngine built with zero conductor_* imports");
 }
