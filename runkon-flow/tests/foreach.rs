@@ -511,13 +511,8 @@ impl runkon_flow::engine::ChildWorkflowRunner for InputCapturingRunner {
             workflow_run_id: format!("mock-run-{item_id}"),
             workflow_name: workflow_name.to_string(),
             all_succeeded: true,
-            total_cost: 0.0,
-            total_turns: 0,
             total_duration_ms: 0,
-            total_input_tokens: 0,
-            total_output_tokens: 0,
-            total_cache_read_input_tokens: 0,
-            total_cache_creation_input_tokens: 0,
+            extensions: Default::default(),
         })
     }
 

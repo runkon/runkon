@@ -9,8 +9,7 @@ pub const STEP_ROLE_AGENT: &str = "agent";
 pub const RUN_COLUMNS: &str = "id, workflow_name, parent_run_id, status, dry_run, trigger, \
      started_at, ended_at, result_summary, definition_snapshot, inputs, \
      parent_workflow_run_id, iteration, blocked_on, \
-     total_input_tokens, total_output_tokens, total_cache_read_input_tokens, \
-     total_cache_creation_input_tokens, total_turns, total_cost_usd, total_duration_ms, model, \
+     total_duration_ms, \
      error, dismissed, workflow_title, owner_token, lease_until, generation";
 
 /// SQL fragment listing every terminal step status, for use in `IN`/`NOT IN` clauses.

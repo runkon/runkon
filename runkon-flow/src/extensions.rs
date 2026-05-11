@@ -12,6 +12,14 @@ pub struct Extensions {
     map: HashMap<TypeId, Arc<dyn Any + Send + Sync>>,
 }
 
+impl std::fmt::Debug for Extensions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Extensions")
+            .field("len", &self.map.len())
+            .finish()
+    }
+}
+
 impl Extensions {
     /// Insert a value of type `T`, replacing any previously inserted value of the same type.
     pub fn insert<T: Any + Send + Sync + 'static>(&mut self, value: T) {
@@ -31,6 +39,23 @@ impl Extensions {
 /// not on the shared `ActionParams` surface.
 pub struct ClaudeActionParams {
     pub max_turns: Option<u32>,
+}
+
+/// LLM-runtime rollup metrics, stored in the `Extensions` map on both
+/// `WorkflowRun` and `WorkflowResult`. Only present when at least one
+/// LLM-backed step ran and reported metrics via `metadata_keys`.
+///
+/// `model` is included here rather than on the harness-neutral `WorkflowRun`
+/// because every LLM has a model identifier while non-LLM executors do not.
+/// (Issue #2987 may revisit if a non-LLM "model" concept emerges.)
+pub struct LlmRunMetrics {
+    pub total_input_tokens: Option<i64>,
+    pub total_output_tokens: Option<i64>,
+    pub total_cache_read_input_tokens: Option<i64>,
+    pub total_cache_creation_input_tokens: Option<i64>,
+    pub total_turns: Option<i64>,
+    pub total_cost_usd: Option<f64>,
+    pub model: Option<String>,
 }
 
 #[cfg(test)]
@@ -89,5 +114,29 @@ mod tests {
             .get::<ClaudeActionParams>()
             .expect("should find ClaudeActionParams");
         assert_eq!(v.max_turns, Some(50));
+    }
+
+    #[test]
+    fn llm_run_metrics_round_trips() {
+        let mut ext = Extensions::default();
+        ext.insert(LlmRunMetrics {
+            total_input_tokens: Some(100),
+            total_output_tokens: Some(200),
+            total_cache_read_input_tokens: Some(50),
+            total_cache_creation_input_tokens: Some(25),
+            total_turns: Some(3),
+            total_cost_usd: Some(0.05),
+            model: Some("claude-opus-4".to_string()),
+        });
+        let v = ext
+            .get::<LlmRunMetrics>()
+            .expect("should find LlmRunMetrics");
+        assert_eq!(v.total_input_tokens, Some(100));
+        assert_eq!(v.total_output_tokens, Some(200));
+        assert_eq!(v.total_cache_read_input_tokens, Some(50));
+        assert_eq!(v.total_cache_creation_input_tokens, Some(25));
+        assert_eq!(v.total_turns, Some(3));
+        assert_eq!(v.total_cost_usd, Some(0.05));
+        assert_eq!(v.model.as_deref(), Some("claude-opus-4"));
     }
 }

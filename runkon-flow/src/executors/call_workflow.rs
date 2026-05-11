@@ -4,6 +4,7 @@ use crate::engine::{
     ExecutionState,
 };
 use crate::engine_error::{EngineError, Result};
+use crate::extensions::LlmRunMetrics;
 use crate::prompt_builder::build_variable_map;
 use crate::traits::persistence::StepUpdate;
 
@@ -85,36 +86,38 @@ pub fn execute_call_workflow(
                 )),
                 metadata: {
                     use crate::constants::metadata_keys;
-                    std::collections::HashMap::from([
-                        (
-                            metadata_keys::COST_USD.to_string(),
-                            result.total_cost.to_string(),
-                        ),
-                        (
-                            metadata_keys::NUM_TURNS.to_string(),
-                            result.total_turns.to_string(),
-                        ),
-                        (
-                            metadata_keys::DURATION_MS.to_string(),
-                            result.total_duration_ms.to_string(),
-                        ),
-                        (
-                            metadata_keys::INPUT_TOKENS.to_string(),
-                            result.total_input_tokens.to_string(),
-                        ),
-                        (
-                            metadata_keys::OUTPUT_TOKENS.to_string(),
-                            result.total_output_tokens.to_string(),
-                        ),
-                        (
-                            metadata_keys::CACHE_READ_INPUT_TOKENS.to_string(),
-                            result.total_cache_read_input_tokens.to_string(),
-                        ),
-                        (
-                            metadata_keys::CACHE_CREATION_INPUT_TOKENS.to_string(),
-                            result.total_cache_creation_input_tokens.to_string(),
-                        ),
-                    ])
+                    let mut meta = std::collections::HashMap::new();
+                    meta.insert(
+                        metadata_keys::DURATION_MS.to_string(),
+                        result.total_duration_ms.to_string(),
+                    );
+                    if let Some(llm) = result.extensions.get::<LlmRunMetrics>() {
+                        if let Some(v) = llm.total_cost_usd {
+                            meta.insert(metadata_keys::COST_USD.to_string(), v.to_string());
+                        }
+                        if let Some(v) = llm.total_turns {
+                            meta.insert(metadata_keys::NUM_TURNS.to_string(), v.to_string());
+                        }
+                        if let Some(v) = llm.total_input_tokens {
+                            meta.insert(metadata_keys::INPUT_TOKENS.to_string(), v.to_string());
+                        }
+                        if let Some(v) = llm.total_output_tokens {
+                            meta.insert(metadata_keys::OUTPUT_TOKENS.to_string(), v.to_string());
+                        }
+                        if let Some(v) = llm.total_cache_read_input_tokens {
+                            meta.insert(
+                                metadata_keys::CACHE_READ_INPUT_TOKENS.to_string(),
+                                v.to_string(),
+                            );
+                        }
+                        if let Some(v) = llm.total_cache_creation_input_tokens {
+                            meta.insert(
+                                metadata_keys::CACHE_CREATION_INPUT_TOKENS.to_string(),
+                                v.to_string(),
+                            );
+                        }
+                    }
+                    meta
                 },
                 markers,
                 context,
@@ -168,12 +171,15 @@ pub fn execute_call_workflow(
                 &state.child_workflow_context(),
             ) {
                 Ok(result) if result.all_succeeded => {
-                    tracing::info!(
-                        "Sub-workflow '{}' resumed and completed: cost=${:.4}, {} turns",
-                        node.workflow,
-                        result.total_cost,
-                        result.total_turns,
-                    );
+                    {
+                        let llm = result.extensions.get::<LlmRunMetrics>();
+                        tracing::info!(
+                            "Sub-workflow '{}' resumed and completed: cost=${:.4}, {} turns",
+                            node.workflow,
+                            llm.as_ref().and_then(|m| m.total_cost_usd).unwrap_or(0.0),
+                            llm.as_ref().and_then(|m| m.total_turns).unwrap_or(0),
+                        );
+                    }
                     record_child_success(state, &step_id, &result, 0)?;
                     return Ok(());
                 }
@@ -309,12 +315,15 @@ pub fn execute_call_workflow(
         ) {
             Ok(result) => {
                 if result.all_succeeded {
-                    tracing::info!(
-                        "Sub-workflow '{}' completed: cost=${:.4}, {} turns",
-                        node.workflow,
-                        result.total_cost,
-                        result.total_turns,
-                    );
+                    {
+                        let llm = result.extensions.get::<LlmRunMetrics>();
+                        tracing::info!(
+                            "Sub-workflow '{}' completed: cost=${:.4}, {} turns",
+                            node.workflow,
+                            llm.as_ref().and_then(|m| m.total_cost_usd).unwrap_or(0.0),
+                            llm.as_ref().and_then(|m| m.total_turns).unwrap_or(0),
+                        );
+                    }
                     record_child_success(state, &step_id, &result, attempt)?;
                     return Ok(());
                 } else {

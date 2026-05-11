@@ -16,13 +16,8 @@ fn stub_result(run_id: &str, workflow_name: &str) -> WorkflowResult {
         workflow_run_id: run_id.to_string(),
         workflow_name: workflow_name.to_string(),
         all_succeeded: true,
-        total_cost: 0.0,
-        total_turns: 0,
         total_duration_ms: 0,
-        total_input_tokens: 0,
-        total_output_tokens: 0,
-        total_cache_read_input_tokens: 0,
-        total_cache_creation_input_tokens: 0,
+        extensions: Default::default(),
     }
 }
 

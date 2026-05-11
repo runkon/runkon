@@ -147,6 +147,7 @@ pub fn make_state(
         total_output_tokens: 0,
         total_cache_read_input_tokens: 0,
         total_cache_creation_input_tokens: 0,
+        has_llm_metrics: false,
         last_gate_feedback: None,
         block_output: None,
         block_with: vec![],
@@ -259,13 +260,8 @@ fn mock_workflow_result(item_id: &str, wf_name: &str, succeeded: bool) -> Workfl
         workflow_run_id: format!("mock-run-{}", item_id),
         workflow_name: wf_name.to_string(),
         all_succeeded: succeeded,
-        total_cost: 0.0,
-        total_turns: 0,
         total_duration_ms: 0,
-        total_input_tokens: 0,
-        total_output_tokens: 0,
-        total_cache_read_input_tokens: 0,
-        total_cache_creation_input_tokens: 0,
+        extensions: Default::default(),
     }
 }
 

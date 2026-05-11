@@ -15,6 +15,7 @@ use crate::traits::gate_approval_store::{
 use crate::traits::persistence::{
     FanOutItemStatus, FanOutItemUpdate, NewRun, NewStep, StepUpdate, WorkflowPersistence,
 };
+use crate::extensions::Extensions;
 use crate::types::{FanOutItemRow, WorkflowRun, WorkflowRunStep};
 
 struct InMemoryStore {
@@ -116,15 +117,9 @@ impl InMemoryWorkflowPersistence {
             iteration: 0,
             blocked_on: None,
             workflow_title: None,
-            total_input_tokens: None,
-            total_output_tokens: None,
-            total_cache_read_input_tokens: None,
-            total_cache_creation_input_tokens: None,
-            total_turns: None,
-            total_cost_usd: None,
             total_duration_ms: None,
-            model: None,
             dismissed: false,
+            extensions: Extensions::default(),
             owner_token: None,
             lease_until: None,
             generation: 0,
@@ -256,15 +251,9 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
             iteration: 0,
             blocked_on: None,
             workflow_title: None,
-            total_input_tokens: None,
-            total_output_tokens: None,
-            total_cache_read_input_tokens: None,
-            total_cache_creation_input_tokens: None,
-            total_turns: None,
-            total_cost_usd: None,
             total_duration_ms: None,
-            model: None,
             dismissed: false,
+            extensions: Extensions::default(),
             owner_token: None,
             lease_until: None,
             generation: 0,
