@@ -32,9 +32,7 @@ pub struct GeminiArgvRequest<'a> {
 
 /// Injectable argv builder for [`GeminiRuntime`].
 pub type ArgvBuilder = Arc<
-    dyn for<'a> Fn(
-            &'a GeminiArgvRequest<'a>,
-        ) -> std::result::Result<Vec<Cow<'static, str>>, String>
+    dyn for<'a> Fn(&'a GeminiArgvRequest<'a>) -> std::result::Result<Vec<Cow<'static, str>>, String>
         + Send
         + Sync,
 >;
@@ -223,16 +221,9 @@ impl AgentRuntime for GeminiRuntime {
 /// - `tool_result` → `Ignore` (debug-only)
 /// - `error`       → `Ignore` (non-fatal; warn-logged)
 /// - `result`      → `Terminal { Completed | Failed }`
+#[derive(Default)]
 pub struct GeminiLineEventParser {
     assistant_text: String,
-}
-
-impl Default for GeminiLineEventParser {
-    fn default() -> Self {
-        Self {
-            assistant_text: String::new(),
-        }
-    }
 }
 
 impl GeminiLineEventParser {
