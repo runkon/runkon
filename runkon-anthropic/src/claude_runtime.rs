@@ -4,14 +4,13 @@ use std::path::PathBuf;
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
 use std::time::Duration;
 
-use crate::error::{Result, RuntimeError};
-use crate::headless::DrainOutcome;
-use crate::permission::PermissionMode;
-use crate::process_utils;
-use crate::run::RunHandle;
-use crate::tracker::{RunEventSink, RunTracker};
-
-use super::{AgentRuntime, PollError, RuntimeRequest};
+use runkon_runtimes::error::{Result, RuntimeError};
+use runkon_runtimes::headless::{DrainOutcome, LineEventParser, ParseSignal};
+use runkon_runtimes::permission::PermissionMode;
+use runkon_runtimes::process_utils;
+use runkon_runtimes::run::RunHandle;
+use runkon_runtimes::runtime::{AgentRuntime, PollError, RuntimeRequest};
+use runkon_runtimes::tracker::{RunEventSink, RunTracker, RuntimeEvent};
 
 /// Per-spawn data passed to the injected argv builder.
 pub struct ClaudeArgvRequest<'a> {
@@ -57,7 +56,7 @@ pub struct ClaudeRuntimeOptions {
     /// is received for longer than `t`. `None` disables stall detection.
     pub stall_threshold: Option<Duration>,
     /// If `Some(n)`, `drain_stream_json` returns `TurnCapReached(n)` after
-    /// counting `n` `"assistant"` events. `None` disables the turn cap.
+    /// counting `n` turn-tick events. `None` disables the turn cap.
     pub max_turns: Option<u32>,
 }
 
@@ -65,7 +64,7 @@ pub struct ClaudeRuntimeOptions {
 pub struct ClaudeRuntime {
     options: ClaudeRuntimeOptions,
     #[cfg(unix)]
-    handle: Arc<Mutex<Option<crate::headless::HeadlessHandle>>>,
+    handle: Arc<Mutex<Option<runkon_runtimes::headless::HeadlessHandle>>>,
     prompt_file: Arc<Mutex<Option<PathBuf>>>,
     tracker: Arc<Mutex<Option<Arc<dyn RunTracker>>>>,
     event_sink: Arc<Mutex<Option<Arc<dyn RunEventSink>>>>,
@@ -85,7 +84,11 @@ impl ClaudeRuntime {
 }
 
 impl AgentRuntime for ClaudeRuntime {
-    fn spawn_impl(&self, request: &RuntimeRequest, _seal: super::private::Seal) -> Result<()> {
+    fn spawn_impl(
+        &self,
+        request: &RuntimeRequest,
+        _seal: runkon_runtimes::runtime::private::Seal,
+    ) -> Result<()> {
         #[cfg(unix)]
         {
             let wd = request.working_dir.to_str().unwrap_or(".");
@@ -101,7 +104,7 @@ impl AgentRuntime for ClaudeRuntime {
             };
             let (args, prompt_file) =
                 (self.options.argv_builder)(&argv_req).map_err(RuntimeError::Workflow)?;
-            let h = crate::headless::spawn_headless(
+            let h = runkon_runtimes::headless::spawn_headless(
                 &args,
                 std::path::Path::new(wd),
                 &self.options.binary_path.to_string_lossy(),
@@ -169,10 +172,109 @@ impl AgentRuntime for ClaudeRuntime {
             if let Some(pid) = run.subprocess_pid {
                 process_utils::cancel_subprocess(pid as u32);
             }
-            super::mark_cancelled_via_tracker(&self.tracker, &run.id, "ClaudeRuntime");
+            mark_cancelled_via_tracker(&self.tracker, &run.id, "ClaudeRuntime");
         }
         let _ = run;
         Ok(())
+    }
+}
+
+/// Classifies Claude CLI JSON stream events into vendor-neutral [`ParseSignal`]s.
+pub struct ClaudeLineEventParser;
+
+impl LineEventParser for ClaudeLineEventParser {
+    fn classify(&mut self, value: &serde_json::Value) -> ParseSignal {
+        match value.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+            "system" => {
+                if value.get("subtype").and_then(|v| v.as_str()) == Some("init") {
+                    ParseSignal::Emit(RuntimeEvent::Init {
+                        model: value
+                            .get("model")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                        session_id: value
+                            .get("session_id")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                    })
+                } else {
+                    ParseSignal::Ignore
+                }
+            }
+            "assistant" => {
+                let usage = value
+                    .get("message")
+                    .and_then(|m| m.get("usage"))
+                    .or_else(|| value.get("usage"));
+                if let Some(u) = usage {
+                    ParseSignal::TurnWithEvent(RuntimeEvent::Tokens {
+                        input: u.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
+                        output: u.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
+                        cache_read: u
+                            .get("cache_read_input_tokens")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0),
+                        cache_create: u
+                            .get("cache_creation_input_tokens")
+                            .and_then(|v| v.as_i64())
+                            .unwrap_or(0),
+                    })
+                } else {
+                    ParseSignal::TurnTick
+                }
+            }
+            "result" => {
+                if value
+                    .get("is_error")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false)
+                {
+                    ParseSignal::Terminal {
+                        final_event: RuntimeEvent::Failed {
+                            error: value
+                                .get("result")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("agent reported an error")
+                                .to_string(),
+                            session_id: value
+                                .get("session_id")
+                                .and_then(|v| v.as_str())
+                                .map(String::from),
+                        },
+                    }
+                } else {
+                    let usage = value.get("usage");
+                    ParseSignal::Terminal {
+                        final_event: RuntimeEvent::Completed {
+                            result_text: value
+                                .get("result")
+                                .and_then(|v| v.as_str())
+                                .map(String::from),
+                            session_id: value
+                                .get("session_id")
+                                .and_then(|v| v.as_str())
+                                .map(String::from),
+                            cost_usd: value.get("total_cost_usd").and_then(|v| v.as_f64()),
+                            num_turns: value.get("num_turns").and_then(|v| v.as_i64()),
+                            duration_ms: value.get("duration_ms").and_then(|v| v.as_i64()),
+                            input_tokens: usage
+                                .and_then(|u| u.get("input_tokens"))
+                                .and_then(|v| v.as_i64()),
+                            output_tokens: usage
+                                .and_then(|u| u.get("output_tokens"))
+                                .and_then(|v| v.as_i64()),
+                            cache_read_input_tokens: usage
+                                .and_then(|u| u.get("cache_read_input_tokens"))
+                                .and_then(|v| v.as_i64()),
+                            cache_creation_input_tokens: usage
+                                .and_then(|u| u.get("cache_creation_input_tokens"))
+                                .and_then(|v| v.as_i64()),
+                        },
+                    }
+                }
+            }
+            _ => ParseSignal::Ignore,
+        }
     }
 }
 
@@ -247,13 +349,14 @@ fn poll_unix(
     });
 
     std::thread::spawn(move || {
-        let outcome = crate::headless::drain_stream_json(
+        let outcome = runkon_runtimes::headless::drain_stream_json(
             stdout_pipe,
             &run_id_owned,
             &log_path,
             &*event_sink_for_drain,
             stall_threshold,
             max_turns,
+            ClaudeLineEventParser,
         );
         if let Some(pf) = prompt_file {
             let _ = std::fs::remove_file(pf);
@@ -272,7 +375,7 @@ fn poll_unix(
     // branches below to avoid duplicating the same 4-step sequence.
     let abort_poll = |reason: &str| {
         tracing::warn!("ClaudeRuntime: {reason} for run {run_id}, cancelling");
-        super::mark_cancelled_with_reason(tracker.as_ref(), run_id, "ClaudeRuntime", reason);
+        mark_cancelled_with_reason(tracker.as_ref(), run_id, "ClaudeRuntime", reason);
         process_utils::cancel_subprocess(pid);
         let _ = rx.recv_timeout(Duration::from_secs(6));
     };
@@ -334,12 +437,205 @@ fn poll_unix(
     }
 }
 
+fn mark_cancelled_via_tracker(
+    tracker_mtx: &Mutex<Option<Arc<dyn RunTracker>>>,
+    run_id: &str,
+    context: &str,
+) {
+    if let Some(ref tracker) = tracker_mtx.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        if let Err(e) = tracker.mark_cancelled(run_id) {
+            tracing::warn!("{context}: failed to mark run {run_id} cancelled: {e}");
+        }
+    }
+}
+
+fn mark_cancelled_with_reason(tracker: &dyn RunTracker, run_id: &str, context: &str, reason: &str) {
+    if let Err(e) = tracker.mark_cancelled(run_id) {
+        tracing::warn!("{context}: failed to mark run {run_id} cancelled on {reason}: {e}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_def::{AgentDef, AgentRole};
-    use crate::runtime::test_util::{make_test_run, NoopTracker};
-    use crate::tracker::NoopEventSink;
+    use runkon_runtimes::agent_def::{AgentDef, AgentRole};
+    use runkon_runtimes::headless::drain_stream_json;
+    use runkon_runtimes::run::{RunHandle, RunStatus};
+    use runkon_runtimes::tracker::{NoopEventSink, NoopTracker};
+
+    fn make_test_run(runtime: &str, subprocess_pid: Option<i64>) -> RunHandle {
+        RunHandle {
+            id: "test-run".to_string(),
+            status: RunStatus::Running,
+            subprocess_pid,
+            runtime: runtime.to_string(),
+            session_id: None,
+            result_text: None,
+            started_at: "2024-01-01T00:00:00Z".to_string(),
+            ended_at: None,
+            log_file: None,
+            model: None,
+            cost_usd: None,
+            num_turns: None,
+            duration_ms: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+        }
+    }
+
+    // ── ClaudeLineEventParser event-shape tests (ported from headless.rs) ──
+
+    #[derive(Default, Clone)]
+    struct RecordingSink {
+        events: std::sync::Arc<std::sync::Mutex<Vec<RuntimeEvent>>>,
+    }
+
+    impl runkon_runtimes::tracker::EventSink for RecordingSink {
+        fn on_event(&self, _run_id: &str, event: RuntimeEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    fn run_drain(lines: &[&str]) -> (runkon_runtimes::headless::DrainOutcome, RecordingSink) {
+        let input = lines.join("\n");
+        let log_file =
+            std::env::temp_dir().join(format!("test-drain-{:?}.log", std::thread::current().id()));
+        let sink = RecordingSink::default();
+        let outcome = drain_stream_json(
+            std::io::Cursor::new(input.into_bytes()),
+            "run-1",
+            &log_file,
+            &sink,
+            None,
+            None,
+            ClaudeLineEventParser,
+        );
+        let _ = std::fs::remove_file(&log_file);
+        (outcome, sink)
+    }
+
+    #[test]
+    fn result_event_returns_completed() {
+        let (outcome, sink) = run_drain(&[r#"{"type":"result","result":"hello"}"#]);
+        assert_eq!(outcome, runkon_runtimes::headless::DrainOutcome::Completed);
+        let events = sink.events.lock().unwrap();
+        assert!(matches!(events[0], RuntimeEvent::Completed { .. }));
+    }
+
+    #[test]
+    fn error_result_returns_completed() {
+        let (outcome, sink) = run_drain(&[r#"{"type":"result","is_error":true,"result":"oops"}"#]);
+        assert_eq!(outcome, runkon_runtimes::headless::DrainOutcome::Completed);
+        let events = sink.events.lock().unwrap();
+        assert!(matches!(events[0], RuntimeEvent::Failed { .. }));
+    }
+
+    #[test]
+    fn no_result_returns_no_result() {
+        let (outcome, sink) = run_drain(&[r#"{"type":"system","subtype":"init"}"#]);
+        assert_eq!(outcome, runkon_runtimes::headless::DrainOutcome::NoResult);
+        let events = sink.events.lock().unwrap();
+        // system/init lines emit an Init event even though there's no final result
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], RuntimeEvent::Init { .. }));
+    }
+
+    /// Reader that yields `prefix`, then returns an `io::Error` on the next read.
+    struct ErrorAfterReader {
+        prefix: std::io::Cursor<Vec<u8>>,
+        errored: bool,
+    }
+
+    impl std::io::Read for ErrorAfterReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.prefix.read(buf)?;
+            if n == 0 && !self.errored {
+                self.errored = true;
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "test broken pipe",
+                ));
+            }
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn returns_no_result_on_stdout_read_error() {
+        let prefix = b"{\"type\":\"system\",\"subtype\":\"init\"}\n".to_vec();
+        let reader = ErrorAfterReader {
+            prefix: std::io::Cursor::new(prefix),
+            errored: false,
+        };
+        let log_file = std::env::temp_dir().join(format!(
+            "test-drain-read-err-{:?}.log",
+            std::thread::current().id()
+        ));
+        let sink = RecordingSink::default();
+        let outcome = drain_stream_json(
+            reader,
+            "run-err",
+            &log_file,
+            &sink,
+            None,
+            None,
+            ClaudeLineEventParser,
+        );
+        let _ = std::fs::remove_file(&log_file);
+        assert_eq!(outcome, runkon_runtimes::headless::DrainOutcome::NoResult);
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], RuntimeEvent::Init { .. }));
+    }
+
+    #[test]
+    fn token_update_emitted() {
+        let (outcome, sink) = run_drain(&[
+            r#"{"type":"assistant","usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":5,"cache_creation_input_tokens":3}}"#,
+            r#"{"type":"result","result":"done"}"#,
+        ]);
+        assert_eq!(outcome, runkon_runtimes::headless::DrainOutcome::Completed);
+        let events = sink.events.lock().unwrap();
+        assert!(matches!(
+            events[0],
+            RuntimeEvent::Tokens {
+                input: 10,
+                output: 20,
+                cache_read: 5,
+                cache_create: 3,
+            }
+        ));
+    }
+
+    #[test]
+    fn cost_turns_duration_parsed() {
+        let (outcome, sink) = run_drain(&[
+            r#"{"type":"result","result":"ok","total_cost_usd":0.42,"num_turns":7,"duration_ms":12345,"usage":{"input_tokens":100,"output_tokens":50}}"#,
+        ]);
+        assert_eq!(outcome, runkon_runtimes::headless::DrainOutcome::Completed);
+        let events = sink.events.lock().unwrap();
+        match &events[0] {
+            RuntimeEvent::Completed {
+                cost_usd,
+                num_turns,
+                duration_ms,
+                input_tokens,
+                output_tokens,
+                ..
+            } => {
+                assert_eq!(*cost_usd, Some(0.42));
+                assert_eq!(*num_turns, Some(7));
+                assert_eq!(*duration_ms, Some(12345));
+                assert_eq!(*input_tokens, Some(100));
+                assert_eq!(*output_tokens, Some(50));
+            }
+            other => panic!("expected Completed event, got: {other:?}"),
+        }
+    }
+
+    // ── ClaudeRuntime unit tests ──
 
     fn make_test_runtime(
         stall_threshold: Option<Duration>,
@@ -514,7 +810,7 @@ mod tests {
             .process_group(0)
             .spawn()
             .expect("sh must be available");
-        let handle = crate::headless::HeadlessHandle::from_child(child)
+        let handle = runkon_runtimes::headless::HeadlessHandle::from_child(child)
             .expect("HeadlessHandle from_child failed");
         let pid = handle.pid();
         *runtime.handle.lock().unwrap() = Some(handle);
@@ -524,8 +820,6 @@ mod tests {
     }
 
     /// After poll returns, the drain thread must kill the whole process group.
-    /// A leaked grandchild (sleep 300, simulating cargo nextest) must be dead
-    /// within 10 s — well within the 5-s SIGTERM grace + SIGKILL cycle.
     #[cfg(unix)]
     #[test]
     fn poll_kills_leaked_grandchildren_after_result() {
@@ -539,7 +833,7 @@ mod tests {
         // Assert the process group is dead within 10 s.
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
-            if !crate::process_utils::pid_is_alive(pgid) {
+            if !runkon_runtimes::process_utils::pid_is_alive(pgid) {
                 break;
             }
             assert!(
@@ -562,7 +856,7 @@ mod tests {
             .process_group(0)
             .spawn()
             .expect("sleep must be available");
-        let handle = crate::headless::HeadlessHandle::from_child(child)
+        let handle = runkon_runtimes::headless::HeadlessHandle::from_child(child)
             .expect("HeadlessHandle from_child failed");
         let pid = handle.pid();
         *runtime.handle.lock().unwrap() = Some(handle);
@@ -628,7 +922,7 @@ mod tests {
             .process_group(0)
             .spawn()
             .expect("sh must be available");
-        let handle = crate::headless::HeadlessHandle::from_child(child)
+        let handle = runkon_runtimes::headless::HeadlessHandle::from_child(child)
             .expect("HeadlessHandle from_child failed");
         let pid = handle.pid();
         *runtime.handle.lock().unwrap() = Some(handle);
