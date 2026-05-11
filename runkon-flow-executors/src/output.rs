@@ -146,7 +146,7 @@ pub fn interpret_agent_output(
 
 /// Convert an `OutputSchema` into a Claude API tool definition JSON value.
 pub fn schema_to_tool_json(schema: &OutputSchema) -> serde_json::Value {
-    let (properties, required) = fields_to_json_schema(&schema.fields);
+    let (properties, required) = fields_to_schema(&schema.fields, &JSON_SCHEMA_TYPES);
 
     serde_json::json!({
         "name": schema.name,
@@ -159,14 +159,62 @@ pub fn schema_to_tool_json(schema: &OutputSchema) -> serde_json::Value {
     })
 }
 
-fn fields_to_json_schema(
+// ---------------------------------------------------------------------------
+// Schema → Gemini responseSchema JSON
+// ---------------------------------------------------------------------------
+
+/// Convert an `OutputSchema` into a Gemini `responseSchema` JSON value.
+///
+/// Gemini's `responseSchema` uses uppercase type names (`"STRING"`, `"NUMBER"`,
+/// `"BOOLEAN"`, `"OBJECT"`, `"ARRAY"`) rather than the lowercase names used by
+/// OpenAPI / JSON Schema. The returned value is suitable for
+/// `generationConfig.responseSchema` in a `generateContent` request.
+pub fn schema_to_gemini_response_schema(schema: &OutputSchema) -> serde_json::Value {
+    let (properties, required) = fields_to_schema(&schema.fields, &GEMINI_SCHEMA_TYPES);
+    serde_json::json!({
+        "type": "OBJECT",
+        "properties": properties,
+        "required": required
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Schema conversion helpers
+// ---------------------------------------------------------------------------
+
+struct TypeNames {
+    string: &'static str,
+    number: &'static str,
+    boolean: &'static str,
+    object: &'static str,
+    array: &'static str,
+}
+
+const JSON_SCHEMA_TYPES: TypeNames = TypeNames {
+    string: "string",
+    number: "number",
+    boolean: "boolean",
+    object: "object",
+    array: "array",
+};
+
+const GEMINI_SCHEMA_TYPES: TypeNames = TypeNames {
+    string: "STRING",
+    number: "NUMBER",
+    boolean: "BOOLEAN",
+    object: "OBJECT",
+    array: "ARRAY",
+};
+
+fn fields_to_schema(
     fields: &[FieldDef],
+    types: &TypeNames,
 ) -> (serde_json::Map<String, serde_json::Value>, Vec<String>) {
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
 
     for field in fields {
-        let mut type_schema = field_type_to_schema(&field.field_type);
+        let mut type_schema = field_type_to_schema(&field.field_type, types);
 
         if let Some(ref desc) = field.desc {
             if let Some(obj) = type_schema.as_object_mut() {
@@ -187,109 +235,36 @@ fn fields_to_json_schema(
     (properties, required)
 }
 
-fn field_type_to_schema(field_type: &FieldType) -> serde_json::Value {
+fn field_type_to_schema(field_type: &FieldType, types: &TypeNames) -> serde_json::Value {
     match field_type {
-        FieldType::String => serde_json::json!({"type": "string"}),
-        FieldType::Number => serde_json::json!({"type": "number"}),
-        FieldType::Boolean => serde_json::json!({"type": "boolean"}),
+        FieldType::String => serde_json::json!({"type": types.string}),
+        FieldType::Number => serde_json::json!({"type": types.number}),
+        FieldType::Boolean => serde_json::json!({"type": types.boolean}),
         FieldType::Enum(variants) => {
-            serde_json::json!({"type": "string", "enum": variants})
+            serde_json::json!({"type": types.string, "enum": variants})
         }
         FieldType::Array { items } => match items {
             ArrayItems::Scalar(scalar_type) => {
-                let items_schema = field_type_to_schema(scalar_type);
-                serde_json::json!({"type": "array", "items": items_schema})
+                let items_schema = field_type_to_schema(scalar_type, types);
+                serde_json::json!({"type": types.array, "items": items_schema})
             }
             ArrayItems::Object(sub_fields) => {
-                let (properties, required) = fields_to_json_schema(sub_fields);
+                let (properties, required) = fields_to_schema(sub_fields, types);
                 serde_json::json!({
-                    "type": "array",
+                    "type": types.array,
                     "items": {
-                        "type": "object",
+                        "type": types.object,
                         "properties": properties,
                         "required": required
                     }
                 })
             }
-            ArrayItems::Untyped => serde_json::json!({"type": "array"}),
+            ArrayItems::Untyped => serde_json::json!({"type": types.array}),
         },
         FieldType::Object { fields } => {
-            let (properties, required) = fields_to_json_schema(fields);
+            let (properties, required) = fields_to_schema(fields, types);
             serde_json::json!({
-                "type": "object",
-                "properties": properties,
-                "required": required
-            })
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Schema → Gemini responseSchema JSON
-// ---------------------------------------------------------------------------
-
-/// Convert an `OutputSchema` into a Gemini `responseSchema` JSON value.
-///
-/// Gemini's `responseSchema` uses uppercase type names (`"STRING"`, `"NUMBER"`,
-/// `"BOOLEAN"`, `"OBJECT"`, `"ARRAY"`) rather than the lowercase names used by
-/// OpenAPI / JSON Schema. The returned value is suitable for
-/// `generationConfig.responseSchema` in a `generateContent` request.
-pub fn schema_to_gemini_response_schema(schema: &OutputSchema) -> serde_json::Value {
-    let (properties, required) = fields_to_gemini_schema(&schema.fields);
-    serde_json::json!({
-        "type": "OBJECT",
-        "properties": properties,
-        "required": required
-    })
-}
-
-fn fields_to_gemini_schema(
-    fields: &[FieldDef],
-) -> (serde_json::Map<String, serde_json::Value>, Vec<String>) {
-    let mut properties = serde_json::Map::new();
-    let mut required = Vec::new();
-
-    for field in fields {
-        let type_schema = field_type_to_gemini_schema(&field.field_type);
-        properties.insert(field.name.clone(), type_schema);
-        if field.required {
-            required.push(field.name.clone());
-        }
-    }
-
-    (properties, required)
-}
-
-fn field_type_to_gemini_schema(field_type: &FieldType) -> serde_json::Value {
-    match field_type {
-        FieldType::String => serde_json::json!({"type": "STRING"}),
-        FieldType::Number => serde_json::json!({"type": "NUMBER"}),
-        FieldType::Boolean => serde_json::json!({"type": "BOOLEAN"}),
-        FieldType::Enum(variants) => {
-            serde_json::json!({"type": "STRING", "enum": variants})
-        }
-        FieldType::Array { items } => match items {
-            ArrayItems::Scalar(scalar_type) => {
-                let items_schema = field_type_to_gemini_schema(scalar_type);
-                serde_json::json!({"type": "ARRAY", "items": items_schema})
-            }
-            ArrayItems::Object(sub_fields) => {
-                let (properties, required) = fields_to_gemini_schema(sub_fields);
-                serde_json::json!({
-                    "type": "ARRAY",
-                    "items": {
-                        "type": "OBJECT",
-                        "properties": properties,
-                        "required": required
-                    }
-                })
-            }
-            ArrayItems::Untyped => serde_json::json!({"type": "ARRAY"}),
-        },
-        FieldType::Object { fields } => {
-            let (properties, required) = fields_to_gemini_schema(fields);
-            serde_json::json!({
-                "type": "OBJECT",
+                "type": types.object,
                 "properties": properties,
                 "required": required
             })

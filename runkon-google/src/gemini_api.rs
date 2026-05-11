@@ -215,13 +215,16 @@ mod tests {
         }
     }
 
-    fn serve_json_response(body: serde_json::Value) -> std::net::SocketAddr {
+    fn serve_raw_response(
+        body: String,
+        status: u16,
+        content_type: &'static str,
+    ) -> std::net::SocketAddr {
         use std::io::{BufRead, Read, Write};
         use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
-        let body_str = body.to_string();
 
         std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -248,14 +251,18 @@ mod tests {
 
             let mut stream = reader.into_inner();
             let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\n\r\n{}",
-                body_str.len(),
-                body_str
+                "HTTP/1.1 {status} \r\nContent-Length: {}\r\nContent-Type: {content_type}\r\n\r\n{}",
+                body.len(),
+                body
             );
             stream.write_all(response.as_bytes()).unwrap();
         });
 
         addr
+    }
+
+    fn serve_json_response(body: serde_json::Value) -> std::net::SocketAddr {
+        serve_raw_response(body.to_string(), 200, "application/json")
     }
 
     #[test]
@@ -370,39 +377,7 @@ mod tests {
 
     #[test]
     fn error_status_not_leaked_in_returned_error() {
-        use std::io::{BufRead, Read, Write};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let handle = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut reader = std::io::BufReader::new(stream);
-
-            let mut content_length = 0usize;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if line == "\r\n" || line.is_empty() {
-                    break;
-                }
-                let lower = line.to_ascii_lowercase();
-                if lower.starts_with("content-length:") {
-                    if let Some(v) = lower.split(':').nth(1) {
-                        content_length = v.trim().parse().unwrap_or(0);
-                    }
-                }
-            }
-            if content_length > 0 {
-                let mut body = vec![0u8; content_length];
-                let _ = reader.read_exact(&mut body);
-            }
-
-            let mut stream = reader.into_inner();
-            let response = "HTTP/1.1 403 Forbidden\r\nContent-Length: 13\r\nContent-Type: text/plain\r\n\r\nSENTINEL_BODY";
-            stream.write_all(response.as_bytes()).unwrap();
-        });
+        let addr = serve_raw_response("SENTINEL_BODY".to_string(), 403, "text/plain");
 
         let schema = make_schema();
         let err_string = execute_via_api(
@@ -413,8 +388,6 @@ mod tests {
             &format!("http://{addr}/gemini-1.5-pro:generateContent"),
         )
         .unwrap_err();
-
-        handle.join().unwrap();
 
         assert!(
             err_string.contains("403"),
