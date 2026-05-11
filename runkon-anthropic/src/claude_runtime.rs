@@ -188,7 +188,10 @@ impl LineEventParser for ClaudeLineEventParser {
             "system" => {
                 if value.get("subtype").and_then(|v| v.as_str()) == Some("init") {
                     ParseSignal::Emit(RuntimeEvent::Init {
-                        model: value.get("model").and_then(|v| v.as_str()).map(String::from),
+                        model: value
+                            .get("model")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
                         session_id: value
                             .get("session_id")
                             .and_then(|v| v.as_str())
@@ -205,14 +208,8 @@ impl LineEventParser for ClaudeLineEventParser {
                     .or_else(|| value.get("usage"));
                 if let Some(u) = usage {
                     ParseSignal::TurnWithEvent(RuntimeEvent::Tokens {
-                        input: u
-                            .get("input_tokens")
-                            .and_then(|v| v.as_i64())
-                            .unwrap_or(0),
-                        output: u
-                            .get("output_tokens")
-                            .and_then(|v| v.as_i64())
-                            .unwrap_or(0),
+                        input: u.get("input_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
+                        output: u.get("output_tokens").and_then(|v| v.as_i64()).unwrap_or(0),
                         cache_read: u
                             .get("cache_read_input_tokens")
                             .and_then(|v| v.as_i64())
@@ -452,12 +449,7 @@ fn mark_cancelled_via_tracker(
     }
 }
 
-fn mark_cancelled_with_reason(
-    tracker: &dyn RunTracker,
-    run_id: &str,
-    context: &str,
-    reason: &str,
-) {
+fn mark_cancelled_with_reason(tracker: &dyn RunTracker, run_id: &str, context: &str, reason: &str) {
     if let Err(e) = tracker.mark_cancelled(run_id) {
         tracing::warn!("{context}: failed to mark run {run_id} cancelled on {reason}: {e}");
     }
@@ -508,8 +500,8 @@ mod tests {
 
     fn run_drain(lines: &[&str]) -> (runkon_runtimes::headless::DrainOutcome, RecordingSink) {
         let input = lines.join("\n");
-        let log_file = std::env::temp_dir()
-            .join(format!("test-drain-{:?}.log", std::thread::current().id()));
+        let log_file =
+            std::env::temp_dir().join(format!("test-drain-{:?}.log", std::thread::current().id()));
         let sink = RecordingSink::default();
         let outcome = drain_stream_json(
             std::io::Cursor::new(input.into_bytes()),
@@ -534,8 +526,7 @@ mod tests {
 
     #[test]
     fn error_result_returns_completed() {
-        let (outcome, sink) =
-            run_drain(&[r#"{"type":"result","is_error":true,"result":"oops"}"#]);
+        let (outcome, sink) = run_drain(&[r#"{"type":"result","is_error":true,"result":"oops"}"#]);
         assert_eq!(outcome, runkon_runtimes::headless::DrainOutcome::Completed);
         let events = sink.events.lock().unwrap();
         assert!(matches!(events[0], RuntimeEvent::Failed { .. }));
