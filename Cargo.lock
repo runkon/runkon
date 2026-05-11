@@ -792,6 +792,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "runkon-google"
+version = "0.6.0"
+dependencies = [
+ "runkon-flow",
+ "runkon-flow-executors",
+ "runkon-runtimes",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "ureq",
+]
+
+[[package]]
 name = "runkon-notify"
 version = "0.5.0-alpha"
 dependencies = [
