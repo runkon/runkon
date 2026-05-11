@@ -13,6 +13,7 @@ Portable workflow execution engine and supporting harness crates for building ag
 | [`runkon-runtimes`](runkon-runtimes/) [![crates.io](https://img.shields.io/crates/v/runkon-runtimes.svg)](https://crates.io/crates/runkon-runtimes) [![docs.rs](https://docs.rs/runkon-runtimes/badge.svg)](https://docs.rs/runkon-runtimes) | Spawn-poll-cancel agent runtime harness. Built-in runtimes: `claude`, `cli`, `script`. |
 | [`runkon-flow-executors`](runkon-flow-executors/) [![crates.io](https://img.shields.io/crates/v/runkon-flow-executors.svg)](https://crates.io/crates/runkon-flow-executors) [![docs.rs](https://docs.rs/runkon-flow-executors/badge.svg)](https://docs.rs/runkon-flow-executors) | Vendor-neutral executor primitives (event sinks, env providers, output parsing, agent loader). |
 | [`runkon-anthropic`](runkon-anthropic/) [![crates.io](https://img.shields.io/crates/v/runkon-anthropic.svg)](https://crates.io/crates/runkon-anthropic) [![docs.rs](https://docs.rs/runkon-anthropic/badge.svg)](https://docs.rs/runkon-anthropic) | Anthropic API client + Claude agent executor (API and CLI subprocess modes). |
+| [`runkon-google`](runkon-google/) [![crates.io](https://img.shields.io/crates/v/runkon-google.svg)](https://crates.io/crates/runkon-google) [![docs.rs](https://docs.rs/runkon-google/badge.svg)](https://docs.rs/runkon-google) | Google Gemini API client + agent executor (API and generic subprocess modes). |
 
 Future vendor integrations (`runkon-openai`, `runkon-codex`, etc.) follow the same shape — depend on `runkon-flow`/`runkon-flow-executors`/`runkon-runtimes`, export vendor-specific executors.
 
@@ -36,6 +37,8 @@ cargo run --example full_engine_minimal --features test-utils
 ```
 
 Anthropic-specific composition lives in `runkon-anthropic/examples/standalone_flow.rs`.
+
+Google Gemini composition lives in `runkon-google/examples/standalone_flow.rs`.
 
 ## License
 
