@@ -35,6 +35,40 @@ Optional features:
 cargo run --example standalone_flow --features test-utils
 ```
 
+## Stream-JSON runtime
+
+`GeminiRuntime` is a bespoke subprocess runtime that drives `gemini --output-format stream-json` and parses each JSONL event as it arrives. Choose it over the `cli`-type recipe when you need per-event observability (init / token usage at completion / failure with the upstream error message), stall detection, or turn-cap enforcement via `tool_use` counting. Trade-off: requires Gemini CLI 0.41.2+ with `--output-format stream-json` support.
+
+The entry point is `GeminiRuntime::new(GeminiRuntimeOptions { argv_builder: default_argv_builder(), .. })`. Hosts that need custom flags (extra MCP args, non-standard model flags) can swap in their own `ArgvBuilder` while reusing all other runtime machinery.
+
+```rust
+use runkon_google::{GeminiRuntime, GeminiRuntimeOptions, default_argv_builder};
+
+let runtime = GeminiRuntime::new(GeminiRuntimeOptions {
+    binary_path: "/usr/local/bin/gemini".into(),
+    env: [("GEMINI_API_KEY".into(), api_key)].into(),
+    permission_mode: runkon_runtimes::permission::PermissionMode::Default,
+    log_path_for_run: std::sync::Arc::new(|id| format!("/tmp/{id}.log").into()),
+    stall_threshold: Some(std::time::Duration::from_secs(120)),
+    max_turns: Some(50),
+    argv_builder: default_argv_builder(),
+});
+```
+
+For a runnable parser demo that feeds a stubbed JSONL stream through `GeminiLineEventParser` without spawning a real process, see [`examples/gemini_stream_json.rs`](examples/gemini_stream_json.rs):
+
+```bash
+cargo run -p runkon-google --example gemini_stream_json
+```
+
+For `FlowEngine` composition wiring, see [`examples/standalone_flow.rs`](examples/standalone_flow.rs):
+
+```bash
+cargo run --example standalone_flow --features test-utils
+```
+
+If you only need structured JSON output without per-event observability, the `cli`-type recipe (Phase 1 of #51) drives `gemini` through the existing `CliRuntime` with zero bespoke Rust code and is simpler to set up.
+
 ## License
 
 Dual-licensed under either:

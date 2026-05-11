@@ -19,6 +19,53 @@ use runkon_runtimes::run::RunHandle;
 use runkon_runtimes::runtime::{AgentRuntime, PollError, RuntimeRequest};
 use runkon_runtimes::tracker::{RunEventSink, RunTracker, RuntimeEvent};
 
+/// Per-spawn data passed to the injected argv builder.
+pub struct GeminiArgvRequest<'a> {
+    pub run_id: &'a str,
+    pub working_dir: &'a str,
+    pub prompt: &'a str,
+    pub resume_session_id: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub extra_cli_args: &'a [(Cow<'static, str>, Cow<'static, str>)],
+    pub permission_mode: &'a PermissionMode,
+}
+
+/// Injectable argv builder for [`GeminiRuntime`].
+pub type ArgvBuilder = Arc<
+    dyn for<'a> Fn(&'a GeminiArgvRequest<'a>) -> std::result::Result<Vec<Cow<'static, str>>, String>
+        + Send
+        + Sync,
+>;
+
+/// Returns the default argv builder, producing the standard Gemini CLI invocation.
+pub fn default_argv_builder() -> ArgvBuilder {
+    Arc::new(|req: &GeminiArgvRequest<'_>| {
+        let mut args: Vec<Cow<'static, str>> = vec![
+            Cow::Borrowed("--output-format"),
+            Cow::Borrowed("stream-json"),
+            Cow::Borrowed("--prompt"),
+            Cow::Owned(req.prompt.to_string()),
+        ];
+        if let Some(model) = req.model {
+            args.push(Cow::Borrowed("--model"));
+            args.push(Cow::Owned(model.to_string()));
+        }
+        if let Some(mode_value) = req.permission_mode.cli_flag_value() {
+            args.push(Cow::Borrowed("--approval-mode"));
+            args.push(Cow::Owned(mode_value.to_string()));
+        }
+        for (k, v) in req.extra_cli_args {
+            args.push(Cow::Owned(format!("--{k}")));
+            args.push(Cow::Owned(v.to_string()));
+        }
+        if let Some(session_id) = req.resume_session_id {
+            args.push(Cow::Borrowed("--resume"));
+            args.push(Cow::Owned(session_id.to_string()));
+        }
+        Ok(args)
+    })
+}
+
 /// Construction-time options for [`GeminiRuntime`].
 #[derive(Clone)]
 pub struct GeminiRuntimeOptions {
@@ -41,6 +88,10 @@ pub struct GeminiRuntimeOptions {
     /// `invoke_agent`, etc.) that count toward this limit. Set a higher
     /// bound than the number of expected external tool calls per session.
     pub max_turns: Option<u32>,
+    /// Builds the subprocess argv for each spawn. Use [`default_argv_builder`]
+    /// for the standard Gemini CLI invocation; swap in a custom builder to
+    /// add extra flags or change argument order.
+    pub argv_builder: ArgvBuilder,
 }
 
 /// Runtime that spawns a headless `gemini` subprocess with `--output-format stream-json`.
@@ -73,33 +124,21 @@ impl AgentRuntime for GeminiRuntime {
         #[cfg(unix)]
         {
             let wd = request.working_dir.to_str().unwrap_or(".");
-
-            let mut args: Vec<Cow<'static, str>> = vec![
-                Cow::Borrowed("--output-format"),
-                Cow::Borrowed("stream-json"),
-                Cow::Borrowed("--prompt"),
-                Cow::Owned(request.prompt.clone()),
-            ];
-
-            if let Some(model) = request.resolved_model() {
-                args.push(Cow::Borrowed("--model"));
-                args.push(Cow::Owned(model.to_string()));
-            }
-
-            if let Some(mode_value) = self.options.permission_mode.cli_flag_value() {
-                args.push(Cow::Borrowed("--approval-mode"));
-                args.push(Cow::Owned(mode_value.to_string()));
-            }
-
-            for (k, v) in &request.extra_cli_args {
-                args.push(Cow::Owned(format!("--{k}")));
-                args.push(Cow::Owned(v.to_string()));
-            }
-
-            if let Some(session_id) = &request.resume_session_id {
-                args.push(Cow::Borrowed("--resume"));
-                args.push(Cow::Owned(session_id.clone()));
-            }
+            let argv_req = GeminiArgvRequest {
+                run_id: &request.run_id,
+                working_dir: wd,
+                prompt: &request.prompt,
+                resume_session_id: request.resume_session_id.as_deref(),
+                model: request.resolved_model(),
+                extra_cli_args: &request.extra_cli_args,
+                permission_mode: &self.options.permission_mode,
+            };
+            let args = (self.options.argv_builder)(&argv_req).map_err(|e| {
+                RuntimeError::Workflow(format!(
+                    "GeminiRuntime: argv_builder failed for run {} (working_dir={wd}): {e}",
+                    &request.run_id
+                ))
+            })?;
 
             let h = runkon_runtimes::headless::spawn_headless(
                 &args,
@@ -177,12 +216,68 @@ impl AgentRuntime for GeminiRuntime {
 ///
 /// Event types (from `--output-format stream-json`):
 /// - `init`        → `Emit(Init)`
-/// - `message`     → `Ignore` (trace-only; no token usage on these events)
+/// - `message`     → `Ignore` (assistant content is accumulated into `result_text`)
 /// - `tool_use`    → `TurnTick` (one invocation = one turn for cap purposes)
 /// - `tool_result` → `Ignore` (debug-only)
 /// - `error`       → `Ignore` (non-fatal; warn-logged)
 /// - `result`      → `Terminal { Completed | Failed }`
-pub struct GeminiLineEventParser;
+#[derive(Default)]
+pub struct GeminiLineEventParser {
+    assistant_text: String,
+}
+
+impl GeminiLineEventParser {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn parse_result_event(&mut self, value: &serde_json::Value) -> ParseSignal {
+        let session_id = value["session_id"].as_str().map(String::from);
+        let status = value["status"].as_str().unwrap_or("error");
+        let stats = &value["stats"];
+
+        if status == "success" {
+            let input_tokens = stats["input_tokens"].as_i64();
+            let output_tokens = stats["output_tokens"].as_i64();
+            let cache_read = stats["cached"].as_i64();
+            let duration_ms = stats["duration_ms"].as_i64();
+            let num_turns = stats["tool_calls"].as_i64();
+            let result_text = if self.assistant_text.is_empty() {
+                None
+            } else {
+                Some(std::mem::take(&mut self.assistant_text))
+            };
+
+            ParseSignal::Terminal {
+                final_event: RuntimeEvent::Completed {
+                    result_text,
+                    session_id,
+                    cost_usd: None,
+                    num_turns,
+                    duration_ms,
+                    input_tokens,
+                    output_tokens,
+                    cache_read_input_tokens: cache_read,
+                    cache_creation_input_tokens: None,
+                },
+            }
+        } else {
+            let error_msg = value["error"]
+                .as_object()
+                .and_then(|o| o.get("message"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("gemini reported an error")
+                .to_string();
+
+            ParseSignal::Terminal {
+                final_event: RuntimeEvent::Failed {
+                    error: error_msg,
+                    session_id,
+                },
+            }
+        }
+    }
+}
 
 impl LineEventParser for GeminiLineEventParser {
     fn classify(&mut self, value: &serde_json::Value) -> ParseSignal {
@@ -192,6 +287,11 @@ impl LineEventParser for GeminiLineEventParser {
                 session_id: value["session_id"].as_str().map(String::from),
             }),
             "message" => {
+                if value["role"].as_str() == Some("assistant") {
+                    if let Some(content) = value["content"].as_str() {
+                        self.assistant_text.push_str(content);
+                    }
+                }
                 tracing::trace!(
                     target: "runkon::agent::gemini",
                     role = value["role"].as_str().unwrap_or(""),
@@ -224,50 +324,8 @@ impl LineEventParser for GeminiLineEventParser {
                 );
                 ParseSignal::Ignore
             }
-            "result" => parse_result_event(value),
+            "result" => self.parse_result_event(value),
             _ => ParseSignal::Ignore,
-        }
-    }
-}
-
-fn parse_result_event(value: &serde_json::Value) -> ParseSignal {
-    let session_id = value["session_id"].as_str().map(String::from);
-    let status = value["status"].as_str().unwrap_or("error");
-    let stats = &value["stats"];
-
-    if status == "success" {
-        let input_tokens = stats["input_tokens"].as_i64();
-        let output_tokens = stats["output_tokens"].as_i64();
-        let cache_read = stats["cached"].as_i64();
-        let duration_ms = stats["duration_ms"].as_i64();
-        let num_turns = stats["tool_calls"].as_i64();
-
-        ParseSignal::Terminal {
-            final_event: RuntimeEvent::Completed {
-                result_text: None,
-                session_id,
-                cost_usd: None,
-                num_turns,
-                duration_ms,
-                input_tokens,
-                output_tokens,
-                cache_read_input_tokens: cache_read,
-                cache_creation_input_tokens: None,
-            },
-        }
-    } else {
-        let error_msg = value["error"]
-            .as_object()
-            .and_then(|o| o.get("message"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("gemini reported an error")
-            .to_string();
-
-        ParseSignal::Terminal {
-            final_event: RuntimeEvent::Failed {
-                error: error_msg,
-                session_id,
-            },
         }
     }
 }
@@ -344,7 +402,7 @@ fn poll_unix(
             &*event_sink_for_drain,
             stall_threshold,
             max_turns,
-            GeminiLineEventParser,
+            GeminiLineEventParser::default(),
         );
         let _ = tx.send(outcome);
         process_utils::cancel_subprocess(pid);
@@ -468,7 +526,7 @@ mod tests {
             &sink,
             None,
             None,
-            GeminiLineEventParser,
+            GeminiLineEventParser::default(),
         );
         let _ = std::fs::remove_file(&log_file);
         (outcome, sink)
@@ -504,6 +562,7 @@ mod tests {
             log_path_for_run: Arc::new(|run_id| std::env::temp_dir().join(format!("{run_id}.log"))),
             stall_threshold,
             max_turns,
+            argv_builder: default_argv_builder(),
         })
     }
 
@@ -682,6 +741,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn assistant_message_content_accumulated_into_result_text() {
+        let (outcome, sink) = run_drain(&[
+            r#"{"type":"init","session_id":"s","model":"gemini-2.5-flash","timestamp":"2024-01-01T00:00:00Z"}"#,
+            r#"{"type":"message","role":"assistant","content":"Hello ","timestamp":"2024-01-01T00:00:00Z"}"#,
+            r#"{"type":"message","role":"assistant","content":"world.","delta":true,"timestamp":"2024-01-01T00:00:00Z"}"#,
+            r#"{"type":"result","status":"success","session_id":"s","stats":{"input_tokens":10,"output_tokens":5,"cached":0,"input":10,"total_tokens":15,"duration_ms":100,"tool_calls":0},"timestamp":"2024-01-01T00:00:00Z"}"#,
+        ]);
+        assert_eq!(outcome, runkon_runtimes::headless::DrainOutcome::Completed);
+        let events = sink.events.lock().unwrap();
+        let result_text = events.iter().find_map(|e| {
+            if let RuntimeEvent::Completed { result_text, .. } = e {
+                Some(result_text.clone())
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            result_text,
+            Some(Some("Hello world.".to_string())),
+            "assistant message chunks must be concatenated into result_text"
+        );
+    }
+
+    #[test]
+    fn assistant_message_user_content_not_accumulated() {
+        let (_, sink) = run_drain(&[
+            r#"{"type":"message","role":"user","content":"prompt","timestamp":"2024-01-01T00:00:00Z"}"#,
+            r#"{"type":"result","status":"success","session_id":"s","stats":{"input_tokens":10,"output_tokens":5,"cached":0,"input":10,"total_tokens":15,"duration_ms":100,"tool_calls":0},"timestamp":"2024-01-01T00:00:00Z"}"#,
+        ]);
+        let events = sink.events.lock().unwrap();
+        let result_text = events.iter().find_map(|e| {
+            if let RuntimeEvent::Completed { result_text, .. } = e {
+                Some(result_text.clone())
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            result_text,
+            Some(None),
+            "user message content must not appear in result_text"
+        );
+    }
+
     // ── GeminiRuntime spawn wiring tests ─────────────────────────────────────
 
     #[test]
@@ -808,6 +912,7 @@ mod tests {
             log_path_for_run: Arc::new(|run_id| std::env::temp_dir().join(format!("{run_id}.log"))),
             stall_threshold: None,
             max_turns: None,
+            argv_builder: default_argv_builder(),
         });
 
         let mut request = make_request("resume-spawn-test");
@@ -864,6 +969,7 @@ mod tests {
             log_path_for_run: Arc::new(|run_id| std::env::temp_dir().join(format!("{run_id}.log"))),
             stall_threshold: None,
             max_turns: None,
+            argv_builder: default_argv_builder(),
         });
 
         let request = make_request("approval-other-test");
@@ -912,6 +1018,7 @@ mod tests {
             log_path_for_run: Arc::new(|run_id| std::env::temp_dir().join(format!("{run_id}.log"))),
             stall_threshold: None,
             max_turns: None,
+            argv_builder: default_argv_builder(),
         });
 
         let request = make_request("approval-default-test");

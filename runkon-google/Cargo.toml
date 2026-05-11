@@ -28,3 +28,6 @@ tempfile = "3"
 [[example]]
 name = "standalone_flow"
 required-features = ["test-utils"]
+
+[[example]]
+name = "gemini_stream_json"
