@@ -1,6 +1,5 @@
 //! AgentRuntime trait and dispatch infrastructure (RFC 007).
 
-pub mod claude;
 pub mod cli;
 pub mod script;
 
@@ -142,58 +141,31 @@ pub struct RuntimeOptions {
     pub log_path_for_run: Arc<dyn Fn(&str) -> PathBuf + Send + Sync>,
     /// Where `CliRuntime` writes `<run_id>/output.json`.
     pub workspace_root: PathBuf,
-    /// Builds the argv (and optional prompt-file path) for a headless agent spawn.
-    pub argv_builder: claude::ArgvBuilder,
     /// If `Some(t)`, the JSONL drain loop returns `StalledOut` when no output
     /// is received for longer than `t`. `None` disables stall detection.
     pub stall_threshold: Option<std::time::Duration>,
     /// If `Some(n)`, the JSONL drain loop returns `TurnCapReached(n)` after
-    /// counting `n` `"assistant"` events. `None` disables the turn cap.
+    /// counting `n` turn-tick events. `None` disables the turn cap.
     pub max_turns: Option<u32>,
 }
 
 /// Resolve a runtime name to a boxed `AgentRuntime` implementation.
+///
+/// Built-in types are `cli` and `script`. The `claude` built-in has been
+/// extracted to `runkon-anthropic`; wire `ClaudeRuntime` via your
+/// `RuntimeResolver` implementation instead.
 pub fn resolve_runtime(
     name: &str,
-    permission_mode: PermissionMode,
+    _permission_mode: PermissionMode,
     runtimes: &HashMap<String, RuntimeConfig>,
     options: &RuntimeOptions,
 ) -> Result<Box<dyn AgentRuntime>> {
-    if name == "claude" {
-        let claude_options = claude::ClaudeRuntimeOptions {
-            permission_mode,
-            binary_path: options.binary_path.clone(),
-            env: options.env.clone(),
-            log_path_for_run: options.log_path_for_run.clone(),
-            argv_builder: options.argv_builder.clone(),
-            stall_threshold: options.stall_threshold,
-            max_turns: options.max_turns,
-        };
-        return Ok(Box::new(claude::ClaudeRuntime::new(claude_options)));
-    }
     let rt_config = runtimes.get(name).ok_or_else(|| {
         RuntimeError::Config(format!(
-            "unknown runtime '{name}' — only 'claude' is built-in; \
-                 add a `[runtimes.{name}]` section to your host config for CLI agents"
+            "unknown runtime '{name}' — add a `[runtimes.{name}]` section to your host config"
         ))
     })?;
     match rt_config.runtime_type.as_deref().unwrap_or("cli") {
-        "claude" => {
-            // Named claude runtime: merge env — rt_config wins over options.env on conflict.
-            let mut merged_env = options.env.clone();
-            merged_env.extend(rt_config.env.clone());
-            Ok(Box::new(claude::ClaudeRuntime::new(
-                claude::ClaudeRuntimeOptions {
-                    permission_mode,
-                    binary_path: options.binary_path.clone(),
-                    env: merged_env,
-                    log_path_for_run: options.log_path_for_run.clone(),
-                    argv_builder: options.argv_builder.clone(),
-                    stall_threshold: options.stall_threshold,
-                    max_turns: options.max_turns,
-                },
-            )))
-        }
         "cli" => Ok(Box::new(cli::CliRuntime::new(
             rt_config.clone(),
             options.workspace_root.clone(),
@@ -355,66 +327,9 @@ mod tests {
             env,
             log_path_for_run: Arc::new(|run_id: &str| PathBuf::from(format!("/tmp/{run_id}.log"))),
             workspace_root: PathBuf::from("/tmp"),
-            argv_builder: Arc::new(|_req| Ok((vec![], None))),
             stall_threshold: None,
             max_turns: None,
         }
-    }
-
-    #[test]
-    fn resolve_runtime_builtin_claude_regression() {
-        let runtimes = HashMap::new();
-        let options = make_test_options(HashMap::new());
-        let result = resolve_runtime(
-            "claude",
-            crate::permission::PermissionMode::Default,
-            &runtimes,
-            &options,
-        );
-        assert!(result.is_ok(), "built-in 'claude' runtime must resolve");
-    }
-
-    #[test]
-    fn resolve_runtime_named_claude_type_dispatches_ok() {
-        let mut runtimes = HashMap::new();
-        let rt = crate::config::RuntimeConfig {
-            runtime_type: Some("claude".to_string()),
-            ..crate::config::RuntimeConfig::default()
-        };
-        runtimes.insert("claude-local".to_string(), rt);
-        let options = make_test_options(HashMap::new());
-        let result = resolve_runtime(
-            "claude-local",
-            crate::permission::PermissionMode::Default,
-            &runtimes,
-            &options,
-        );
-        assert!(result.is_ok(), "named 'claude' type runtime must resolve");
-    }
-
-    #[test]
-    fn resolve_runtime_named_claude_env_rt_config_wins_on_conflict() {
-        let mut runtimes = HashMap::new();
-        let mut rt_env = HashMap::new();
-        rt_env.insert("X".to_string(), "over".to_string());
-        rt_env.insert("Y".to_string(), "new".to_string());
-        let rt = crate::config::RuntimeConfig {
-            runtime_type: Some("claude".to_string()),
-            env: rt_env,
-            ..crate::config::RuntimeConfig::default()
-        };
-        runtimes.insert("claude-local".to_string(), rt);
-
-        let mut base_env = HashMap::new();
-        base_env.insert("X".to_string(), "base".to_string());
-        let options = make_test_options(base_env);
-        let result = resolve_runtime(
-            "claude-local",
-            crate::permission::PermissionMode::Default,
-            &runtimes,
-            &options,
-        );
-        assert!(result.is_ok(), "named claude with env overlay must resolve");
     }
 
     #[test]

@@ -747,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "runkon-anthropic"
-version = "0.5.0-alpha"
+version = "0.6.0"
 dependencies = [
  "runkon-flow",
  "runkon-flow-executors",
@@ -805,7 +805,7 @@ dependencies = [
 
 [[package]]
 name = "runkon-runtimes"
-version = "0.5.0-alpha"
+version = "0.6.0"
 dependencies = [
  "libc",
  "serde",
