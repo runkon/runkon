@@ -1,25 +1,33 @@
 [package]
-name = "runkon-flow-executors"
+name = "runkon-google"
 version = "0.6.0-alpha"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Portable executor primitives for runkon-flow — event sinks, env providers, structured output parsing, and agent definition loading. No vendor coupling."
+description = "Google Gemini API client and agent executor for runkon-flow. Supports both direct API calls and generic subprocess runtimes."
 readme = "README.md"
-keywords = ["workflow", "executor", "runkon", "agent", "automation"]
-categories = ["development-tools"]
+keywords = ["google", "gemini", "llm", "agent", "runkon"]
+categories = ["api-bindings", "development-tools"]
 
 [features]
 test-utils = ["runkon-flow/test-utils"]
 
 [dependencies]
 runkon-flow = { path = "../runkon-flow", version = "0.6.0-alpha" }
+runkon-flow-executors = { path = "../runkon-flow-executors", version = "0.6.0-alpha" }
 runkon-runtimes = { path = "../runkon-runtimes", version = "0.6.0-alpha" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yml = "0.0"
+ureq = { version = "2", features = ["json"] }
 tracing = "0.1"
 
 [dev-dependencies]
 runkon-flow = { path = "../runkon-flow", version = "0.6.0-alpha", features = ["test-utils"] }
 tempfile = "3"
+
+[[example]]
+name = "standalone_flow"
+required-features = ["test-utils"]
+
+[[example]]
+name = "gemini_stream_json"

@@ -996,6 +996,7 @@ mod tests {
             total_output_tokens: 0,
             total_cache_read_input_tokens: 0,
             total_cache_creation_input_tokens: 0,
+            has_llm_metrics: false,
             last_gate_feedback: None,
             block_output: None,
             block_with: vec![],
@@ -1089,13 +1090,8 @@ mod tests {
                     workflow_run_id: "child-run".into(),
                     workflow_name: "child-wf".into(),
                     all_succeeded: true,
-                    total_cost: 0.0,
-                    total_turns: 0,
                     total_duration_ms: 0,
-                    total_input_tokens: 0,
-                    total_output_tokens: 0,
-                    total_cache_read_input_tokens: 0,
-                    total_cache_creation_input_tokens: 0,
+                    extensions: Default::default(),
                 })
             }
             fn resume_child(
@@ -1260,13 +1256,8 @@ mod tests {
                     workflow_run_id: run.id,
                     workflow_name: "child-wf".into(),
                     all_succeeded: true,
-                    total_cost: 0.0,
-                    total_turns: 0,
                     total_duration_ms: 0,
-                    total_input_tokens: 0,
-                    total_output_tokens: 0,
-                    total_cache_read_input_tokens: 0,
-                    total_cache_creation_input_tokens: 0,
+                    extensions: Default::default(),
                 })
             }
             fn resume_child(
@@ -1450,13 +1441,8 @@ mod tests {
                         workflow_run_id: run.id,
                         workflow_name: "child-wf".into(),
                         all_succeeded: true,
-                        total_cost: 0.0,
-                        total_turns: 0,
                         total_duration_ms: 0,
-                        total_input_tokens: 0,
-                        total_output_tokens: 0,
-                        total_cache_read_input_tokens: 0,
-                        total_cache_creation_input_tokens: 0,
+                        extensions: Default::default(),
                     })
                 } else {
                     // item-b: failed child with no structured_output
@@ -1464,13 +1450,8 @@ mod tests {
                         workflow_run_id: run.id,
                         workflow_name: "child-wf".into(),
                         all_succeeded: false,
-                        total_cost: 0.0,
-                        total_turns: 0,
                         total_duration_ms: 0,
-                        total_input_tokens: 0,
-                        total_output_tokens: 0,
-                        total_cache_read_input_tokens: 0,
-                        total_cache_creation_input_tokens: 0,
+                        extensions: Default::default(),
                     })
                 }
             }
@@ -1628,13 +1609,8 @@ mod tests {
                     workflow_run_id: "fail-child-run".into(),
                     workflow_name: "child-wf".into(),
                     all_succeeded: false,
-                    total_cost: 0.0,
-                    total_turns: 0,
                     total_duration_ms: 0,
-                    total_input_tokens: 0,
-                    total_output_tokens: 0,
-                    total_cache_read_input_tokens: 0,
-                    total_cache_creation_input_tokens: 0,
+                    extensions: Default::default(),
                 })
             }
             fn resume_child(
@@ -1769,13 +1745,8 @@ mod tests {
                     workflow_run_id: "no-output-child".into(),
                     workflow_name: "child-wf".into(),
                     all_succeeded: true,
-                    total_cost: 0.0,
-                    total_turns: 0,
                     total_duration_ms: 0,
-                    total_input_tokens: 0,
-                    total_output_tokens: 0,
-                    total_cache_read_input_tokens: 0,
-                    total_cache_creation_input_tokens: 0,
+                    extensions: Default::default(),
                 })
             }
             fn resume_child(

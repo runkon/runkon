@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+use crate::extensions::Extensions;
 use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
 
 /// A step key is a `(name, iteration)` pair used for skip-set and step-map lookups.
@@ -56,18 +57,10 @@ pub struct WorkflowRun {
     pub iteration: i64,
     pub blocked_on: Option<BlockedOn>,
     pub workflow_title: Option<String>,
-    pub total_input_tokens: Option<i64>,
-    pub total_output_tokens: Option<i64>,
-    pub total_cache_read_input_tokens: Option<i64>,
-    pub total_cache_creation_input_tokens: Option<i64>,
-    pub total_turns: Option<i64>,
-    pub total_cost_usd: Option<f64>,
     pub total_duration_ms: Option<i64>,
-    /// Persisted model override for this run. Cross-runtime — same semantics as
-    /// `ActionParams::model`. `None` means no override; each step executor falls
-    /// back to its own default. (Issue #2987 may move this column; keep current.)
-    pub model: Option<String>,
     pub dismissed: bool,
+    #[serde(skip)]
+    pub extensions: Extensions,
     #[serde(skip)]
     pub owner_token: Option<String>,
     #[serde(skip)]
@@ -210,13 +203,8 @@ pub struct WorkflowResult {
     pub workflow_run_id: String,
     pub workflow_name: String,
     pub all_succeeded: bool,
-    pub total_cost: f64,
-    pub total_turns: i64,
     pub total_duration_ms: i64,
-    pub total_input_tokens: i64,
-    pub total_output_tokens: i64,
-    pub total_cache_read_input_tokens: i64,
-    pub total_cache_creation_input_tokens: i64,
+    pub extensions: Extensions,
 }
 
 /// Input describing a successfully completed step, passed to `record_step_success`.
