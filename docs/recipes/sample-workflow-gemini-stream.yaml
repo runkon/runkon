@@ -1,0 +1,29 @@
+name: gemini-stream-demo
+description: |
+  Workflow using GeminiRuntime (stream-json mode) from runkon-google.
+  Provides per-turn telemetry, stall detection, and turn-cap enforcement
+  compared to the CliRuntime recipe in gemini-cli.md.
+
+# Host-side wiring (Rust, not YAML):
+#
+#   use runkon_google::{GeminiRuntime, GeminiRuntimeOptions};
+#   use runkon_runtimes::permission::PermissionMode;
+#
+#   let runtime = GeminiRuntime::new(GeminiRuntimeOptions {
+#       binary_path: PathBuf::from("gemini"),
+#       env: [("GEMINI_API_KEY".into(), api_key)].into(),
+#       permission_mode: PermissionMode::Default,
+#       log_path_for_run: Arc::new(|run_id| logs_dir.join(format!("{run_id}.jsonl"))),
+#       stall_threshold: Some(Duration::from_secs(300)),
+#       max_turns: Some(20),
+#   });
+#
+# Register it via your RuntimeResolver and reference it as `runtime: gemini-stream`
+# in agent frontmatter.
+
+steps:
+  - name: ask-gemini-stream
+    type: agent
+    agent: sample-agent-gemini
+    # Override model at workflow level (optional):
+    # model: gemini-2.5-pro

@@ -64,7 +64,7 @@ impl AgentRuntime for CliRuntime {
 
         let prompt_via = self.config.prompt_via.as_deref().unwrap_or("arg");
 
-        let args: Vec<String> = self
+        let mut args: Vec<String> = self
             .config
             .args
             .as_deref()
@@ -80,6 +80,15 @@ impl AgentRuntime for CliRuntime {
             })
             .filter(|a| !a.is_empty())
             .collect();
+
+        for (k, v) in &request.extra_cli_args {
+            args.push(format!("--{k}"));
+            args.push(v.to_string());
+        }
+        if let Some(session_id) = &request.resume_session_id {
+            args.push("--resume".to_string());
+            args.push(session_id.clone());
+        }
 
         let output_file = std::fs::File::create(&output_path).map_err(|e| {
             RuntimeError::Agent(format!("CliRuntime: failed to create output file: {e}"))
@@ -331,8 +340,13 @@ fn parse_output(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_def::{AgentDef, AgentRole};
     use crate::config::RuntimeConfig;
     use crate::runtime::test_util::make_test_run;
+    use crate::runtime::RuntimeRequest;
+    use crate::tracker::{EventSink, NoopTracker, RuntimeEvent};
+    use std::borrow::Cow;
+    use std::sync::{Arc, Mutex};
 
     fn make_runtime(binary: &str) -> CliRuntime {
         CliRuntime::new(
@@ -445,5 +459,141 @@ mod tests {
         let json = r#"{"stats": {"count": "not-a-number"}}"#;
         let (_, tokens, _) = parse_output(json, &config);
         assert!(tokens.is_none());
+    }
+
+    #[derive(Default, Clone)]
+    struct RecordingSink {
+        events: Arc<Mutex<Vec<RuntimeEvent>>>,
+    }
+
+    impl EventSink for RecordingSink {
+        fn on_event(&self, _run_id: &str, event: RuntimeEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    fn make_request_with_sink(
+        run_id: &str,
+        binary: &str,
+        sink: Arc<RecordingSink>,
+    ) -> (CliRuntime, RuntimeRequest, std::path::PathBuf) {
+        let workspace = std::env::temp_dir().join(format!("cli-test-workspace-{run_id}"));
+        let runtime = CliRuntime::new(
+            RuntimeConfig {
+                binary: Some(binary.to_string()),
+                args: Some(vec!["static-arg".to_string()]),
+                result_field: Some("response".to_string()),
+                ..RuntimeConfig::default()
+            },
+            workspace.clone(),
+        );
+        let request = RuntimeRequest {
+            run_id: run_id.to_string(),
+            agent_def: AgentDef {
+                name: "test".to_string(),
+                role: AgentRole::Reviewer,
+                can_commit: false,
+                model: None,
+                runtime: "cli".to_string(),
+                prompt: String::new(),
+            },
+            prompt: "test-prompt".to_string(),
+            working_dir: std::path::PathBuf::from("/tmp"),
+            model: None,
+            extra_cli_args: vec![],
+            plugin_dirs: vec![],
+            resume_session_id: None,
+            tracker: Arc::new(NoopTracker),
+            event_sink: sink,
+        };
+        (runtime, request, workspace)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_impl_resume_flag_appended() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = std::env::temp_dir().join("cli-test-resume-stub");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let script = tmp.join("stub-resume.sh");
+        let mut f = std::fs::File::create(&script).unwrap();
+        writeln!(f, "#!/bin/sh").unwrap();
+        writeln!(f, r#"printf '{{"response": "%s"}}' "$*""#).unwrap();
+        drop(f);
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let sink = Arc::new(RecordingSink::default());
+        let (runtime, mut request, workspace) =
+            make_request_with_sink("resume-test", script.to_str().unwrap(), sink.clone());
+        request.resume_session_id = Some("latest".to_string());
+
+        runtime.spawn_validated(&request).unwrap();
+        let _ = runtime.poll("resume-test", None, std::time::Duration::from_secs(5));
+
+        let events = sink.events.lock().unwrap();
+        let result_text = events.iter().find_map(|e| {
+            if let RuntimeEvent::Completed { result_text, .. } = e {
+                result_text.clone()
+            } else {
+                None
+            }
+        });
+        let text = result_text.expect("expected Completed event with result_text");
+        assert!(
+            text.contains("--resume"),
+            "--resume must appear in spawned argv, got: {text}"
+        );
+        assert!(
+            text.contains("latest"),
+            "'latest' must appear in spawned argv, got: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_impl_extra_cli_args_forwarded() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = std::env::temp_dir().join("cli-test-extra-args-stub");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let script = tmp.join("stub-extra.sh");
+        let mut f = std::fs::File::create(&script).unwrap();
+        writeln!(f, "#!/bin/sh").unwrap();
+        writeln!(f, r#"printf '{{"response": "%s"}}' "$*""#).unwrap();
+        drop(f);
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let sink = Arc::new(RecordingSink::default());
+        let (runtime, mut request, workspace) =
+            make_request_with_sink("extra-args-test", script.to_str().unwrap(), sink.clone());
+        request.extra_cli_args = vec![(Cow::Borrowed("approval-mode"), Cow::Borrowed("yolo"))];
+
+        runtime.spawn_validated(&request).unwrap();
+        let _ = runtime.poll("extra-args-test", None, std::time::Duration::from_secs(5));
+
+        let events = sink.events.lock().unwrap();
+        let result_text = events.iter().find_map(|e| {
+            if let RuntimeEvent::Completed { result_text, .. } = e {
+                result_text.clone()
+            } else {
+                None
+            }
+        });
+        let text = result_text.expect("expected Completed event with result_text");
+        assert!(
+            text.contains("--approval-mode"),
+            "--approval-mode must appear in spawned argv, got: {text}"
+        );
+        assert!(
+            text.contains("yolo"),
+            "'yolo' must appear in spawned argv, got: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&workspace);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
