@@ -20,6 +20,7 @@ Future vendor integrations (`runkon-openai`, `runkon-codex`, etc.) follow the sa
 ## Recipes
 
 - **Gemini CLI** — see [docs/recipes/gemini-cli.md](docs/recipes/gemini-cli.md) for a ready-to-use `CliRuntime` binding and the Phase 2 `GeminiRuntime` (stream-json, per-turn telemetry).
+- **Claude CLI via Anthropic-compatible proxy (e.g. Gemini through LiteLLM)** — see [docs/recipes/claude-cli-via-gemini-proxy.md](docs/recipes/claude-cli-via-gemini-proxy.md) for a TOML recipe routing the Claude CLI through any Anthropic-Messages-compatible proxy.
 
 Status: pre-1.0 alpha. APIs may change between minor versions until 0.1.0 stable.
 
