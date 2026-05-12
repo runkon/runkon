@@ -147,6 +147,7 @@ impl GeminiAgentExecutor {
 
         let request = RuntimeRequest {
             run_id: ctx.run_id.clone(),
+            effective_runtime: effective_runtime.to_string(),
             agent_def,
             prompt,
             working_dir: ctx.working_dir.clone(),

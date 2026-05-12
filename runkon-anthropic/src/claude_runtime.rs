@@ -68,6 +68,7 @@ pub struct ClaudeRuntime {
     prompt_file: Arc<Mutex<Option<PathBuf>>>,
     tracker: Arc<Mutex<Option<Arc<dyn RunTracker>>>>,
     event_sink: Arc<Mutex<Option<Arc<dyn RunEventSink>>>>,
+    runtime_name: Arc<Mutex<Option<String>>>,
 }
 
 impl ClaudeRuntime {
@@ -79,6 +80,7 @@ impl ClaudeRuntime {
             prompt_file: Arc::new(Mutex::new(None)),
             tracker: Arc::new(Mutex::new(None)),
             event_sink: Arc::new(Mutex::new(None)),
+            runtime_name: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -124,6 +126,8 @@ impl AgentRuntime for ClaudeRuntime {
             *self.tracker.lock().unwrap_or_else(|e| e.into_inner()) = Some(request.tracker.clone());
             *self.event_sink.lock().unwrap_or_else(|e| e.into_inner()) =
                 Some(request.event_sink.clone());
+            *self.runtime_name.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(request.effective_runtime.clone());
             Ok(())
         }
         #[cfg(not(unix))]
@@ -316,11 +320,25 @@ fn poll_unix(
             PollError::Failed("ClaudeRuntime::poll called before spawn (event_sink missing)".into())
         })?;
 
+    let runtime_name = rt
+        .runtime_name
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .ok_or_else(|| {
+            PollError::Failed(
+                "ClaudeRuntime::poll called before spawn (runtime_name missing)".into(),
+            )
+        })?;
+
     let pid = handle.pid();
     let log_path = (rt.options.log_path_for_run)(run_id);
 
     if let Err(e) = tracker.record_pid(run_id, pid) {
         tracing::warn!("ClaudeRuntime: failed to persist subprocess pid {pid}: {e}");
+    }
+    if let Err(e) = tracker.record_runtime(run_id, &runtime_name) {
+        tracing::warn!("ClaudeRuntime: failed to persist resolved runtime '{runtime_name}': {e}");
     }
 
     let stall_threshold = rt.options.stall_threshold;
@@ -663,6 +681,7 @@ mod tests {
                 runtime: "claude".to_string(),
                 prompt: String::new(),
             },
+            effective_runtime: "claude".to_string(),
             prompt: "p".to_string(),
             working_dir: std::path::PathBuf::from("/tmp"),
             model: None,
@@ -816,6 +835,7 @@ mod tests {
         *runtime.handle.lock().unwrap() = Some(handle);
         *runtime.tracker.lock().unwrap() = Some(Arc::new(NoopTracker));
         *runtime.event_sink.lock().unwrap() = Some(Arc::new(NoopEventSink));
+        *runtime.runtime_name.lock().unwrap() = Some("claude".to_string());
         (pid, script)
     }
 
@@ -862,6 +882,7 @@ mod tests {
         *runtime.handle.lock().unwrap() = Some(handle);
         *runtime.tracker.lock().unwrap() = Some(Arc::new(NoopTracker));
         *runtime.event_sink.lock().unwrap() = Some(Arc::new(NoopEventSink));
+        *runtime.runtime_name.lock().unwrap() = Some("claude".to_string());
         pid
     }
 
@@ -928,6 +949,7 @@ mod tests {
         *runtime.handle.lock().unwrap() = Some(handle);
         *runtime.tracker.lock().unwrap() = Some(Arc::new(NoopTracker));
         *runtime.event_sink.lock().unwrap() = Some(Arc::new(NoopEventSink));
+        *runtime.runtime_name.lock().unwrap() = Some("claude".to_string());
         (pid, script)
     }
 

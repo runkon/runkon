@@ -68,7 +68,7 @@ impl AgentRuntime for ScriptRuntime {
             request.tracker.as_ref(),
             &request.run_id,
             pid,
-            "script",
+            &request.effective_runtime,
             "ScriptRuntime",
         );
 
@@ -265,6 +265,7 @@ mod tests {
         RuntimeRequest {
             run_id: run_id.to_string(),
             agent_def: AgentDef::default(),
+            effective_runtime: "script".to_string(),
             prompt: String::new(),
             working_dir: std::env::temp_dir(),
             model: None,
