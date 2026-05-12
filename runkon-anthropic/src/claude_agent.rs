@@ -105,6 +105,13 @@ impl ClaudeAgentExecutor {
             .as_deref()
             .unwrap_or(&agent_def.runtime);
 
+        if let Err(e) = ctx.tracker.record_runtime(&ctx.run_id, effective_runtime) {
+            tracing::warn!(
+                "ClaudeAgentExecutor: failed to persist resolved runtime '{}' for run {}: {e}",
+                effective_runtime, ctx.run_id
+            );
+        }
+
         // Validate supported_models before spawning — catches misconfiguration early.
         check_supported_models(
             effective_runtime,
@@ -334,6 +341,16 @@ mod tests {
         std::fs::write(
             path.join("test-agent.md"),
             format!("---\nmodel: {model}\n---\nDo the work."),
+        )
+        .unwrap();
+    }
+
+    fn write_agent_with_runtime(dir: &TempDir, runtime: &str) {
+        let path = dir.path().join(".conductor").join("agents");
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(
+            path.join("test-agent.md"),
+            format!("---\nruntime: {runtime}\n---\nDo the work."),
         )
         .unwrap();
     }
@@ -742,6 +759,46 @@ mod tests {
         }
     }
 
+    /// Captures the most recent `(run_id, runtime_name)` pair passed to `record_runtime`.
+    struct RecordingTracker {
+        captured: Mutex<Option<(String, String)>>,
+    }
+
+    impl RecordingTracker {
+        fn new() -> Self {
+            Self {
+                captured: Mutex::new(None),
+            }
+        }
+
+        fn captured_runtime(&self) -> Option<String> {
+            self.captured
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|(_, name)| name.clone())
+        }
+    }
+
+    impl RunTracker for RecordingTracker {
+        fn record_pid(&self, _run_id: &str, _pid: u32) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        fn record_runtime(&self, run_id: &str, name: &str) -> Result<(), RuntimeError> {
+            *self.captured.lock().unwrap() = Some((run_id.to_string(), name.to_string()));
+            Ok(())
+        }
+        fn mark_cancelled(&self, _run_id: &str) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        fn mark_failed_if_running(&self, _run_id: &str, _reason: &str) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        fn get_run(&self, _run_id: &str) -> Result<Option<runkon_runtimes::run::RunHandle>, RuntimeError> {
+            Ok(None)
+        }
+    }
+
     #[test]
     fn execute_uses_runtime_override_when_set() {
         // Agent file with no `runtime:` frontmatter falls back to "claude".
@@ -800,5 +857,142 @@ mod tests {
 
         // The bare agent file produces `agent_def.runtime = "claude"`.
         assert_eq!(resolver.captured(), Some("claude".to_string()));
+    }
+
+    // ── record_runtime via RunTracker ─────────────────────────────────────────
+
+    #[test]
+    fn execute_records_runtime_override_when_set() {
+        let tmp = TempDir::new().unwrap();
+        write_agent(&tmp);
+
+        let tracker = Arc::new(RecordingTracker::new());
+        let resolver = Arc::new(RecordingResolver::new());
+        let mut ctx = make_ctx(&tmp);
+        ctx.tracker = tracker.clone();
+        ctx.runtime_override = Some("qwen-local".to_string());
+        ctx.runtimes.insert(
+            "qwen-local".to_string(),
+            runkon_runtimes::config::RuntimeConfig::default(),
+        );
+
+        let params = ClaudeAgentParams {
+            name: "test-agent",
+            inputs: &HashMap::new(),
+            snippet_refs: &[],
+            dry_run: false,
+            retry_error: None,
+            schema: None,
+        };
+
+        let executor = ClaudeAgentExecutor::new(resolver, None);
+        let _ = executor.execute(&ctx, &params);
+
+        assert_eq!(
+            tracker.captured_runtime(),
+            Some("qwen-local".to_string()),
+            "tracker should record the runtime_override value"
+        );
+    }
+
+    #[test]
+    fn execute_records_agent_def_runtime_when_override_none() {
+        let tmp = TempDir::new().unwrap();
+        write_agent(&tmp);
+
+        let tracker = Arc::new(RecordingTracker::new());
+        let resolver = Arc::new(RecordingResolver::new());
+        let mut ctx = make_ctx(&tmp);
+        ctx.tracker = tracker.clone();
+        // runtime_override is None — falls back to agent_def.runtime = "claude"
+
+        let params = ClaudeAgentParams {
+            name: "test-agent",
+            inputs: &HashMap::new(),
+            snippet_refs: &[],
+            dry_run: false,
+            retry_error: None,
+            schema: None,
+        };
+
+        let executor = ClaudeAgentExecutor::new(resolver, None);
+        let _ = executor.execute(&ctx, &params);
+
+        assert_eq!(
+            tracker.captured_runtime(),
+            Some("claude".to_string()),
+            "tracker should record the agent_def default runtime when override is None"
+        );
+    }
+
+    #[test]
+    fn execute_records_frontmatter_runtime() {
+        let tmp = TempDir::new().unwrap();
+        write_agent_with_runtime(&tmp, "gemini");
+
+        let tracker = Arc::new(RecordingTracker::new());
+        let resolver = Arc::new(RecordingResolver::new());
+        let mut ctx = make_ctx(&tmp);
+        ctx.tracker = tracker.clone();
+        // No runtime_override — executor must use the frontmatter runtime.
+
+        let params = ClaudeAgentParams {
+            name: "test-agent",
+            inputs: &HashMap::new(),
+            snippet_refs: &[],
+            dry_run: false,
+            retry_error: None,
+            schema: None,
+        };
+
+        let executor = ClaudeAgentExecutor::new(resolver, None);
+        let _ = executor.execute(&ctx, &params);
+
+        assert_eq!(
+            tracker.captured_runtime(),
+            Some("gemini".to_string()),
+            "tracker should record the frontmatter runtime (exact repro from ticket #63)"
+        );
+    }
+
+    #[test]
+    fn execute_records_runtime_on_api_path() {
+        // When schema + api_key are both present the API fast-path is taken
+        // (no subprocess spawned). The tracker must still receive record_runtime
+        // before the API call, because the recording must happen before the fork.
+        let tmp = TempDir::new().unwrap();
+        write_agent(&tmp);
+
+        let tracker = Arc::new(RecordingTracker::new());
+        let resolver = Arc::new(TrackingResolver::new());
+        let resolver_ref = resolver.clone();
+        let mut ctx = make_ctx(&tmp);
+        ctx.tracker = tracker.clone();
+        ctx.model = Some("test-model".to_string());
+
+        let schema = make_schema();
+        let params = ClaudeAgentParams {
+            name: "test-agent",
+            inputs: &HashMap::new(),
+            snippet_refs: &[],
+            dry_run: false,
+            retry_error: None,
+            schema: Some(&schema),
+        };
+
+        let executor = ClaudeAgentExecutor::new(resolver, Some("dummy-api-key".to_string()));
+        let _ = executor.execute(&ctx, &params); // will Err (no real endpoint)
+
+        // API fast-path: resolver must NOT have been called.
+        assert!(
+            !resolver_ref.was_called(),
+            "resolver must not be called on the API path"
+        );
+        // But the tracker must have received the runtime name.
+        assert_eq!(
+            tracker.captured_runtime(),
+            Some("claude".to_string()),
+            "tracker must record runtime even on the API fast-path"
+        );
     }
 }
