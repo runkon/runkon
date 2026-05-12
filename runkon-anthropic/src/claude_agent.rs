@@ -108,7 +108,8 @@ impl ClaudeAgentExecutor {
         if let Err(e) = ctx.tracker.record_runtime(&ctx.run_id, effective_runtime) {
             tracing::warn!(
                 "ClaudeAgentExecutor: failed to persist resolved runtime '{}' for run {}: {e}",
-                effective_runtime, ctx.run_id
+                effective_runtime,
+                ctx.run_id
             );
         }
 
@@ -794,7 +795,10 @@ mod tests {
         fn mark_failed_if_running(&self, _run_id: &str, _reason: &str) -> Result<(), RuntimeError> {
             Ok(())
         }
-        fn get_run(&self, _run_id: &str) -> Result<Option<runkon_runtimes::run::RunHandle>, RuntimeError> {
+        fn get_run(
+            &self,
+            _run_id: &str,
+        ) -> Result<Option<runkon_runtimes::run::RunHandle>, RuntimeError> {
             Ok(None)
         }
     }
