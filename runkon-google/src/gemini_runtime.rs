@@ -101,6 +101,7 @@ pub struct GeminiRuntime {
     handle: Arc<Mutex<Option<runkon_runtimes::headless::HeadlessHandle>>>,
     tracker: Arc<Mutex<Option<Arc<dyn RunTracker>>>>,
     event_sink: Arc<Mutex<Option<Arc<dyn RunEventSink>>>>,
+    runtime_name: Arc<Mutex<Option<String>>>,
 }
 
 impl GeminiRuntime {
@@ -111,6 +112,7 @@ impl GeminiRuntime {
             handle: Arc::new(Mutex::new(None)),
             tracker: Arc::new(Mutex::new(None)),
             event_sink: Arc::new(Mutex::new(None)),
+            runtime_name: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -157,6 +159,8 @@ impl AgentRuntime for GeminiRuntime {
             *self.tracker.lock().unwrap_or_else(|e| e.into_inner()) = Some(request.tracker.clone());
             *self.event_sink.lock().unwrap_or_else(|e| e.into_inner()) =
                 Some(request.event_sink.clone());
+            *self.runtime_name.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(request.effective_runtime.clone());
             Ok(())
         }
         #[cfg(not(unix))]
@@ -362,11 +366,27 @@ fn poll_unix(
             PollError::Failed("GeminiRuntime::poll called before spawn (event_sink missing)".into())
         })?;
 
+    let runtime_name = rt
+        .runtime_name
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .ok_or_else(|| {
+            PollError::Failed(
+                "GeminiRuntime::poll called before spawn (runtime_name missing)".into(),
+            )
+        })?;
+
     let pid = handle.pid();
     let log_path = (rt.options.log_path_for_run)(run_id);
 
     if let Err(e) = tracker.record_pid(run_id, pid) {
         tracing::warn!("GeminiRuntime: failed to persist subprocess pid {pid}: {e}");
+    }
+    if let Err(e) = tracker.record_runtime(run_id, &runtime_name) {
+        tracing::warn!(
+            "GeminiRuntime: failed to persist resolved runtime '{runtime_name}': {e}"
+        );
     }
 
     let stall_threshold = rt.options.stall_threshold;
@@ -577,6 +597,7 @@ mod tests {
                 runtime: "gemini".to_string(),
                 prompt: String::new(),
             },
+            effective_runtime: "gemini".to_string(),
             prompt: "p".to_string(),
             working_dir: PathBuf::from("/tmp"),
             model: None,
@@ -877,6 +898,7 @@ mod tests {
         *runtime.handle.lock().unwrap() = Some(handle);
         *runtime.tracker.lock().unwrap() = Some(Arc::new(NoopTracker));
         *runtime.event_sink.lock().unwrap() = Some(Arc::new(NoopEventSink));
+        *runtime.runtime_name.lock().unwrap() = Some("gemini".to_string());
 
         let result = runtime.poll("timeout-run", None, Duration::from_millis(200));
         assert!(

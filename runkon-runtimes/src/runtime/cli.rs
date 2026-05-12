@@ -128,7 +128,7 @@ impl AgentRuntime for CliRuntime {
             request.tracker.as_ref(),
             &request.run_id,
             pid,
-            &request.agent_def.runtime,
+            &request.effective_runtime,
             "CliRuntime",
         );
 
@@ -497,6 +497,7 @@ mod tests {
                 runtime: "cli".to_string(),
                 prompt: String::new(),
             },
+            effective_runtime: "cli".to_string(),
             prompt: "test-prompt".to_string(),
             working_dir: std::path::PathBuf::from("/tmp"),
             model: None,

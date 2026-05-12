@@ -61,6 +61,7 @@ fn make_request(run_id: &str, sink: Arc<RecordingSink>) -> RuntimeRequest {
             runtime: "gemini".to_string(),
             prompt: String::new(),
         },
+        effective_runtime: "gemini".to_string(),
         prompt: "Say hello".to_string(),
         working_dir: std::path::PathBuf::from("/tmp"),
         model: None,

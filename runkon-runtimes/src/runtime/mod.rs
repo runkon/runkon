@@ -68,6 +68,10 @@ pub trait AgentRuntime {
 pub struct RuntimeRequest {
     pub run_id: String,
     pub agent_def: AgentDef,
+    /// The post-`runtime_override` effective runtime name, set by the executor
+    /// before constructing the request. All runtimes use this to record the
+    /// runtime name via `record_pid_and_runtime` / `tracker.record_runtime`.
+    pub effective_runtime: String,
     pub prompt: String,
     pub working_dir: PathBuf,
     /// Workflow-level model override. Cross-runtime — same convention as
@@ -96,6 +100,7 @@ impl Default for RuntimeRequest {
         Self {
             run_id: String::new(),
             agent_def: crate::agent_def::AgentDef::default(),
+            effective_runtime: String::new(),
             prompt: String::new(),
             working_dir: PathBuf::new(),
             model: None,
@@ -252,6 +257,7 @@ mod tests {
                 runtime: "claude".to_string(),
                 prompt: String::new(),
             },
+            effective_runtime: "claude".to_string(),
             prompt: "p".to_string(),
             working_dir: PathBuf::from("/tmp"),
             model: req_model.map(String::from),
