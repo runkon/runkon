@@ -338,9 +338,7 @@ fn poll_unix(
         tracing::warn!("ClaudeRuntime: failed to persist subprocess pid {pid}: {e}");
     }
     if let Err(e) = tracker.record_runtime(run_id, &runtime_name) {
-        tracing::warn!(
-            "ClaudeRuntime: failed to persist resolved runtime '{runtime_name}': {e}"
-        );
+        tracing::warn!("ClaudeRuntime: failed to persist resolved runtime '{runtime_name}': {e}");
     }
 
     let stall_threshold = rt.options.stall_threshold;
