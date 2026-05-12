@@ -16,9 +16,9 @@ if [[ "${1:-}" == "--dry-run" ]]; then
 fi
 
 # Dependency-ordered. runkon-runtimes and runkon-flow are leaves; executors
-# depends on both; anthropic depends on all three. runkon-notify is a leaf
-# (no intra-workspace deps), placed last.
-crates=(runkon-runtimes runkon-flow runkon-flow-executors runkon-anthropic runkon-notify)
+# depends on both; anthropic and google each depend on all three (peers).
+# runkon-notify is a leaf (no intra-workspace deps), placed last.
+crates=(runkon-runtimes runkon-flow runkon-flow-executors runkon-anthropic runkon-google runkon-notify)
 
 version=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
 [[ -n "$version" ]] || { echo "could not parse workspace version from Cargo.toml"; exit 1; }
