@@ -11,7 +11,7 @@ ref="${1:-HEAD}"
 version=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
 [[ -n "$version" ]] || { echo "could not parse workspace version from Cargo.toml"; exit 1; }
 
-crates=(runkon-flow runkon-flow-executors runkon-runtimes runkon-anthropic runkon-notify)
+crates=(runkon-flow runkon-flow-executors runkon-runtimes runkon-anthropic runkon-google runkon-notify)
 tags_to_push=()
 
 for crate in "${crates[@]}"; do

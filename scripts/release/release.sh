@@ -26,7 +26,7 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
 fi
 
 version=$(awk -F'"' '/^version = /{print $2; exit}' Cargo.toml)
-crates=(runkon-flow runkon-flow-executors runkon-runtimes runkon-anthropic)
+crates=(runkon-flow runkon-flow-executors runkon-runtimes runkon-anthropic runkon-google runkon-notify)
 tags=()
 for c in "${crates[@]}"; do tags+=("${c}-v${version}"); done
 

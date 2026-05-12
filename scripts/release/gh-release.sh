@@ -38,6 +38,7 @@ Crates published to crates.io:
 - [runkon-flow ${version}](https://crates.io/crates/runkon-flow/${version})
 - [runkon-flow-executors ${version}](https://crates.io/crates/runkon-flow-executors/${version})
 - [runkon-anthropic ${version}](https://crates.io/crates/runkon-anthropic/${version})
+- [runkon-google ${version}](https://crates.io/crates/runkon-google/${version})
 - [runkon-notify ${version}](https://crates.io/crates/runkon-notify/${version})
 
 Per-crate tags pointing at this release commit:
@@ -45,6 +46,7 @@ Per-crate tags pointing at this release commit:
 - \`runkon-flow-executors-v${version}\`
 - \`runkon-runtimes-v${version}\`
 - \`runkon-anthropic-v${version}\`
+- \`runkon-google-v${version}\`
 - \`runkon-notify-v${version}\`
 
 EOF
