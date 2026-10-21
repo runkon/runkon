@@ -18,10 +18,7 @@ impl CancellationInner {
             if let Some(val) = f(node) {
                 return Some(val);
             }
-            match &node.parent {
-                Some(p) => node = p,
-                None => return None,
-            }
+            node = node.parent.as_deref()?;
         }
     }
 }

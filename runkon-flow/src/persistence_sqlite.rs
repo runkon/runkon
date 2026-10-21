@@ -841,7 +841,7 @@ impl WorkflowPersistence for SqliteWorkflowPersistence {
             "SELECT {cols} FROM workflow_run_steps s \
              WHERE s.workflow_run_id = :workflow_run_id \
              ORDER BY s.position",
-            cols = &*STEP_COLUMNS_WITH_PREFIX,
+            cols = *STEP_COLUMNS_WITH_PREFIX,
         );
         let mut stmt = conn.prepare(&sql).map_err(db_err)?;
         let rows = stmt

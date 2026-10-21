@@ -118,7 +118,7 @@ impl AgentRuntime for ClaudeRuntime {
                 }
                 RuntimeError::Workflow(format!(
                     "spawn failed for run {} (working_dir={}): {e}",
-                    &request.run_id, wd
+                    request.run_id, wd
                 ))
             })?;
             *self.handle.lock().unwrap_or_else(|e| e.into_inner()) = Some(h);
