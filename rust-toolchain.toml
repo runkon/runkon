@@ -1,0 +1,6 @@
+# Pinned so a new Rust stable can't fail CI on code a PR didn't touch.
+# Bump in its own PR, fixing any new clippy lints that come with it.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
