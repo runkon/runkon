@@ -77,6 +77,24 @@ pub fn parse_flow_output(text: &str) -> Option<FlowOutput> {
         .ok()
 }
 
+/// Find the first line of `text` that looks like the opening marker of an
+/// output block (`<<<FLOW_OUTPUT>>>`, or any other `<<<…OUTPUT>>>` such as one
+/// from an older or third-party protocol), returning the trimmed marker.
+///
+/// Callers use this after [`parse_flow_output`] returns `None` to tell plain
+/// stdout apart from an output block that was meant to be parsed but wasn't.
+pub fn find_output_block_marker(text: &str) -> Option<&str> {
+    text.lines().map(str::trim).find(|line| {
+        line.strip_prefix("<<<")
+            .and_then(|rest| rest.strip_suffix(">>>"))
+            .is_some_and(|name| {
+                name.ends_with("OUTPUT")
+                    && !name.starts_with("END_")
+                    && name.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+            })
+    })
+}
+
 /// Remove trailing commas before `}` or `]` (common LLM JSON artifact).
 ///
 /// Preserves whitespace between the comma and the closing bracket so that
@@ -369,7 +387,34 @@ pub fn find_max_completed_while_iteration(state: &ExecutionState, node: &WhileNo
 
 #[cfg(test)]
 mod parse_tests {
-    use super::parse_flow_output;
+    use super::{find_output_block_marker, parse_flow_output};
+
+    #[test]
+    fn finds_output_block_markers() {
+        assert_eq!(
+            find_output_block_marker("log line\n<<<LEGACY_OUTPUT>>>\n{}\n"),
+            Some("<<<LEGACY_OUTPUT>>>")
+        );
+        assert_eq!(
+            find_output_block_marker("  <<<FLOW_OUTPUT>>>  \n{bad json\n"),
+            Some("<<<FLOW_OUTPUT>>>")
+        );
+        assert_eq!(
+            find_output_block_marker("<<<OTHER_OUTPUT>>>"),
+            Some("<<<OTHER_OUTPUT>>>")
+        );
+    }
+
+    #[test]
+    fn ignores_plain_output_and_end_markers() {
+        assert_eq!(find_output_block_marker("plain stdout\nno blocks"), None);
+        assert_eq!(find_output_block_marker("<<<END_FLOW_OUTPUT>>>"), None);
+        assert_eq!(
+            find_output_block_marker("see <<<FLOW_OUTPUT>>> in the docs"),
+            None
+        );
+        assert_eq!(find_output_block_marker("<<<flow_output>>>"), None);
+    }
 
     #[test]
     fn parses_well_formed_block_with_markers_and_context() {

@@ -138,7 +138,7 @@ impl AgentRuntime for GeminiRuntime {
             let args = (self.options.argv_builder)(&argv_req).map_err(|e| {
                 RuntimeError::Workflow(format!(
                     "GeminiRuntime: argv_builder failed for run {} (working_dir={wd}): {e}",
-                    &request.run_id
+                    request.run_id
                 ))
             })?;
 
@@ -151,7 +151,7 @@ impl AgentRuntime for GeminiRuntime {
             .map_err(|e| {
                 RuntimeError::Workflow(format!(
                     "GeminiRuntime: spawn failed for run {} (working_dir={wd}): {e}",
-                    &request.run_id
+                    request.run_id
                 ))
             })?;
 

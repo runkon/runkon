@@ -327,6 +327,25 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
                 (out.markers, out.context, json)
             }
             None => {
+                // An output block that didn't parse must fail the step: recording
+                // `markers: []` would silently turn every downstream `if` false.
+                if let Some(marker) = crate::helpers::find_output_block_marker(&stdout) {
+                    let detail = match marker {
+                        "<<<FLOW_OUTPUT>>>" => "a <<<FLOW_OUTPUT>>> block that could not be \
+                             parsed (invalid JSON or missing <<<END_FLOW_OUTPUT>>>)"
+                            .to_string(),
+                        other => format!(
+                            "an unrecognised {other} block; expected <<<FLOW_OUTPUT>>> … \
+                             <<<END_FLOW_OUTPUT>>>"
+                        ),
+                    };
+                    return fail_script_step(
+                        state,
+                        &step_id,
+                        node,
+                        format!("Script '{}' ({}) printed {detail}", node.name, node.run),
+                    );
+                }
                 let ctx: String = stdout.chars().take(2000).collect();
                 (vec![], ctx, None)
             }
@@ -538,6 +557,76 @@ mod tests {
             .and_then(|m| serde_json::from_str(m).ok())
             .unwrap_or_default();
         assert!(markers.is_empty(), "no markers expected for plain stdout");
+    }
+
+    /// A script that prints an unrecognised output block (e.g. from an older
+    /// protocol) must fail the step instead of silently recording `markers: []`.
+    #[test]
+    fn unrecognised_output_block_fails_step() {
+        let (persistence, run_id) = make_persistence();
+        let mut state = make_state(Arc::clone(&persistence), run_id.clone());
+        let script = concat!(
+            "printf '<<<LEGACY_OUTPUT>>>\\n",
+            r#"{"markers":["has_code_changes"],"context":"Found 6 code files"}"#,
+            "\\n<<<END_LEGACY_OUTPUT>>>\\n'"
+        );
+        let node = make_node("detect-file-types", script);
+        let result = execute_script(&mut state, &node, 0);
+        assert!(
+            result.is_err(),
+            "expected failure for unrecognised output block"
+        );
+
+        let steps = persistence.get_steps(&run_id).unwrap();
+        assert_eq!(steps.len(), 1);
+        let step = &steps[0];
+        assert_eq!(step.status, WorkflowStepStatus::Failed);
+        let err_text = step.result_text.as_deref().unwrap_or("");
+        assert!(
+            err_text.contains("detect-file-types") && err_text.contains("LEGACY_OUTPUT"),
+            "error should name the step and the marker found: {err_text}"
+        );
+    }
+
+    /// A `<<<FLOW_OUTPUT>>>` block with invalid JSON must fail the step.
+    #[test]
+    fn malformed_flow_output_block_fails_step() {
+        let (persistence, run_id) = make_persistence();
+        let mut state = make_state(Arc::clone(&persistence), run_id.clone());
+        let script =
+            "printf '<<<FLOW_OUTPUT>>>\\n{\"markers\": [oops]}\\n<<<END_FLOW_OUTPUT>>>\\n'";
+        let node = make_node("broken", script);
+        let result = execute_script(&mut state, &node, 0);
+        assert!(result.is_err(), "expected failure for unparseable block");
+
+        let steps = persistence.get_steps(&run_id).unwrap();
+        let step = &steps[0];
+        assert_eq!(step.status, WorkflowStepStatus::Failed);
+        let err_text = step.result_text.as_deref().unwrap_or("");
+        assert!(
+            err_text.contains("could not be parsed"),
+            "error should say the block could not be parsed: {err_text}"
+        );
+    }
+
+    /// `on_fail = continue` still applies to an unparseable output block.
+    #[test]
+    fn unrecognised_output_block_respects_on_fail_continue() {
+        let (persistence, run_id) = make_persistence();
+        let mut state = make_state(Arc::clone(&persistence), run_id.clone());
+        let mut node = make_node(
+            "lenient",
+            "printf '<<<LEGACY_OUTPUT>>>\\n{}\\n<<<END_LEGACY_OUTPUT>>>\\n'",
+        );
+        node.on_fail = Some(crate::dsl::OnFail::Continue);
+        execute_script(&mut state, &node, 0).unwrap();
+
+        let steps = persistence.get_steps(&run_id).unwrap();
+        assert_eq!(steps[0].status, WorkflowStepStatus::Failed);
+        assert_eq!(
+            state.step_results["lenient"].status,
+            WorkflowStepStatus::Skipped
+        );
     }
 
     /// When state.inputs contains a key with invalid env-var characters (e.g. `=`),
