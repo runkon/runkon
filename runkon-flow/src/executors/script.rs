@@ -334,10 +334,6 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
                         "<<<FLOW_OUTPUT>>>" => "a <<<FLOW_OUTPUT>>> block that could not be \
                              parsed (invalid JSON or missing <<<END_FLOW_OUTPUT>>>)"
                             .to_string(),
-                        "<<<CONDUCTOR_OUTPUT>>>" => "the legacy <<<CONDUCTOR_OUTPUT>>> block, \
-                             which is no longer recognised; rename it to <<<FLOW_OUTPUT>>> … \
-                             <<<END_FLOW_OUTPUT>>>"
-                            .to_string(),
                         other => format!(
                             "an unrecognised {other} block; expected <<<FLOW_OUTPUT>>> … \
                              <<<END_FLOW_OUTPUT>>>"
