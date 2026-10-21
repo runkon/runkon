@@ -559,20 +559,23 @@ mod tests {
         assert!(markers.is_empty(), "no markers expected for plain stdout");
     }
 
-    /// A script that still prints the legacy `<<<CONDUCTOR_OUTPUT>>>` block must
-    /// fail the step instead of silently recording `markers: []`.
+    /// A script that prints an unrecognised output block (e.g. from an older
+    /// protocol) must fail the step instead of silently recording `markers: []`.
     #[test]
-    fn legacy_conductor_output_block_fails_step() {
+    fn unrecognised_output_block_fails_step() {
         let (persistence, run_id) = make_persistence();
         let mut state = make_state(Arc::clone(&persistence), run_id.clone());
         let script = concat!(
-            "printf '<<<CONDUCTOR_OUTPUT>>>\\n",
+            "printf '<<<LEGACY_OUTPUT>>>\\n",
             r#"{"markers":["has_code_changes"],"context":"Found 6 code files"}"#,
-            "\\n<<<END_CONDUCTOR_OUTPUT>>>\\n'"
+            "\\n<<<END_LEGACY_OUTPUT>>>\\n'"
         );
         let node = make_node("detect-file-types", script);
         let result = execute_script(&mut state, &node, 0);
-        assert!(result.is_err(), "expected failure for legacy output block");
+        assert!(
+            result.is_err(),
+            "expected failure for unrecognised output block"
+        );
 
         let steps = persistence.get_steps(&run_id).unwrap();
         assert_eq!(steps.len(), 1);
@@ -580,8 +583,8 @@ mod tests {
         assert_eq!(step.status, WorkflowStepStatus::Failed);
         let err_text = step.result_text.as_deref().unwrap_or("");
         assert!(
-            err_text.contains("detect-file-types") && err_text.contains("CONDUCTOR_OUTPUT"),
-            "error should name the step and the legacy marker: {err_text}"
+            err_text.contains("detect-file-types") && err_text.contains("LEGACY_OUTPUT"),
+            "error should name the step and the marker found: {err_text}"
         );
     }
 
@@ -608,12 +611,12 @@ mod tests {
 
     /// `on_fail = continue` still applies to an unparseable output block.
     #[test]
-    fn legacy_output_block_respects_on_fail_continue() {
+    fn unrecognised_output_block_respects_on_fail_continue() {
         let (persistence, run_id) = make_persistence();
         let mut state = make_state(Arc::clone(&persistence), run_id.clone());
         let mut node = make_node(
             "lenient",
-            "printf '<<<CONDUCTOR_OUTPUT>>>\\n{}\\n<<<END_CONDUCTOR_OUTPUT>>>\\n'",
+            "printf '<<<LEGACY_OUTPUT>>>\\n{}\\n<<<END_LEGACY_OUTPUT>>>\\n'",
         );
         node.on_fail = Some(crate::dsl::OnFail::Continue);
         execute_script(&mut state, &node, 0).unwrap();

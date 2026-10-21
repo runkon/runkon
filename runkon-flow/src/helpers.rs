@@ -78,8 +78,8 @@ pub fn parse_flow_output(text: &str) -> Option<FlowOutput> {
 }
 
 /// Find the first line of `text` that looks like the opening marker of an
-/// output block (`<<<FLOW_OUTPUT>>>`, the legacy `<<<CONDUCTOR_OUTPUT>>>`, or
-/// any other `<<<…OUTPUT>>>`), returning the trimmed marker.
+/// output block (`<<<FLOW_OUTPUT>>>`, or any other `<<<…OUTPUT>>>` such as one
+/// from an older or third-party protocol), returning the trimmed marker.
 ///
 /// Callers use this after [`parse_flow_output`] returns `None` to tell plain
 /// stdout apart from an output block that was meant to be parsed but wasn't.
@@ -392,8 +392,8 @@ mod parse_tests {
     #[test]
     fn finds_output_block_markers() {
         assert_eq!(
-            find_output_block_marker("log line\n<<<CONDUCTOR_OUTPUT>>>\n{}\n"),
-            Some("<<<CONDUCTOR_OUTPUT>>>")
+            find_output_block_marker("log line\n<<<LEGACY_OUTPUT>>>\n{}\n"),
+            Some("<<<LEGACY_OUTPUT>>>")
         );
         assert_eq!(
             find_output_block_marker("  <<<FLOW_OUTPUT>>>  \n{bad json\n"),
