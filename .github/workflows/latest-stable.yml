@@ -1,0 +1,22 @@
+name: Latest stable
+
+# Early warning for lints a new Rust stable would add before rust-toolchain.toml
+# is bumped. Not a required check; a failure here means the next bump has work.
+
+on:
+  schedule:
+    - cron: "0 14 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  clippy:
+    name: Clippy (latest stable)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install stable --profile minimal --component clippy
+      - uses: Swatinem/rust-cache@v2.9.1
+      - run: cargo +stable clippy --workspace --all-targets --all-features -- -D warnings
