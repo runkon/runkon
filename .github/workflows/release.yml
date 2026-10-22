@@ -13,6 +13,8 @@ on:
 
 permissions:
   contents: write
+  # crates.io trusted publishing: exchanged for a short-lived publish token.
+  id-token: write
 
 env:
   CARGO_TERM_COLOR: always
@@ -48,6 +50,25 @@ jobs:
       - name: Tag crates
         run: ./scripts/release/tag.sh
 
+      # Trusted publishing: trade the job's OIDC token for a short-lived crates.io
+      # token, revoked when the job ends. Runs on dry runs too, so a dry run
+      # also checks that crates.io still trusts this repo and workflow.
+      - name: Authenticate with crates.io
+        id: crates-io-auth
+        uses: rust-lang/crates-io-auth-action@v1.0.6
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+        run: |
+          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+            ./scripts/release/publish.sh --dry-run
+          else
+            ./scripts/release/publish.sh
+          fi
+
+      # After publishing, so a failed publish doesn't leave tags pointing at a
+      # release that never reached crates.io.
       - name: Push tags
         if: inputs.dry_run != 'true'
         run: |
@@ -59,16 +80,6 @@ jobs:
           fi
           # Idempotent: re-pushing an existing tag at the same commit is a no-op.
           git push origin "${tags[@]}"
-
-      - name: Publish to crates.io
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
-            ./scripts/release/publish.sh --dry-run
-          else
-            ./scripts/release/publish.sh
-          fi
 
       - name: Create GitHub release
         if: inputs.dry_run != 'true'
