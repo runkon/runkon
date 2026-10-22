@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use runkon_flow::constants::metadata_keys;
 use runkon_flow::helpers::{
-    find_output_block_marker, fix_backslash_escapes, parse_flow_output, strip_trailing_commas,
+    find_flow_output_block, find_output_block_marker, fix_backslash_escapes, parse_flow_output,
+    strip_trailing_commas,
 };
 use runkon_flow::output_schema::{ArrayItems, FieldDef, FieldType, OutputSchema};
 
@@ -23,32 +24,28 @@ pub struct StructuredOutput {
     pub json_string: String,
 }
 
-/// Find the start position of the real `<<<FLOW_OUTPUT>>>` block.
+/// Find the start position of the real `<<<FLOW_OUTPUT>>>` block: the last
+/// `marker` at the start of a line that is followed by `{`, `[` or a code fence.
+#[deprecated(
+    since = "0.7.1-alpha",
+    note = "use runkon_flow::helpers::find_flow_output_block, which also finds the end marker"
+)]
 pub fn find_flow_output_start(text: &str, marker: &str) -> Option<usize> {
-    let mut last_valid = None;
-    let mut search_pos = 0;
-    while let Some(rel) = text[search_pos..].find(marker) {
-        let abs = search_pos + rel;
-        let after = text[abs + marker.len()..].trim_start();
-        if after.starts_with('{') || after.starts_with('[') || after.starts_with('`') {
-            last_valid = Some(abs);
-        }
-        search_pos = abs + 1;
-    }
-    last_valid
+    text.rmatch_indices(marker)
+        .map(|(pos, _)| pos)
+        .find(|&pos| {
+            let after = text[pos + marker.len()..].trim_start();
+            text[..pos]
+                .rsplit('\n')
+                .next()
+                .is_some_and(|before| before.trim().is_empty())
+                && (after.starts_with('{') || after.starts_with('[') || after.starts_with('`'))
+        })
 }
 
 /// Extract and clean the raw JSON string from a `<<<FLOW_OUTPUT>>>` block.
 pub fn extract_output_block(text: &str) -> Option<String> {
-    let start_marker = "<<<FLOW_OUTPUT>>>";
-    let end_marker = "<<<END_FLOW_OUTPUT>>>";
-
-    let start = find_flow_output_start(text, start_marker)?;
-    let json_start = start + start_marker.len();
-    let end = text[json_start..].find(end_marker)?;
-    let raw = text[json_start..json_start + end].trim();
-
-    Some(strip_code_fences(raw))
+    find_flow_output_block(text).map(strip_code_fences)
 }
 
 /// Strip markdown code fences from the output.
@@ -919,9 +916,10 @@ mod tests {
         assert!(structured.is_none());
     }
 
-    // ── find_flow_output_start ────────────────────────────────────────────────
+    // ── find_flow_output_start (deprecated; kept working until removed) ─────
 
     #[test]
+    #[allow(deprecated)]
     fn find_flow_output_start_found_at_beginning() {
         let text = "<<<FLOW_OUTPUT>>>\n{\"ok\": true}\n<<<END_FLOW_OUTPUT>>>";
         let pos = find_flow_output_start(text, "<<<FLOW_OUTPUT>>>");
@@ -930,6 +928,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn find_flow_output_start_found_after_preamble() {
         let text = "some text\n<<<FLOW_OUTPUT>>>\n{\"ok\": true}\n<<<END_FLOW_OUTPUT>>>";
         let pos = find_flow_output_start(text, "<<<FLOW_OUTPUT>>>");
@@ -938,6 +937,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn find_flow_output_start_not_found_returns_none() {
         let text = "no output block here";
         let pos = find_flow_output_start(text, "<<<FLOW_OUTPUT>>>");
@@ -945,6 +945,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(deprecated)]
     fn find_flow_output_start_requires_json_or_backtick_after_marker() {
         let text = "<<<FLOW_OUTPUT>>>\nnot-json\n<<<END_FLOW_OUTPUT>>>";
         let pos = find_flow_output_start(text, "<<<FLOW_OUTPUT>>>");
@@ -974,6 +975,37 @@ mod tests {
         let text = "<<<FLOW_OUTPUT>>>\n{\"ok\": true}";
         let result = extract_output_block(text);
         assert!(result.is_none());
+    }
+
+    /// The #93 shapes: markers quoted inside the real block's string values.
+    #[test]
+    fn extract_output_block_ignores_markers_quoted_in_values() {
+        let quoted_start = concat!(
+            "<<<FLOW_OUTPUT>>>\n",
+            "{\"summary\": \"fix echo '<<<FLOW_OUTPUT>>> {...}' lines\"}\n",
+            "<<<END_FLOW_OUTPUT>>>",
+        );
+        assert_eq!(
+            extract_output_block(quoted_start).unwrap(),
+            r#"{"summary": "fix echo '<<<FLOW_OUTPUT>>> {...}' lines"}"#
+        );
+
+        let quoted_end = concat!(
+            "<<<FLOW_OUTPUT>>>\n",
+            "{\"summary\": \"use <<<END_FLOW_OUTPUT>>> markers\"}\n",
+            "<<<END_FLOW_OUTPUT>>>",
+        );
+        assert_eq!(
+            extract_output_block(quoted_end).unwrap(),
+            r#"{"summary": "use <<<END_FLOW_OUTPUT>>> markers"}"#
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn find_flow_output_start_skips_mid_line_markers() {
+        let text = "<<<FLOW_OUTPUT>>>\n{\"s\": \"a <<<FLOW_OUTPUT>>> {x}\"}\n<<<END_FLOW_OUTPUT>>>";
+        assert_eq!(find_flow_output_start(text, "<<<FLOW_OUTPUT>>>"), Some(0));
     }
 
     #[test]

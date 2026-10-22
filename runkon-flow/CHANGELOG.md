@@ -8,6 +8,14 @@
   parsed (invalid JSON or missing <<<END_FLOW_OUTPUT>>>)" instead of completing with
   `markers: []`, and an agent step gets an `OUTPUT_WARNING`. Scripts that used this form
   must print the block over three lines with `<<<END_FLOW_OUTPUT>>>`.
+- **Output-block markers count only at the start of a line.** A `<<<FLOW_OUTPUT>>>` or
+  `<<<END_FLOW_OUTPUT>>>` quoted inside the block (for example in a JSON string value)
+  was taken for the real start or end, so valid output was rejected. Both markers may
+  be indented, but nothing else may precede them on their line. This applies to
+  `parse_flow_output` and to `runkon-flow-executors`' `extract_output_block` /
+  `parse_structured_output`, which now share the new `helpers::find_flow_output_block`.
+- **Deprecated:** `runkon_flow_executors::output::find_flow_output_start`. Use
+  `runkon_flow::helpers::find_flow_output_block`, which also finds the end marker.
 
 ## 0.7.0 — Breaking
 
