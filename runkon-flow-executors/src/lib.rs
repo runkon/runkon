@@ -1,5 +1,6 @@
 pub mod agent_loader;
 pub mod channel_sink;
+pub mod correction;
 pub mod output;
 pub mod path_env;
 

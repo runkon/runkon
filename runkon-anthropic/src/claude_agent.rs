@@ -6,11 +6,12 @@ use runkon_flow::constants::metadata_keys;
 use runkon_flow::output_schema::OutputSchema;
 use runkon_flow::traits::action_executor::ActionOutput;
 use runkon_runtimes::{
-    PollError, RunEventSink, RunStatus, RunTracker, RuntimeRequest, RuntimeResolver,
+    RunEventSink, RunStatus, RunTracker, RuntimeRequest, RuntimeResolver,
 };
 
 use runkon_flow_executors::agent_loader::{self, BuildPromptParams};
-use runkon_flow_executors::output::{interpret_agent_output, record_flow_output_warning};
+use runkon_flow_executors::correction::{run_agent_with_output_correction, AgentRunOutcome};
+use runkon_flow_executors::output::record_flow_output_warning;
 
 use crate::anthropic_api::ApiCallExecutor;
 
@@ -181,24 +182,21 @@ impl ClaudeAgentExecutor {
             event_sink: ctx.event_sink.clone(),
         };
 
-        runtime
-            .spawn_validated(&request)
-            .map_err(|e| format!("failed to spawn agent: {e}"))?;
-
-        let completed = match runtime.poll(&ctx.run_id, ctx.shutdown.as_ref(), ctx.step_timeout) {
-            Ok(run) => run,
-            Err(PollError::Cancelled) => {
-                return Err("executor shutdown requested".to_string());
-            }
-            Err(e) => {
-                return Err(e.to_string());
-            }
-        };
+        let AgentRunOutcome {
+            run: completed,
+            markers,
+            context,
+            structured_output,
+            correction_attempts,
+        } = run_agent_with_output_correction(
+            &*runtime,
+            request,
+            ctx.shutdown.as_ref(),
+            ctx.step_timeout,
+            params.schema,
+        )?;
 
         let succeeded = completed.status == RunStatus::Completed;
-
-        let (markers, context, structured_output) =
-            interpret_agent_output(completed.result_text.as_deref(), params.schema, succeeded)?;
 
         if succeeded {
             let mut metadata = HashMap::new();
@@ -227,6 +225,12 @@ impl ClaudeAgentExecutor {
                 metadata.insert(
                     metadata_keys::CACHE_CREATION_INPUT_TOKENS.to_string(),
                     v.to_string(),
+                );
+            }
+            if correction_attempts > 0 {
+                metadata.insert(
+                    metadata_keys::OUTPUT_CORRECTION_ATTEMPTS.to_string(),
+                    correction_attempts.to_string(),
                 );
             }
             record_flow_output_warning(
@@ -293,7 +297,7 @@ fn check_supported_models(
 mod tests {
     use super::*;
     use runkon_flow::output_schema::{FieldDef, FieldType};
-    use runkon_runtimes::{Result as RkResult, RuntimeError};
+    use runkon_runtimes::{Result as RkResult, RunHandle, RuntimeError};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
     use tempfile::TempDir;
@@ -900,6 +904,115 @@ mod tests {
             tracker.captured_runtime(),
             Some("claude".to_string()),
             "tracker must record runtime even on the API fast-path"
+        );
+    }
+
+    struct ScriptedRuntime {
+        results: std::sync::Mutex<Vec<RunHandle>>,
+        resumes: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    }
+
+    impl runkon_runtimes::AgentRuntime for ScriptedRuntime {
+        fn spawn_impl(
+            &self,
+            request: &RuntimeRequest,
+            _seal: runkon_runtimes::runtime::private::Seal,
+        ) -> RkResult<()> {
+            self.resumes
+                .lock()
+                .unwrap()
+                .push(request.resume_session_id.clone());
+            Ok(())
+        }
+        fn poll(
+            &self,
+            _run_id: &str,
+            _shutdown: Option<&Arc<AtomicBool>>,
+            _step_timeout: Duration,
+        ) -> Result<RunHandle, runkon_runtimes::PollError> {
+            Ok(self.results.lock().unwrap().remove(0))
+        }
+        fn is_alive(&self, _run: &RunHandle) -> bool {
+            false
+        }
+        fn cancel(&self, _run: &RunHandle) -> RkResult<()> {
+            Ok(())
+        }
+    }
+
+    struct ScriptedResolver {
+        results: Vec<RunHandle>,
+        resumes: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    }
+
+    impl RuntimeResolver for ScriptedResolver {
+        fn resolve(&self, _name: &str) -> RkResult<Box<dyn runkon_runtimes::AgentRuntime>> {
+            Ok(Box::new(ScriptedRuntime {
+                results: std::sync::Mutex::new(self.results.clone()),
+                resumes: self.resumes.clone(),
+            }))
+        }
+    }
+
+    fn scripted_handle(text: &str) -> RunHandle {
+        RunHandle {
+            id: "test-run".to_string(),
+            status: RunStatus::Completed,
+            subprocess_pid: None,
+            runtime: "claude".to_string(),
+            session_id: Some("sess-1".to_string()),
+            result_text: Some(text.to_string()),
+            started_at: String::new(),
+            ended_at: None,
+            log_file: None,
+            model: None,
+            cost_usd: None,
+            num_turns: Some(1),
+            duration_ms: None,
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+        }
+    }
+
+    #[test]
+    fn corrects_invalid_output_by_resuming_the_session() {
+        let tmp = TempDir::new().unwrap();
+        write_agent(&tmp);
+        let resumes = Arc::new(std::sync::Mutex::new(vec![]));
+        let resolver = Arc::new(ScriptedResolver {
+            results: vec![
+                scripted_handle("<<<FLOW_OUTPUT>>>\n{}\n<<<END_FLOW_OUTPUT>>>"),
+                scripted_handle("<<<FLOW_OUTPUT>>>\n{\"ok\":true}\n<<<END_FLOW_OUTPUT>>>"),
+            ],
+            resumes: resumes.clone(),
+        });
+        let ctx = make_ctx(&tmp);
+        let schema = make_schema();
+        let params = ClaudeAgentParams {
+            name: "test-agent",
+            inputs: &HashMap::new(),
+            snippet_refs: &[],
+            dry_run: false,
+            retry_error: None,
+            schema: Some(&schema),
+        };
+
+        let out = ClaudeAgentExecutor::new(resolver, None)
+            .execute(&ctx, &params)
+            .unwrap();
+
+        assert_eq!(out.structured_output.as_deref(), Some("{\"ok\":true}"));
+        assert_eq!(
+            out.metadata
+                .get(metadata_keys::OUTPUT_CORRECTION_ATTEMPTS)
+                .map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            *resumes.lock().unwrap(),
+            vec![None, Some("sess-1".to_string())]
         );
     }
 }
