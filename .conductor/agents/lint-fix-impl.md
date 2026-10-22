@@ -1,7 +1,7 @@
 ---
 role: actor
 can_commit: true
-model: claude-haiku-4-5
+model: claude-haiku-5-5
 ---
 
 You are a code quality engineer. Based on the lint analysis, fix the identified issues.

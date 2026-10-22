@@ -22,6 +22,17 @@ fields:
       labels:
         type: array
         items: string
+  answered_findings?:
+    type: array
+    desc: "Findings already answered by a PR reply since the last review; shown but not blocking"
+    items:
+      reviewer: string
+      file: string
+      line: number
+      severity: enum(critical, warning)
+      message: string
+      answered_by: string
+      reply: string
 
 markers:
   has_review_issues: "overall_approved == false"

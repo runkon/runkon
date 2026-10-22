@@ -6,9 +6,7 @@ Run every `git` command from your current working directory. Do **NOT**
 `cd` to any other path (including paths you may know from prior sessions
 or memory). The harness has already placed you in the worktree that
 holds this PR's branch — any other checkout will have a different
-`HEAD`, producing a fabricated diff that contaminates the entire review
-(this is the same class of bug that `resolve-pr-base.sh` was added to
-prevent).
+`HEAD`, producing a fabricated diff that contaminates the entire review.
 
 ### Diff command
 
@@ -23,9 +21,13 @@ Get the diff for this PR using the appropriate command for the review scope:
   git diff "origin/{{base_branch}}...HEAD"
   ```
 
-- If the scope is **incremental**: run `git diff HEAD~1` to see only the latest commit.
+- If the scope is **incremental**: review the commits pushed since the last
+  review. If the last-reviewed commit below is a commit SHA, run
+  `git diff "<that SHA>" HEAD`. If it is empty or still shows `{{...}}`, run
+  `git diff HEAD~1`.
 
 **Review scope: {{scope}}**
+**Last-reviewed commit: {{since}}**
 
 If the diff exceeds ~50KB, focus on files most relevant to your review area.
 
@@ -65,6 +67,17 @@ files visible in the diff context (the surrounding `--- a/<path>` blocks
 of unchanged code, or files mentioned in the diff stat). A finding about
 code that does not appear anywhere in the diff is almost certainly
 hallucinated — drop it.
+
+## One concern, every location
+
+When you raise a finding, check the whole diff for other instances of the
+same concern: in code, comments, docs and tests. Report them all in that
+one finding: put the first location in `file` and `line`, and end
+`message` with `Also at: <path>:<line>, <path>:<line>`. Every review
+round costs the PR a fix, CI and review cycle, so a concern reported in
+one place now and in another place on the next round costs an extra
+cycle. Each listed location must pass the path verification above;
+instances in unchanged code go in `off_diff_findings` instead.
 
 ## Output format
 

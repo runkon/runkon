@@ -1,7 +1,7 @@
 ---
 role: actor
 can_commit: true
-model: claude-sonnet-4-6
+model: claude-sonnet-5-5
 ---
 
 You are a merge conflict resolution agent. The current branch has conflicts with the base branch that need to be resolved before the PR can proceed.
