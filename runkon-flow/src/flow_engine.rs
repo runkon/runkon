@@ -2312,6 +2312,7 @@ mod tests {
     ) -> (
         Arc<std::sync::atomic::AtomicUsize>,
         crate::engine::ExecutionState,
+        crate::engine_error::Result<WorkflowResult>,
     ) {
         use crate::dsl::{Condition, IfNode};
         use crate::persistence_memory::InMemoryWorkflowPersistence;
@@ -2401,8 +2402,8 @@ mod tests {
             ],
         );
         let engine = FlowEngineBuilder::new().build().unwrap();
-        engine.resume(&def, &mut state).unwrap();
-        (alpha_count, state)
+        let result = engine.resume(&def, &mut state);
+        (alpha_count, state, result)
     }
 
     // Regression (#90): resume restores a completed child workflow's step
@@ -2411,7 +2412,8 @@ mod tests {
     fn resume_restores_child_workflow_step_markers() {
         use std::sync::atomic::Ordering;
 
-        let (alpha_count, state) = resume_after_child_workflow(true);
+        let (alpha_count, state, result) = resume_after_child_workflow(true);
+        result.unwrap();
 
         assert_eq!(
             alpha_count.load(Ordering::SeqCst),
@@ -2429,17 +2431,17 @@ mod tests {
         );
     }
 
-    // Rows without a child_run_id can't restore child steps: resume still
-    // succeeds and the dependent branch is not taken.
+    // Rows without a child_run_id can't restore child steps: the resume fails
+    // explicitly (all_succeeded = false) rather than silently skipping
+    // branches that depend on the child's markers.
     #[test]
-    fn resume_without_child_run_id_skips_child_markers() {
+    fn resume_without_child_run_id_fails() {
         use std::sync::atomic::Ordering;
 
-        let (alpha_count, state) = resume_after_child_workflow(false);
+        let (alpha_count, _state, result) = resume_after_child_workflow(false);
 
+        assert!(!result.unwrap().all_succeeded);
         assert_eq!(alpha_count.load(Ordering::SeqCst), 0);
-        assert!(state.step_results.contains_key("child-wf"));
-        assert!(!state.step_results.contains_key("aggregator"));
     }
 
     // AC: resume() skips pre-completed steps and runs remaining steps.

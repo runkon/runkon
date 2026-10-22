@@ -1,7 +1,7 @@
 use crate::dsl::CallWorkflowNode;
 use crate::engine::{
     fetch_child_completion_data, handle_on_fail, record_step_success, resolve_child_inputs,
-    restore_call_workflow_step, should_skip, ExecutionState,
+    restore_call_workflow_step, ExecutionState,
 };
 use crate::engine_error::{EngineError, Result};
 use crate::extensions::LlmRunMetrics;
@@ -18,13 +18,13 @@ pub fn execute_call_workflow(
 
     // Skip completed sub-workflow steps on resume
     let wf_step_name = format!("workflow:{}", node.workflow);
-    if should_skip(state, &wf_step_name, iteration) {
-        tracing::info!(
-            "Skipping completed step '{}' (iteration {})",
-            node.workflow,
-            iteration
-        );
-        restore_call_workflow_step(state, &wf_step_name, &node.workflow, iteration);
+    if super::skip_if_already_completed_with(
+        state,
+        &wf_step_name,
+        iteration,
+        &node.workflow,
+        |state| restore_call_workflow_step(state, &wf_step_name, &node.workflow, iteration),
+    )? {
         return Ok(());
     }
 

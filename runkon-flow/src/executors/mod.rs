@@ -293,18 +293,33 @@ pub(super) fn skip_if_already_completed(
     iteration: u32,
     label: &str,
 ) -> bool {
-    use crate::engine::{restore_step, should_skip};
-    if should_skip(state, step_key, iteration) {
-        tracing::info!(
-            "Skipping completed step '{}' (iteration {})",
-            label,
-            iteration
-        );
-        restore_step(state, step_key, iteration);
-        true
-    } else {
-        false
+    skip_if_already_completed_with(state, step_key, iteration, label, |state| {
+        crate::engine::restore_step(state, step_key, iteration);
+        Ok(())
+    })
+    .unwrap_or(false)
+}
+
+/// Like [`skip_if_already_completed`], but with a custom `restore` for steps
+/// (such as `call workflow`) that restore more than their own row. A failed
+/// restore is returned as an error rather than skipping silently.
+pub(super) fn skip_if_already_completed_with(
+    state: &mut crate::engine::ExecutionState,
+    step_key: &str,
+    iteration: u32,
+    label: &str,
+    restore: impl FnOnce(&mut crate::engine::ExecutionState) -> crate::engine_error::Result<()>,
+) -> crate::engine_error::Result<bool> {
+    if !crate::engine::should_skip(state, step_key, iteration) {
+        return Ok(false);
     }
+    tracing::info!(
+        "Skipping completed step '{}' (iteration {})",
+        label,
+        iteration
+    );
+    restore(state)?;
+    Ok(true)
 }
 
 #[cfg(test)]
