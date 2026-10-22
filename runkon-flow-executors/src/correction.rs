@@ -272,7 +272,10 @@ mod tests {
         ]);
         let s = schema();
         let err = run(&rt, Some(&s)).unwrap_err();
-        assert!(err.contains("after 2 output correction attempt(s)"), "{err}");
+        assert!(
+            err.contains("after 2 output correction attempt(s)"),
+            "{err}"
+        );
         assert!(err.contains("Missing required field: 'id'"), "{err}");
         assert_eq!(rt.spawns().len(), 3);
     }
