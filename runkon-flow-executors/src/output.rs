@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+
+use runkon_flow::constants::metadata_keys;
 use runkon_flow::helpers::{
     find_output_block_marker, fix_backslash_escapes, parse_flow_output, strip_trailing_commas,
 };
@@ -176,6 +179,20 @@ pub fn flow_output_warning(
         ),
     };
     Some(format!("{problem}; {RECORDED}"))
+}
+
+/// Store [`flow_output_warning`] for a completed agent step in its metadata,
+/// under `metadata_keys::OUTPUT_WARNING`, where the engine logs it and records
+/// it as the step's `step_error`. Leaves `metadata` unchanged when the output
+/// is fine.
+pub fn record_flow_output_warning(
+    metadata: &mut HashMap<String, String>,
+    result_text: Option<&str>,
+    schema: Option<&OutputSchema>,
+) {
+    if let Some(warning) = flow_output_warning(result_text, schema) {
+        metadata.insert(metadata_keys::OUTPUT_WARNING.to_string(), warning);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -834,6 +851,23 @@ mod tests {
         );
         // ...but with no result text at all there's nothing to fail on.
         assert!(flow_output_warning(None, Some(&schema)).is_some());
+    }
+
+    #[test]
+    fn record_flow_output_warning_inserts_only_when_output_is_unusable() {
+        let mut metadata = HashMap::new();
+        let ok = "<<<FLOW_OUTPUT>>>\n{\"markers\":[],\"context\":\"c\"}\n<<<END_FLOW_OUTPUT>>>";
+        record_flow_output_warning(&mut metadata, Some(ok), None);
+        assert!(metadata.is_empty(), "got: {metadata:?}");
+
+        record_flow_output_warning(&mut metadata, Some("no block"), None);
+        let w = metadata
+            .get(metadata_keys::OUTPUT_WARNING)
+            .expect("warning recorded");
+        assert!(
+            w.starts_with("agent output has no <<<FLOW_OUTPUT>>> block"),
+            "got: {w}"
+        );
     }
 
     // ── interpret_agent_output ────────────────────────────────────────────────
