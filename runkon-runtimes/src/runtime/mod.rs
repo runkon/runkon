@@ -182,6 +182,25 @@ pub fn resolve_runtime(
     }
 }
 
+/// Reject `RuntimeConfig.env` entries the OS cannot pass to a subprocess as written:
+/// an empty key, or a key or value containing `=` (key only) or NUL.
+pub(crate) fn validate_config_env(env: &HashMap<String, String>, runtime: &str) -> Result<()> {
+    for (key, value) in env {
+        if key.is_empty() || key.contains('=') || key.contains('\0') {
+            return Err(RuntimeError::Config(format!(
+                "{runtime}: invalid `env` key {key:?}: it must be non-empty and must not \
+                 contain '=' or NUL"
+            )));
+        }
+        if value.contains('\0') {
+            return Err(RuntimeError::Config(format!(
+                "{runtime}: `env` value for {key:?} must not contain NUL"
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Extract a value from a serde_json::Value using a dot-separated path.
 pub fn extract_json_path<'a>(
     value: &'a serde_json::Value,

@@ -52,7 +52,7 @@ steps:
 
 ## How it works
 
-`RuntimeConfig.env` is merged into `RuntimeOptions.env` (`runkon-runtimes/src/runtime/mod.rs`) before the Claude CLI subprocess is spawned. Claude CLI reads `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` from its environment and routes all Messages API requests to your proxy instead of `api.anthropic.com`. The proxy is responsible for translating those requests to Gemini (or any other backend) and returning Anthropic-shaped responses.
+`RuntimeConfig.env` is merged into `RuntimeOptions.env` by the host (`ClaudeRuntime` reads only `RuntimeOptions.env`) before the Claude CLI subprocess is spawned. Claude CLI reads `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` from its environment and routes all Messages API requests to your proxy instead of `api.anthropic.com`. The proxy is responsible for translating those requests to Gemini (or any other backend) and returning Anthropic-shaped responses.
 
 ## Caveats
 

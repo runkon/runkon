@@ -41,8 +41,18 @@ pub struct RuntimeConfig {
     /// `_`); anything else fails the spawn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_env: Option<String>,
-    /// Environment variables injected into the spawned subprocess via `Command::envs()`.
-    /// For "claude" runtimes: merged with RuntimeOptions.env; this entry wins on conflict.
+    /// Environment variables added to the spawned subprocess's environment, on top of
+    /// the inherited one; these win on conflict.
+    ///
+    /// - "cli" and "script": applied by the runtime via `Command::envs()`. Keys must be
+    ///   non-empty and must not contain `=` or NUL, and values must not contain NUL;
+    ///   otherwise the spawn fails. For "script", a key equal to `prompt_env` also fails
+    ///   the spawn, since the prompt would overwrite it.
+    /// - "claude" and "gemini" (`runkon-anthropic`, `runkon-google`): those runtimes read
+    ///   `RuntimeOptions.env`, not this field. The host merges this map into it, and this
+    ///   entry wins on conflict.
+    /// - "api": `resolve_runtime` does not build an "api" runtime, so this field has no
+    ///   effect there.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub env: HashMap<String, String>,
     /// When non-empty, agent frontmatter `model:` must be one of these values.

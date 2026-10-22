@@ -68,6 +68,14 @@ impl AgentRuntime for ScriptRuntime {
             )));
         }
 
+        super::validate_config_env(&self.config.env, "ScriptRuntime")?;
+        if self.config.env.contains_key(prompt_env) {
+            return Err(RuntimeError::Config(format!(
+                "ScriptRuntime: `env` sets {prompt_env:?}, which is the runtime's `prompt_env`; \
+                 the prompt would overwrite it — remove the entry or choose another `prompt_env`"
+            )));
+        }
+
         if request.agent_def.can_commit {
             tracing::warn!(
                 "ScriptRuntime: agent '{}' has can_commit=true but ScriptRuntime produces no \
@@ -78,6 +86,7 @@ impl AgentRuntime for ScriptRuntime {
 
         let child = std::process::Command::new("sh")
             .args(["-c", command])
+            .envs(&self.config.env)
             .env(prompt_env, &request.prompt)
             .current_dir(&request.working_dir)
             .stdout(Stdio::piped())
@@ -269,6 +278,7 @@ impl AgentRuntime for ScriptRuntime {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
 
@@ -362,10 +372,21 @@ mod tests {
 
     /// Spawn `command` with `prompt_env` and prompt "hello"; return its stdout.
     fn run_with_prompt_env(prompt_env: Option<&str>, command: &str, run_id: &str) -> String {
+        run_with_config(
+            RuntimeConfig {
+                prompt_env: prompt_env.map(str::to_string),
+                ..RuntimeConfig::default()
+            },
+            command,
+            run_id,
+        )
+    }
+
+    /// Spawn `command` under `config` with prompt "hello"; return its stdout.
+    fn run_with_config(config: RuntimeConfig, command: &str, run_id: &str) -> String {
         let runtime = ScriptRuntime::new(RuntimeConfig {
             command: Some(command.to_string()),
-            prompt_env: prompt_env.map(str::to_string),
-            ..RuntimeConfig::default()
+            ..config
         });
         let sink = Arc::new(CompletedSink::default());
         let request = RuntimeRequest {
@@ -437,6 +458,60 @@ mod tests {
                 .expect_err("an invalid prompt_env must fail the spawn");
             assert!(
                 matches!(&err, RuntimeError::Config(m) if m.contains("invalid `prompt_env`")),
+                "{bad:?}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_env_is_passed_to_the_script() {
+        let out = run_with_config(
+            RuntimeConfig {
+                env: HashMap::from([(
+                    "MY_API_BASE".to_string(),
+                    "http://localhost:8000".to_string(),
+                )]),
+                ..RuntimeConfig::default()
+            },
+            "printf '%s|%s' \"$MY_API_BASE\" \"$FLOW_PROMPT\"",
+            "test-config-env",
+        );
+        assert_eq!(out.trim(), "http://localhost:8000|hello");
+    }
+
+    #[test]
+    fn config_env_colliding_with_prompt_env_fails_the_spawn() {
+        for prompt_env in [None, Some("CONDUCTOR_PROMPT")] {
+            let name = prompt_env.unwrap_or(DEFAULT_SCRIPT_PROMPT_ENV);
+            let runtime = ScriptRuntime::new(RuntimeConfig {
+                command: Some("echo should-not-run".to_string()),
+                prompt_env: prompt_env.map(str::to_string),
+                env: HashMap::from([(name.to_string(), "x".to_string())]),
+                ..RuntimeConfig::default()
+            });
+            let err = runtime
+                .spawn_validated(&make_request("test-env-collision"))
+                .expect_err("an env key equal to prompt_env must fail the spawn");
+            assert!(
+                matches!(&err, RuntimeError::Config(m) if m.contains("`prompt_env`")),
+                "{name:?}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_config_env_key_fails_the_spawn() {
+        for bad in ["", "BAD=KEY", "BAD\0KEY"] {
+            let runtime = ScriptRuntime::new(RuntimeConfig {
+                command: Some("echo should-not-run".to_string()),
+                env: HashMap::from([(bad.to_string(), "v".to_string())]),
+                ..RuntimeConfig::default()
+            });
+            let err = runtime
+                .spawn_validated(&make_request("test-env-invalid"))
+                .expect_err("an invalid env key must fail the spawn");
+            assert!(
+                matches!(&err, RuntimeError::Config(m) if m.contains("invalid `env` key")),
                 "{bad:?}: {err:?}"
             );
         }

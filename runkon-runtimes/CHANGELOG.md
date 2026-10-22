@@ -1,5 +1,16 @@
 # Changelog — runkon-runtimes
 
+## 0.7.1 — Fixed
+
+- **`cli` and `script` runtimes now apply `RuntimeConfig.env`** to the spawned process
+  (added to the inherited environment; config entries win). It was silently ignored
+  before, so settings such as `env.MY_API_BASE = "..."` never reached the process.
+- **Migration:** configs that were silently ignored may now fail the spawn with
+  `RuntimeError::Config`: an `env` key that is empty or contains `=` or NUL (or a value
+  containing NUL), and, for `script`, an `env` key equal to `prompt_env`
+  (`FLOW_PROMPT` by default). Remove or rename those entries.
+- **Docs:** `RuntimeConfig::env` now says which runtime types apply it and how.
+
 ## 0.7.0 — Breaking
 
 - **`script` runtimes pass the prompt as `FLOW_PROMPT` instead of `CONDUCTOR_PROMPT`.**
