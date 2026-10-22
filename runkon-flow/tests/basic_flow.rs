@@ -256,3 +256,103 @@ fn event_sink_captures_run_lifecycle() {
     assert!(has_run_started, "RunStarted event should be emitted");
     assert!(has_run_completed, "RunCompleted event should be emitted");
 }
+
+// ---------------------------------------------------------------------------
+// Output warnings — a completed step that recorded no usable output
+// ---------------------------------------------------------------------------
+
+const OUTPUT_WARNING: &str = "agent output has no <<<FLOW_OUTPUT>>> block; \
+                              recorded markers: [] and empty context";
+
+/// Completes successfully but reports `metadata_keys::OUTPUT_WARNING`, the way
+/// the agent executors do when the agent ends without a FLOW_OUTPUT block.
+struct WarningExecutor(&'static str);
+
+impl ActionExecutor for WarningExecutor {
+    fn name(&self) -> &str {
+        self.0
+    }
+
+    fn execute(
+        &self,
+        _ctx: &dyn runkon_flow::traits::run_context::RunContext,
+        _info: &runkon_flow::traits::action_executor::StepInfo,
+        _params: &runkon_flow::traits::action_executor::ActionParams,
+    ) -> Result<
+        runkon_flow::traits::action_executor::ActionOutput,
+        runkon_flow::engine_error::EngineError,
+    > {
+        Ok(runkon_flow::traits::action_executor::ActionOutput {
+            metadata: HashMap::from([(
+                runkon_flow::constants::metadata_keys::OUTPUT_WARNING.to_string(),
+                OUTPUT_WARNING.to_string(),
+            )]),
+            ..Default::default()
+        })
+    }
+}
+
+fn run_warning_workflow(dsl: &str) -> Vec<runkon_flow::types::WorkflowRunStep> {
+    let def = runkon_flow::dsl::parse_workflow_str(dsl, "test.wf").expect("DSL should parse");
+    let engine = FlowEngineBuilder::new()
+        .action(Box::new(WarningExecutor("warned")))
+        .action(Box::new(MockExecutor::new("clean")))
+        .build()
+        .expect("engine build failed");
+    let persistence = make_persistence();
+    let mut state = make_state(
+        "output-warning",
+        Arc::clone(&persistence),
+        named_executors([
+            Box::new(WarningExecutor("warned")) as Box<dyn ActionExecutor>,
+            Box::new(MockExecutor::new("clean")) as Box<dyn ActionExecutor>,
+        ]),
+    );
+    let result = engine.run(&def, &mut state).expect("run should succeed");
+    assert!(
+        result.all_succeeded,
+        "an output warning must not fail the run"
+    );
+    persistence
+        .get_steps(&result.workflow_run_id)
+        .expect("get_steps failed")
+}
+
+fn assert_warning_recorded(steps: &[runkon_flow::types::WorkflowRunStep]) {
+    let step = |name: &str| {
+        steps
+            .iter()
+            .find(|s| s.step_name == name)
+            .unwrap_or_else(|| panic!("no step named {name}: {steps:?}"))
+    };
+    let warned = step("warned");
+    assert_eq!(warned.status, WorkflowStepStatus::Completed);
+    assert_eq!(warned.step_error.as_deref(), Some(OUTPUT_WARNING));
+    let clean = step("clean");
+    assert_eq!(clean.status, WorkflowStepStatus::Completed);
+    assert_eq!(clean.step_error, None);
+}
+
+#[test]
+fn call_step_output_warning_is_stored_as_step_error() {
+    let steps = run_warning_workflow(
+        r#"workflow output-warning {
+  call warned
+  call clean
+}"#,
+    );
+    assert_warning_recorded(&steps);
+}
+
+#[test]
+fn parallel_step_output_warning_is_stored_as_step_error() {
+    let steps = run_warning_workflow(
+        r#"workflow output-warning {
+  parallel {
+    call warned
+    call clean
+  }
+}"#,
+    );
+    assert_warning_recorded(&steps);
+}

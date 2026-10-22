@@ -37,6 +37,10 @@ pub mod metadata_keys {
     pub const OUTPUT_TOKENS: &str = "output_tokens";
     pub const CACHE_READ_INPUT_TOKENS: &str = "cache_read_input_tokens";
     pub const CACHE_CREATION_INPUT_TOKENS: &str = "cache_creation_input_tokens";
+    /// Set by an executor whose step completed but whose output wasn't what the
+    /// engine asked for (e.g. an agent that ended without a `<<<FLOW_OUTPUT>>>`
+    /// block). The engine logs it and stores it as the step's `step_error`.
+    pub const OUTPUT_WARNING: &str = "output_warning";
 }
 
 pub const FLOW_OUTPUT_INSTRUCTION: &str = r#"

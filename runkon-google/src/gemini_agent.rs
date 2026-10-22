@@ -10,7 +10,7 @@ use runkon_runtimes::{
 };
 
 use runkon_flow_executors::agent_loader::{self, BuildPromptParams};
-use runkon_flow_executors::output::interpret_agent_output;
+use runkon_flow_executors::output::{flow_output_warning, interpret_agent_output};
 
 use crate::gemini_api::GeminiApiCallExecutor;
 
@@ -206,6 +206,11 @@ impl GeminiAgentExecutor {
                     metadata_keys::CACHE_CREATION_INPUT_TOKENS.to_string(),
                     v.to_string(),
                 );
+            }
+            if let Some(warning) =
+                flow_output_warning(completed.result_text.as_deref(), params.schema)
+            {
+                metadata.insert(metadata_keys::OUTPUT_WARNING.to_string(), warning);
             }
             Ok(ActionOutput {
                 markers,
