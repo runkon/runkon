@@ -45,7 +45,9 @@ pub use flow_engine::{ChildRunInput, FlowEngine, FlowEngineBuilder, RunInput};
 pub use traits::action_executor::ActionRegistry;
 pub use traits::gate_resolver::GateResolverRegistry;
 pub use traits::item_provider::ItemProviderRegistry;
-pub use traits::script_env_provider::{NoOpScriptEnvProvider, ScriptEnvProvider};
+pub use traits::script_env_provider::{
+    NoOpScriptEnvProvider, ScriptEnvProvider, DEFAULT_INPUT_ENV_PREFIX,
+};
 pub use traits::workflow_resolver::WorkflowResolver;
 pub use workflow_resolver_directory::DirectoryWorkflowResolver;
 pub use workflow_resolver_memory::InMemoryWorkflowResolver;
