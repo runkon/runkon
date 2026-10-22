@@ -14,6 +14,8 @@
   be indented, but nothing else may precede them on their line. This applies to
   `parse_flow_output` and to `runkon-flow-executors`' `extract_output_block` /
   `parse_structured_output`, which now share the new `helpers::find_flow_output_block`.
+- **Added:** `helpers::find_flow_output_block` (the contents of the last complete block)
+  and `helpers::find_block_start` (the offset of the last real start marker).
 - **Deprecated:** `runkon_flow_executors::output::find_flow_output_start`. Use
   `runkon_flow::helpers::find_flow_output_block`, which also finds the end marker.
 
