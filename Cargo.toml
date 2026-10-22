@@ -7,3 +7,10 @@ version = "0.6.2-alpha"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/runkon/runkon"
+
+# Internal crates, declared once so a release bumps the version here and in
+# [workspace.package] only. Members use `<crate> = { workspace = true }`.
+[workspace.dependencies]
+runkon-flow = { path = "runkon-flow", version = "0.6.2-alpha" }
+runkon-flow-executors = { path = "runkon-flow-executors", version = "0.6.2-alpha" }
+runkon-runtimes = { path = "runkon-runtimes", version = "0.6.2-alpha" }
