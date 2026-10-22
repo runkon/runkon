@@ -404,9 +404,16 @@ mod tests {
 
     #[test]
     fn shell_variable_names_are_accepted_as_prompt_env() {
-        for (i, name) in ["FLOW_PROMPT", "CONDUCTOR_PROMPT_2", "_PROMPT", "p"]
-            .into_iter()
-            .enumerate()
+        for (i, name) in [
+            "FLOW_PROMPT",
+            "CONDUCTOR_PROMPT_2",
+            "_PROMPT",
+            "p",
+            "_1",
+            "_PROMPT_2",
+        ]
+        .into_iter()
+        .enumerate()
         {
             let out = run_with_prompt_env(
                 Some(name),

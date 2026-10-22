@@ -81,6 +81,8 @@ mod tests {
             "app2_",
             "_",
             "_X_",
+            "_1",
+            "_PREFIX_2",
         ] {
             assert!(validate_input_env_prefix(prefix).is_ok(), "{prefix:?}");
         }
