@@ -42,6 +42,18 @@ fn starts_line(text: &str, pos: usize) -> bool {
         .is_some_and(|before| before.trim().is_empty())
 }
 
+/// Find the byte offset of the last `marker` in `text` that starts a line and
+/// is followed by `{`, `[` or a code fence: the start of a real output block.
+pub fn find_block_start(text: &str, marker: &str) -> Option<usize> {
+    text.rmatch_indices(marker)
+        .map(|(pos, _)| pos)
+        .find(|&pos| {
+            let after = text[pos + marker.len()..].trim_start();
+            starts_line(text, pos)
+                && (after.starts_with('{') || after.starts_with('[') || after.starts_with('`'))
+        })
+}
+
 /// Return the contents of the last `<<<FLOW_OUTPUT>>> … <<<END_FLOW_OUTPUT>>>`
 /// block in `text`, trimmed, or `None` when there is no complete block.
 ///
@@ -51,15 +63,7 @@ fn starts_line(text: &str, pos: usize) -> bool {
 /// can't be mistaken for the real block's start or end. The start marker must
 /// also be followed by `{`, `[` or a code fence.
 pub fn find_flow_output_block(text: &str) -> Option<&str> {
-    let start = text
-        .rmatch_indices(FLOW_OUTPUT_START)
-        .map(|(pos, _)| pos)
-        .find(|&pos| {
-            let after = text[pos + FLOW_OUTPUT_START.len()..].trim_start();
-            starts_line(text, pos)
-                && (after.starts_with('{') || after.starts_with('[') || after.starts_with('`'))
-        })?
-        + FLOW_OUTPUT_START.len();
+    let start = find_block_start(text, FLOW_OUTPUT_START)? + FLOW_OUTPUT_START.len();
     let end = text[start..]
         .match_indices(FLOW_OUTPUT_END)
         .map(|(pos, _)| start + pos)

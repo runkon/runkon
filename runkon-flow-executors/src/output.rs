@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use runkon_flow::constants::metadata_keys;
 use runkon_flow::helpers::{
-    find_flow_output_block, find_output_block_marker, fix_backslash_escapes, parse_flow_output,
-    strip_trailing_commas,
+    find_block_start, find_flow_output_block, find_output_block_marker, fix_backslash_escapes,
+    parse_flow_output, strip_trailing_commas,
 };
 use runkon_flow::output_schema::{ArrayItems, FieldDef, FieldType, OutputSchema};
 
@@ -31,16 +31,7 @@ pub struct StructuredOutput {
     note = "use runkon_flow::helpers::find_flow_output_block, which also finds the end marker"
 )]
 pub fn find_flow_output_start(text: &str, marker: &str) -> Option<usize> {
-    text.rmatch_indices(marker)
-        .map(|(pos, _)| pos)
-        .find(|&pos| {
-            let after = text[pos + marker.len()..].trim_start();
-            text[..pos]
-                .rsplit('\n')
-                .next()
-                .is_some_and(|before| before.trim().is_empty())
-                && (after.starts_with('{') || after.starts_with('[') || after.starts_with('`'))
-        })
+    find_block_start(text, marker)
 }
 
 /// Extract and clean the raw JSON string from a `<<<FLOW_OUTPUT>>>` block.
