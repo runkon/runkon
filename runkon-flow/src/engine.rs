@@ -27,16 +27,10 @@ use crate::types::{
 /// name in that iteration. Build it with [`ResumeContext::from_steps`].
 #[derive(Clone, Default)]
 #[non_exhaustive]
-#[allow(deprecated)]
 pub struct ResumeContext {
-    /// (name, iteration) -> the latest completed row. Read-only view kept for
-    /// callers that read it; it is not consulted when resuming and cannot tell
-    /// repeated runs of a step apart.
-    #[deprecated(
-        since = "0.7.2",
-        note = "lossy for repeated steps; use `claim_completed_step`"
-    )]
-    pub step_map: HashMap<String, HashMap<u32, WorkflowRunStep>>,
+    /// (name, iteration) -> the latest completed row. Read-only view behind the
+    /// deprecated [`ResumeContext::step_map`] accessor; resume never consults it.
+    step_map: HashMap<String, HashMap<u32, WorkflowRunStep>>,
     /// (name, iteration) -> one slot per recorded occurrence, in position order;
     /// `Some(row)` when that occurrence completed.
     occurrences: HashMap<String, HashMap<u32, Vec<Option<WorkflowRunStep>>>>,
@@ -98,12 +92,23 @@ impl ResumeContext {
                 (name, by_iter)
             })
             .collect();
-        #[allow(deprecated)]
         Self {
             step_map: latest_completed_view(&occurrences),
             occurrences,
             cursors: HashMap::new(),
         }
+    }
+
+    /// (name, iteration) -> the latest completed row.
+    ///
+    /// Read-only so that nothing can write to it and expect resume to honor the
+    /// change: resume matches saved rows by occurrence and never reads this map.
+    #[deprecated(
+        since = "0.7.2",
+        note = "lossy for repeated steps; build with `ResumeContext::from_steps` instead"
+    )]
+    pub fn step_map(&self) -> &HashMap<String, HashMap<u32, WorkflowRunStep>> {
+        &self.step_map
     }
 
     /// True when no recorded occurrence completed.
@@ -1942,7 +1947,7 @@ mod tests {
             row("a", 0, 0, WorkflowStepStatus::Completed, "1"),
             row("a", 0, 1, WorkflowStepStatus::Completed, "2"),
         ]);
-        assert_eq!(ctx.step_map["a"][&0].id, "2");
+        assert_eq!(ctx.step_map()["a"][&0].id, "2");
     }
 
     #[test]

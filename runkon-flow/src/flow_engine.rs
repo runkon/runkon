@@ -2314,6 +2314,29 @@ mod tests {
         status: crate::status::WorkflowStepStatus,
         markers: &str,
     ) {
+        seed_step_at(
+            persistence,
+            run_id,
+            name,
+            position,
+            0,
+            status,
+            markers,
+            None,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn seed_step_at(
+        persistence: &crate::persistence_memory::InMemoryWorkflowPersistence,
+        run_id: &str,
+        name: &str,
+        position: i64,
+        iteration: i64,
+        status: crate::status::WorkflowStepStatus,
+        markers: &str,
+        child_run_id: Option<String>,
+    ) {
         use crate::traits::persistence::{NewStep, StepUpdate, WorkflowPersistence};
         let step_id = persistence
             .insert_step(NewStep {
@@ -2322,7 +2345,7 @@ mod tests {
                 role: "actor".to_string(),
                 can_commit: false,
                 position,
-                iteration: 0,
+                iteration,
                 retry_count: Some(0),
             })
             .unwrap();
@@ -2332,7 +2355,7 @@ mod tests {
                 StepUpdate {
                     generation: 0,
                     status,
-                    child_run_id: None,
+                    child_run_id,
                     result_text: None,
                     context_out: None,
                     markers_out: Some(markers.to_string()),
@@ -2854,7 +2877,16 @@ mod tests {
         );
         // Loop body runs alpha twice per iteration; iterations 0 and 1 are done.
         for pos in 1..5 {
-            persistence_seed_iter(&persistence, &run.id, "alpha", pos, (pos - 1) / 2);
+            seed_step_at(
+                &persistence,
+                &run.id,
+                "alpha",
+                pos,
+                (pos - 1) / 2,
+                Completed,
+                "[]",
+                None,
+            );
         }
         let (alpha_count, _beta, mut state) =
             make_counting_state(Arc::clone(&persistence), run.id.clone());
@@ -2882,55 +2914,6 @@ mod tests {
         assert_eq!(alpha_count.load(Ordering::SeqCst), 3);
     }
 
-    fn persistence_seed_iter(
-        persistence: &crate::persistence_memory::InMemoryWorkflowPersistence,
-        run_id: &str,
-        name: &str,
-        position: i64,
-        iteration: i64,
-    ) -> String {
-        persistence_seed_iter_linked(persistence, run_id, name, position, iteration, None)
-    }
-
-    fn persistence_seed_iter_linked(
-        persistence: &crate::persistence_memory::InMemoryWorkflowPersistence,
-        run_id: &str,
-        name: &str,
-        position: i64,
-        iteration: i64,
-        child_run_id: Option<String>,
-    ) -> String {
-        use crate::traits::persistence::{NewStep, StepUpdate, WorkflowPersistence};
-        let id = persistence
-            .insert_step(NewStep {
-                workflow_run_id: run_id.to_string(),
-                step_name: name.to_string(),
-                role: "actor".to_string(),
-                can_commit: false,
-                position,
-                iteration,
-                retry_count: Some(0),
-            })
-            .unwrap();
-        persistence
-            .update_step(
-                &id,
-                StepUpdate {
-                    generation: 0,
-                    status: crate::status::WorkflowStepStatus::Completed,
-                    child_run_id,
-                    result_text: None,
-                    context_out: None,
-                    markers_out: Some("[]".to_string()),
-                    retry_count: None,
-                    structured_output: None,
-                    step_error: None,
-                },
-            )
-            .unwrap();
-        id
-    }
-
     // #108: the same gate twice in one iteration; only the first is recorded, so the
     // second runs (dry-run auto-approves it and records a row).
     #[test]
@@ -2941,7 +2924,16 @@ mod tests {
 
         let persistence = Arc::new(InMemoryWorkflowPersistence::new());
         let run = make_test_run(&persistence);
-        persistence_seed_iter(&persistence, &run.id, "approve", 0, 0);
+        seed_step_at(
+            &persistence,
+            &run.id,
+            "approve",
+            0,
+            0,
+            crate::status::WorkflowStepStatus::Completed,
+            "[]",
+            None,
+        );
         let (_a, _b, mut state) = make_counting_state(Arc::clone(&persistence), run.id.clone());
         state.exec_config.dry_run = true;
         let gate = || {
@@ -2993,13 +2985,24 @@ mod tests {
                 parent_workflow_run_id: Some(run.id.clone()),
             })
             .unwrap();
-        persistence_seed_iter(&persistence, &child.id, "aggregator", 0, 0);
-        persistence_seed_iter_linked(
+        seed_step_at(
+            &persistence,
+            &child.id,
+            "aggregator",
+            0,
+            0,
+            crate::status::WorkflowStepStatus::Completed,
+            "[]",
+            None,
+        );
+        seed_step_at(
             &persistence,
             &run.id,
             "workflow:child-wf",
             0,
             0,
+            crate::status::WorkflowStepStatus::Completed,
+            "[]",
             Some(child.id.clone()),
         );
         let (_a, _b, mut state) = make_counting_state(Arc::clone(&persistence), run.id.clone());
