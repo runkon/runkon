@@ -416,7 +416,9 @@ pub fn find_max_completed_while_iteration(state: &ExecutionState, node: &WhileNo
 
 #[cfg(test)]
 mod parse_tests {
-    use super::{find_flow_output_block, find_output_block_marker, parse_flow_output};
+    use super::{
+        find_block_start, find_flow_output_block, find_output_block_marker, parse_flow_output,
+    };
 
     #[test]
     fn finds_output_block_markers() {
@@ -756,6 +758,66 @@ Real output:
             parse_flow_output(text).is_none(),
             "context field with non-string type should cause parse failure"
         );
+    }
+
+    // ---- find_block_start ----
+
+    const M: &str = "<<<FLOW_OUTPUT>>>";
+
+    #[test]
+    fn block_start_skips_quoted_mid_line_marker_before_real_block() {
+        // #93: a marker quoted in prose before the real block must not win.
+        let text = "see <<<FLOW_OUTPUT>>> {\"a\":1} in the docs\n<<<FLOW_OUTPUT>>>\n{}\n";
+        let pos = find_block_start(text, M).unwrap();
+        assert_eq!(&text[pos..], "<<<FLOW_OUTPUT>>>\n{}\n");
+    }
+
+    #[test]
+    fn block_start_skips_quoted_marker_inside_block_body() {
+        // A marker quoted inside a string value after the real start is ignored.
+        let text =
+            "<<<FLOW_OUTPUT>>>\n{\"context\": \"x <<<FLOW_OUTPUT>>> {y}\"}\n<<<END_FLOW_OUTPUT>>>";
+        assert_eq!(find_block_start(text, M), Some(0));
+    }
+
+    #[test]
+    fn block_start_requires_json_or_fence_after_marker() {
+        assert_eq!(find_block_start("<<<FLOW_OUTPUT>>>\nplain text", M), None);
+        assert_eq!(find_block_start("<<<FLOW_OUTPUT>>>", M), None);
+        assert_eq!(find_block_start("<<<FLOW_OUTPUT>>>\n[1]", M), Some(0));
+        assert_eq!(
+            find_block_start("<<<FLOW_OUTPUT>>>\n```json\n{}", M),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn block_start_empty_text_and_missing_marker() {
+        assert_eq!(find_block_start("", M), None);
+        assert_eq!(find_block_start("no marker here {}", M), None);
+    }
+
+    #[test]
+    fn block_start_honors_custom_marker() {
+        let text = "<<<FLOW_OUTPUT>>>\n{}\n<<<OTHER>>>\n{}\n";
+        assert_eq!(
+            find_block_start(text, "<<<OTHER>>>"),
+            text.find("<<<OTHER>>>")
+        );
+        assert_eq!(find_block_start(text, "<<<MISSING>>>"), None);
+    }
+
+    #[test]
+    fn block_start_accepts_indented_marker() {
+        let text = "log\n  \t<<<FLOW_OUTPUT>>>\n{}";
+        assert_eq!(find_block_start(text, M), text.find("<<<FLOW_OUTPUT>>>"));
+    }
+
+    #[test]
+    fn block_start_picks_last_real_block() {
+        let text =
+            "<<<FLOW_OUTPUT>>>\n{\"a\":1}\n<<<END_FLOW_OUTPUT>>>\n<<<FLOW_OUTPUT>>>\n{\"b\":2}\n";
+        assert_eq!(find_block_start(text, M), text.rfind("<<<FLOW_OUTPUT>>>"));
     }
 }
 
