@@ -31,26 +31,50 @@ pub struct FlowOutput {
     pub extras: HashMap<String, serde_json::Value>,
 }
 
+const FLOW_OUTPUT_START: &str = "<<<FLOW_OUTPUT>>>";
+const FLOW_OUTPUT_END: &str = "<<<END_FLOW_OUTPUT>>>";
+
+/// Whether only whitespace precedes byte offset `pos` on its line of `text`.
+fn starts_line(text: &str, pos: usize) -> bool {
+    text[..pos]
+        .rsplit('\n')
+        .next()
+        .is_some_and(|before| before.trim().is_empty())
+}
+
+/// Find the byte offset of the last `marker` in `text` that starts a line and
+/// is followed by `{`, `[` or a code fence: the start of a real output block.
+pub fn find_block_start(text: &str, marker: &str) -> Option<usize> {
+    text.rmatch_indices(marker)
+        .map(|(pos, _)| pos)
+        .find(|&pos| {
+            let after = text[pos + marker.len()..].trim_start();
+            starts_line(text, pos)
+                && (after.starts_with('{') || after.starts_with('[') || after.starts_with('`'))
+        })
+}
+
+/// Return the contents of the last `<<<FLOW_OUTPUT>>> … <<<END_FLOW_OUTPUT>>>`
+/// block in `text`, trimmed, or `None` when there is no complete block.
+///
+/// Both markers count only at the start of a line (after optional whitespace),
+/// which is where a real block puts them. A marker quoted mid-line, in prose,
+/// a shell command or a JSON string value inside the block, is ignored, so it
+/// can't be mistaken for the real block's start or end. The start marker must
+/// also be followed by `{`, `[` or a code fence.
+pub fn find_flow_output_block(text: &str) -> Option<&str> {
+    let start = find_block_start(text, FLOW_OUTPUT_START)? + FLOW_OUTPUT_START.len();
+    let end = text[start..]
+        .match_indices(FLOW_OUTPUT_END)
+        .map(|(pos, _)| start + pos)
+        .find(|&pos| starts_line(text, pos))?;
+    Some(text[start..end].trim())
+}
+
 /// Extract markers and context from a `<<<FLOW_OUTPUT>>> … <<<END_FLOW_OUTPUT>>>`
 /// block embedded in `text`. Returns `None` when no valid block is found.
 pub fn parse_flow_output(text: &str) -> Option<FlowOutput> {
-    const START: &str = "<<<FLOW_OUTPUT>>>";
-    const END: &str = "<<<END_FLOW_OUTPUT>>>";
-
-    // Find the last START marker whose content starts with `{`, `[`, or a markdown
-    // code fence (``` …) — guards against occurrences inside JSON string values or
-    // plain prose where the marker appears as a literal string.
-    let start_pos = text
-        .rmatch_indices(START)
-        .find(|(pos, _)| {
-            let after = text[pos + START.len()..].trim_start();
-            after.starts_with('{') || after.starts_with('[') || after.starts_with('`')
-        })
-        .map(|(pos, _)| pos)?;
-
-    let after_start = &text[start_pos + START.len()..];
-    let end_pos = after_start.find(END)?;
-    let raw = after_start[..end_pos].trim();
+    let raw = find_flow_output_block(text)?;
 
     // Strip optional markdown code fences (```json … ``` or ``` … ```)
     let raw = if let Some(stripped) = raw.strip_prefix("```") {
@@ -392,7 +416,9 @@ pub fn find_max_completed_while_iteration(state: &ExecutionState, node: &WhileNo
 
 #[cfg(test)]
 mod parse_tests {
-    use super::{find_output_block_marker, parse_flow_output};
+    use super::{
+        find_block_start, find_flow_output_block, find_output_block_marker, parse_flow_output,
+    };
 
     #[test]
     fn finds_output_block_markers() {
@@ -623,6 +649,54 @@ Actual output:
         assert_eq!(out.context, "this is the real result");
     }
 
+    /// A start marker followed by `{` quoted inside a string value of the real
+    /// block must not be taken for the block's start (#93, first case).
+    #[test]
+    fn quoted_start_marker_in_field_value_finds_real_block() {
+        let text = r#"Plan written.
+
+<<<FLOW_OUTPUT>>>
+{
+  "markers": [],
+  "context": "Replace the two echo '<<<FLOW_OUTPUT>>> {...}' one-liners"
+}
+<<<END_FLOW_OUTPUT>>>
+"#;
+        let out = parse_flow_output(text).unwrap();
+        assert!(out.context.contains("<<<FLOW_OUTPUT>>> {...}"));
+    }
+
+    /// An end marker quoted inside a string value of the real block must not
+    /// cut the block short (#93, second case).
+    #[test]
+    fn quoted_end_marker_in_field_value_finds_real_end() {
+        let text = r#"<<<FLOW_OUTPUT>>>
+{
+  "markers": ["done"],
+  "context": "uses <<<FLOW_OUTPUT>>> / <<<END_FLOW_OUTPUT>>> markers"
+}
+<<<END_FLOW_OUTPUT>>>
+"#;
+        let out = parse_flow_output(text).unwrap();
+        assert_eq!(out.markers, vec!["done"]);
+        assert!(out.context.contains("<<<END_FLOW_OUTPUT>>>"));
+    }
+
+    #[test]
+    fn markers_mid_line_are_ignored() {
+        let text = concat!(
+            "echo '<<<FLOW_OUTPUT>>> {\"markers\": [\"fake\"]}'\n",
+            "the block ends with <<<END_FLOW_OUTPUT>>>\n",
+        );
+        assert_eq!(find_flow_output_block(text), None);
+    }
+
+    #[test]
+    fn indented_markers_still_count() {
+        let text = "   <<<FLOW_OUTPUT>>>\n   {\"markers\": [\"x\"]}\n   <<<END_FLOW_OUTPUT>>>\n";
+        assert_eq!(find_flow_output_block(text), Some(r#"{"markers": ["x"]}"#));
+    }
+
     #[test]
     fn multiple_complete_blocks_returns_last() {
         let text = r#"Example 1:
@@ -684,6 +758,66 @@ Real output:
             parse_flow_output(text).is_none(),
             "context field with non-string type should cause parse failure"
         );
+    }
+
+    // ---- find_block_start ----
+
+    const M: &str = "<<<FLOW_OUTPUT>>>";
+
+    #[test]
+    fn block_start_skips_quoted_mid_line_marker_before_real_block() {
+        // #93: a marker quoted in prose before the real block must not win.
+        let text = "see <<<FLOW_OUTPUT>>> {\"a\":1} in the docs\n<<<FLOW_OUTPUT>>>\n{}\n";
+        let pos = find_block_start(text, M).unwrap();
+        assert_eq!(&text[pos..], "<<<FLOW_OUTPUT>>>\n{}\n");
+    }
+
+    #[test]
+    fn block_start_skips_quoted_marker_inside_block_body() {
+        // A marker quoted inside a string value after the real start is ignored.
+        let text =
+            "<<<FLOW_OUTPUT>>>\n{\"context\": \"x <<<FLOW_OUTPUT>>> {y}\"}\n<<<END_FLOW_OUTPUT>>>";
+        assert_eq!(find_block_start(text, M), Some(0));
+    }
+
+    #[test]
+    fn block_start_requires_json_or_fence_after_marker() {
+        assert_eq!(find_block_start("<<<FLOW_OUTPUT>>>\nplain text", M), None);
+        assert_eq!(find_block_start("<<<FLOW_OUTPUT>>>", M), None);
+        assert_eq!(find_block_start("<<<FLOW_OUTPUT>>>\n[1]", M), Some(0));
+        assert_eq!(
+            find_block_start("<<<FLOW_OUTPUT>>>\n```json\n{}", M),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn block_start_empty_text_and_missing_marker() {
+        assert_eq!(find_block_start("", M), None);
+        assert_eq!(find_block_start("no marker here {}", M), None);
+    }
+
+    #[test]
+    fn block_start_honors_custom_marker() {
+        let text = "<<<FLOW_OUTPUT>>>\n{}\n<<<OTHER>>>\n{}\n";
+        assert_eq!(
+            find_block_start(text, "<<<OTHER>>>"),
+            text.find("<<<OTHER>>>")
+        );
+        assert_eq!(find_block_start(text, "<<<MISSING>>>"), None);
+    }
+
+    #[test]
+    fn block_start_accepts_indented_marker() {
+        let text = "log\n  \t<<<FLOW_OUTPUT>>>\n{}";
+        assert_eq!(find_block_start(text, M), text.find("<<<FLOW_OUTPUT>>>"));
+    }
+
+    #[test]
+    fn block_start_picks_last_real_block() {
+        let text =
+            "<<<FLOW_OUTPUT>>>\n{\"a\":1}\n<<<END_FLOW_OUTPUT>>>\n<<<FLOW_OUTPUT>>>\n{\"b\":2}\n";
+        assert_eq!(find_block_start(text, M), text.rfind("<<<FLOW_OUTPUT>>>"));
     }
 }
 
