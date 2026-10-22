@@ -293,11 +293,29 @@ pub(super) fn skip_if_already_completed(
     iteration: u32,
     label: &str,
 ) -> bool {
-    skip_if_already_completed_with(state, step_key, iteration, label, |state| {
-        crate::engine::restore_step(state, step_key, iteration);
-        Ok(())
-    })
-    .unwrap_or(false)
+    if !should_skip_logged(state, step_key, iteration, label) {
+        return false;
+    }
+    crate::engine::restore_step(state, step_key, iteration);
+    true
+}
+
+/// Shared skip check: true (after logging) if the step already completed.
+fn should_skip_logged(
+    state: &crate::engine::ExecutionState,
+    step_key: &str,
+    iteration: u32,
+    label: &str,
+) -> bool {
+    let skip = crate::engine::should_skip(state, step_key, iteration);
+    if skip {
+        tracing::info!(
+            "Skipping completed step '{}' (iteration {})",
+            label,
+            iteration
+        );
+    }
+    skip
 }
 
 /// Like [`skip_if_already_completed`], but with a custom `restore` for steps
@@ -310,14 +328,9 @@ pub(super) fn skip_if_already_completed_with(
     label: &str,
     restore: impl FnOnce(&mut crate::engine::ExecutionState) -> crate::engine_error::Result<()>,
 ) -> crate::engine_error::Result<bool> {
-    if !crate::engine::should_skip(state, step_key, iteration) {
+    if !should_skip_logged(state, step_key, iteration, label) {
         return Ok(false);
     }
-    tracing::info!(
-        "Skipping completed step '{}' (iteration {})",
-        label,
-        iteration
-    );
     restore(state)?;
     Ok(true)
 }
