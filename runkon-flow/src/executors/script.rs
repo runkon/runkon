@@ -107,25 +107,8 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
         env_vars.extend(provider_env);
     }
 
-    // Inject all current workflow inputs as env vars (prefixed with CONDUCTOR_).
-    // Validate that keys consist only of alphanumeric characters and underscores to
-    // prevent malformed env var names if a key contains `=` or a null byte.
-    for (k, v) in &state.inputs {
-        if !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            tracing::warn!(
-                "script '{}': input key {:?} contains characters invalid in an env var name, skipping",
-                node.name,
-                k
-            );
-            continue;
-        }
-        env_vars.insert(format!("CONDUCTOR_{}", k.to_uppercase()), v.clone());
-    }
-
-    // Inject explicit env vars from the workflow `env = { ... }` block.
-    // Template variables (e.g. `{{prior_output}}`) are substituted using the raw
-    // (non-shell-quoted) variable map because values are passed as discrete env
-    // var values, not interpolated into a shell command string.
+    // Variables that neither workflow inputs nor the `env = { ... }` block may
+    // set: overriding them would change what the script loads or who it acts as.
     const SENSITIVE_ENV_VARS: &[&str] = &[
         "LD_PRELOAD",
         "LD_LIBRARY_PATH",
@@ -139,6 +122,48 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
         // silently overwritten by a workflow-authored env block.
         "GH_TOKEN",
     ];
+
+    // Inject all current workflow inputs as env vars, prefixed with the
+    // provider's `input_env_prefix()` (`FLOW_` by default).
+    // Validate that keys consist only of alphanumeric characters and underscores to
+    // prevent malformed env var names if a key contains `=` or a null byte.
+    // `run_inner` rejects an invalid prefix before the run starts; this covers
+    // callers that execute a script step directly.
+    let input_prefix = state.script_env_provider.input_env_prefix();
+    if let Err(e) = crate::traits::script_env_provider::validate_input_env_prefix(input_prefix) {
+        return fail_script_step(
+            state,
+            &step_id,
+            node,
+            format!("Script '{}': {e}", node.name),
+        );
+    }
+    for (k, v) in &state.inputs {
+        if !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            tracing::warn!(
+                "script '{}': input key {:?} contains characters invalid in an env var name, skipping",
+                node.name,
+                k
+            );
+            continue;
+        }
+        let name = format!("{input_prefix}{}", k.to_uppercase());
+        if SENSITIVE_ENV_VARS.contains(&name.as_str()) {
+            tracing::warn!(
+                "script '{}': input {:?} would set security-sensitive variable {:?} — skipping",
+                node.name,
+                k,
+                name
+            );
+            continue;
+        }
+        env_vars.insert(name, v.clone());
+    }
+
+    // Inject explicit env vars from the workflow `env = { ... }` block.
+    // Template variables (e.g. `{{prior_output}}`) are substituted using the raw
+    // (non-shell-quoted) variable map because values are passed as discrete env
+    // var values, not interpolated into a shell command string.
     for (k, v) in &node.env {
         if k.contains('=') || k.contains('\0') {
             tracing::warn!(
@@ -645,7 +670,7 @@ mod tests {
             .insert("INVALID=KEY".to_string(), "world".to_string());
 
         // The script prints the value of the env var for the valid key and exits 0.
-        let node = make_node("env_test", "echo $CONDUCTOR_VALID_KEY");
+        let node = make_node("env_test", "echo $FLOW_VALID_KEY");
         execute_script(&mut state, &node, 0).unwrap();
 
         let steps = persistence.get_steps(&run_id).unwrap();
@@ -655,8 +680,100 @@ mod tests {
         let ctx = step.context_out.as_deref().unwrap_or("");
         assert!(
             ctx.contains("hello"),
-            "valid key should be injected as CONDUCTOR_VALID_KEY; context: {ctx:?}"
+            "valid key should be injected as FLOW_VALID_KEY; context: {ctx:?}"
         );
+    }
+
+    /// A provider that only overrides the input env-var prefix.
+    struct PrefixProvider(&'static str);
+
+    impl crate::traits::script_env_provider::ScriptEnvProvider for PrefixProvider {
+        fn env(
+            &self,
+            _ctx: &dyn crate::traits::run_context::RunContext,
+            _as_identity: Option<&str>,
+        ) -> HashMap<String, String> {
+            HashMap::new()
+        }
+
+        fn input_env_prefix(&self) -> &str {
+            self.0
+        }
+    }
+
+    /// Run `script` with one input, `ticket_id = "T-1"`, and return the step's context.
+    fn run_with_ticket_input(state: &mut ExecutionState, run_id: &str, script: &str) -> String {
+        state
+            .inputs
+            .insert("ticket_id".to_string(), "T-1".to_string());
+        execute_script(state, &make_node("env_prefix", script), 0).unwrap();
+        let steps = state.persistence.get_steps(run_id).unwrap();
+        assert_eq!(steps[0].status, WorkflowStepStatus::Completed);
+        steps[0].context_out.clone().unwrap_or_default()
+    }
+
+    const PRINT_BOTH_PREFIXES: &str =
+        "echo \"flow=${FLOW_TICKET_ID:-unset} conductor=${CONDUCTOR_TICKET_ID:-unset}\"";
+
+    /// With the default provider, inputs use the neutral `FLOW_` prefix only.
+    #[test]
+    fn inputs_use_flow_prefix_by_default() {
+        let (persistence, run_id) = make_persistence();
+        let mut state = make_state(persistence, run_id.clone());
+        let ctx = run_with_ticket_input(&mut state, &run_id, PRINT_BOTH_PREFIXES);
+        assert!(ctx.contains("flow=T-1 conductor=unset"), "context: {ctx:?}");
+    }
+
+    /// A provider can override the prefix, e.g. conductor keeping `CONDUCTOR_`.
+    #[test]
+    fn provider_overrides_input_env_prefix() {
+        let (persistence, run_id) = make_persistence();
+        let mut state = make_state(persistence, run_id.clone());
+        state.script_env_provider = Arc::new(PrefixProvider("CONDUCTOR_"));
+        let ctx = run_with_ticket_input(&mut state, &run_id, PRINT_BOTH_PREFIXES);
+        assert!(ctx.contains("flow=unset conductor=T-1"), "context: {ctx:?}");
+    }
+
+    /// An invalid prefix fails the step without running the script, rather than
+    /// injecting a variable the host didn't intend (`PATH=` + `TICKET_ID`).
+    #[test]
+    fn invalid_prefix_fails_the_step_without_running_it() {
+        let (persistence, run_id) = make_persistence();
+        let mut state = make_state(persistence, run_id.clone());
+        state.script_env_provider = Arc::new(PrefixProvider("PATH="));
+        state
+            .inputs
+            .insert("ticket_id".to_string(), "T-1".to_string());
+        // With fail_fast (the default) the failed step also fails the call.
+        let res = execute_script(&mut state, &make_node("env_prefix", "echo ran"), 0);
+        assert!(res.is_err(), "fail_fast should surface the step failure");
+        let steps = state.persistence.get_steps(&run_id).unwrap();
+        assert_eq!(steps[0].status, WorkflowStepStatus::Failed);
+        let result = steps[0].result_text.as_deref().unwrap_or("");
+        assert!(
+            result.contains("invalid script input env prefix"),
+            "result: {result:?}"
+        );
+        assert!(
+            !result.contains("ran"),
+            "script must not run; result: {result:?}"
+        );
+    }
+
+    /// With an empty prefix, an input must not be able to replace a
+    /// security-sensitive variable such as `PATH`.
+    #[test]
+    fn empty_prefix_cannot_override_sensitive_vars() {
+        let (persistence, run_id) = make_persistence();
+        let mut state = make_state(persistence, run_id.clone());
+        state.script_env_provider = Arc::new(PrefixProvider(""));
+        state
+            .inputs
+            .insert("path".to_string(), "/nonexistent".to_string());
+        let ctx =
+            run_with_ticket_input(&mut state, &run_id, "echo \"ticket=$TICKET_ID path=$PATH\"");
+        assert!(ctx.contains("ticket=T-1"), "context: {ctx:?}");
+        assert!(!ctx.contains("path=/nonexistent"), "context: {ctx:?}");
     }
 
     /// env block vars from node.env are passed to the subprocess.

@@ -398,6 +398,10 @@ impl FlowEngine {
                 def.name, joined
             )));
         }
+        crate::traits::script_env_provider::validate_input_env_prefix(
+            state.script_env_provider.input_env_prefix(),
+        )
+        .map_err(|e| EngineError::Workflow(format!("workflow '{}': {e}", def.name)))?;
 
         let lease_ttl_secs = state.exec_config.lease_ttl_secs;
         let refresh_interval = state.exec_config.lease_refresh_interval;
