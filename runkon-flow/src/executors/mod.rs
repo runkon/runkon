@@ -205,6 +205,44 @@ pub(super) fn build_action_params(
     }
 }
 
+/// Persist a completed agent step from its [`ActionOutput`].
+///
+/// If the executor set [`metadata_keys::OUTPUT_WARNING`] (for example, the agent
+/// ended without a `<<<FLOW_OUTPUT>>>` block, so its markers are empty), the
+/// warning is logged and stored as the step's `step_error`: the step still
+/// completes, but the run shows why its markers are missing.
+///
+/// [`metadata_keys::OUTPUT_WARNING`]: crate::constants::metadata_keys::OUTPUT_WARNING
+pub(super) fn persist_completed_action_step(
+    state: &crate::engine::ExecutionState,
+    step_id: &str,
+    agent_label: &str,
+    output: &crate::traits::action_executor::ActionOutput,
+    context: String,
+    markers_json: String,
+    attempt: u32,
+) -> crate::engine_error::Result<()> {
+    use crate::traits::persistence::StepUpdate;
+    let warning = output
+        .metadata
+        .get(crate::constants::metadata_keys::OUTPUT_WARNING)
+        .cloned();
+    if let Some(ref w) = warning {
+        tracing::warn!(step = %agent_label, "agent '{agent_label}': {w}");
+    }
+    let mut update = StepUpdate::completed(
+        state.expect_lease_generation(),
+        output.child_run_id.clone(),
+        output.result_text.clone(),
+        Some(context),
+        Some(markers_json),
+        attempt,
+        output.structured_output.clone(),
+    );
+    update.step_error = warning;
+    state.persistence.update_step(step_id, update)
+}
+
 /// Persist a completed step and record its success result in one call.
 /// Centralises the `persist_completed_step` + `record_step_success` pair used
 /// by `call.rs` after a successful agent dispatch.
@@ -224,15 +262,14 @@ pub(super) fn record_dispatch_success(
         &format!("agent '{agent_label}'"),
     );
     let context = output.context.clone().unwrap_or_default();
-    persist_completed_step(
+    persist_completed_action_step(
         state,
         step_id,
-        output.child_run_id.clone(),
-        output.result_text.clone(),
-        Some(context.clone()),
-        Some(markers_json),
+        agent_label,
+        output,
+        context.clone(),
+        markers_json,
         attempt,
-        output.structured_output.clone(),
     )?;
     crate::engine::record_step_success(
         state,

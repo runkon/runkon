@@ -1,4 +1,9 @@
-use runkon_flow::helpers::{fix_backslash_escapes, parse_flow_output, strip_trailing_commas};
+use std::collections::HashMap;
+
+use runkon_flow::constants::metadata_keys;
+use runkon_flow::helpers::{
+    find_output_block_marker, fix_backslash_escapes, parse_flow_output, strip_trailing_commas,
+};
 use runkon_flow::output_schema::{ArrayItems, FieldDef, FieldType, OutputSchema};
 
 // ---------------------------------------------------------------------------
@@ -137,6 +142,56 @@ pub fn interpret_agent_output(
     } else {
         let output = result_text.and_then(parse_flow_output).unwrap_or_default();
         Ok((output.markers, output.context, None))
+    }
+}
+
+/// Explain why a completed agent step recorded no markers, if it didn't get a
+/// usable output block.
+///
+/// [`interpret_agent_output`] falls back to empty markers and context when the
+/// agent's text has no parseable `<<<FLOW_OUTPUT>>>` block, which turns every
+/// downstream `if` on the step false with nothing in the run saying why.
+/// Executors call this for a step that succeeded and store the result under
+/// `metadata_keys::OUTPUT_WARNING`. Returns `None` when the output parsed, and
+/// for schema steps with result text, where a missing or invalid block already
+/// fails the step.
+pub fn flow_output_warning(
+    result_text: Option<&str>,
+    schema: Option<&OutputSchema>,
+) -> Option<String> {
+    const RECORDED: &str = "recorded markers: [] and empty context";
+    let Some(text) = result_text.filter(|t| !t.trim().is_empty()) else {
+        return Some(format!(
+            "agent produced no result text, so there was no <<<FLOW_OUTPUT>>> block; {RECORDED}"
+        ));
+    };
+    if schema.is_some() || parse_flow_output(text).is_some() {
+        return None;
+    }
+    let problem = match find_output_block_marker(text) {
+        None => "agent output has no <<<FLOW_OUTPUT>>> block".to_string(),
+        Some("<<<FLOW_OUTPUT>>>") => "agent output has a <<<FLOW_OUTPUT>>> block that could not \
+             be parsed (invalid JSON or missing <<<END_FLOW_OUTPUT>>>)"
+            .to_string(),
+        Some(other) => format!(
+            "agent output has an unrecognised {other} block; expected <<<FLOW_OUTPUT>>> … \
+             <<<END_FLOW_OUTPUT>>>"
+        ),
+    };
+    Some(format!("{problem}; {RECORDED}"))
+}
+
+/// Store [`flow_output_warning`] for a completed agent step in its metadata,
+/// under `metadata_keys::OUTPUT_WARNING`, where the engine logs it and records
+/// it as the step's `step_error`. Leaves `metadata` unchanged when the output
+/// is fine.
+pub fn record_flow_output_warning(
+    metadata: &mut HashMap<String, String>,
+    result_text: Option<&str>,
+    schema: Option<&OutputSchema>,
+) {
+    if let Some(warning) = flow_output_warning(result_text, schema) {
+        metadata.insert(metadata_keys::OUTPUT_WARNING.to_string(), warning);
     }
 }
 
@@ -739,6 +794,80 @@ mod tests {
         let text = "<<<FLOW_OUTPUT>>>\n{}\n<<<END_FLOW_OUTPUT>>>";
         let err = parse_structured_output(text, &schema).unwrap_err();
         assert!(err.contains("Missing required field"), "got: {err}");
+    }
+
+    // ── flow_output_warning ───────────────────────────────────────────────────
+
+    #[test]
+    fn flow_output_warning_none_when_block_parses() {
+        let text = "done\n<<<FLOW_OUTPUT>>>\n{\"markers\":[\"ok\"],\"context\":\"c\"}\n<<<END_FLOW_OUTPUT>>>";
+        assert_eq!(flow_output_warning(Some(text), None), None);
+    }
+
+    #[test]
+    fn flow_output_warning_missing_block() {
+        let w = flow_output_warning(Some("I finished the task."), None).unwrap();
+        assert!(
+            w.starts_with("agent output has no <<<FLOW_OUTPUT>>> block"),
+            "got: {w}"
+        );
+        assert!(
+            w.ends_with("recorded markers: [] and empty context"),
+            "got: {w}"
+        );
+    }
+
+    #[test]
+    fn flow_output_warning_malformed_block() {
+        let text = "<<<FLOW_OUTPUT>>>\n{\"markers\": [oops]}\n<<<END_FLOW_OUTPUT>>>";
+        let w = flow_output_warning(Some(text), None).unwrap();
+        assert!(w.contains("could not be parsed"), "got: {w}");
+    }
+
+    #[test]
+    fn flow_output_warning_unrecognised_marker() {
+        let text = "<<<CONDUCTOR_OUTPUT>>>\n{\"markers\":[]}\n<<<END_CONDUCTOR_OUTPUT>>>";
+        let w = flow_output_warning(Some(text), None).unwrap();
+        assert!(
+            w.contains("unrecognised <<<CONDUCTOR_OUTPUT>>> block"),
+            "got: {w}"
+        );
+    }
+
+    #[test]
+    fn flow_output_warning_no_result_text() {
+        for text in [None, Some(""), Some("  \n")] {
+            let w = flow_output_warning(text, None).unwrap();
+            assert!(w.contains("no result text"), "{text:?} got: {w}");
+        }
+    }
+
+    #[test]
+    fn flow_output_warning_schema_steps_already_fail_on_bad_output() {
+        let schema = make_schema("test", vec![make_field("ok", true, FieldType::Boolean)]);
+        assert_eq!(
+            flow_output_warning(Some("no block here"), Some(&schema)),
+            None
+        );
+        // ...but with no result text at all there's nothing to fail on.
+        assert!(flow_output_warning(None, Some(&schema)).is_some());
+    }
+
+    #[test]
+    fn record_flow_output_warning_inserts_only_when_output_is_unusable() {
+        let mut metadata = HashMap::new();
+        let ok = "<<<FLOW_OUTPUT>>>\n{\"markers\":[],\"context\":\"c\"}\n<<<END_FLOW_OUTPUT>>>";
+        record_flow_output_warning(&mut metadata, Some(ok), None);
+        assert!(metadata.is_empty(), "got: {metadata:?}");
+
+        record_flow_output_warning(&mut metadata, Some("no block"), None);
+        let w = metadata
+            .get(metadata_keys::OUTPUT_WARNING)
+            .expect("warning recorded");
+        assert!(
+            w.starts_with("agent output has no <<<FLOW_OUTPUT>>> block"),
+            "got: {w}"
+        );
     }
 
     // ── interpret_agent_output ────────────────────────────────────────────────

@@ -315,15 +315,14 @@ pub fn execute_parallel(
                 );
                 let context = output.context.clone().unwrap_or_default();
 
-                super::persist_completed_step(
+                super::persist_completed_action_step(
                     state,
                     &pr.step_id,
-                    output.child_run_id.clone(),
-                    output.result_text.clone(),
-                    Some(context.clone()),
-                    Some(markers_json),
+                    &pr.agent_name,
+                    &output,
+                    context.clone(),
+                    markers_json,
                     pr.attempt,
-                    output.structured_output.clone(),
                 )?;
 
                 tracing::info!("parallel: '{}' completed", pr.agent_name,);
