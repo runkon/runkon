@@ -2924,15 +2924,13 @@ mod tests {
 
         let persistence = Arc::new(InMemoryWorkflowPersistence::new());
         let run = make_test_run(&persistence);
-        seed_step_at(
+        seed_step(
             &persistence,
             &run.id,
             "approve",
             0,
-            0,
             crate::status::WorkflowStepStatus::Completed,
             "[]",
-            None,
         );
         let (_a, _b, mut state) = make_counting_state(Arc::clone(&persistence), run.id.clone());
         state.exec_config.dry_run = true;
@@ -2985,15 +2983,13 @@ mod tests {
                 parent_workflow_run_id: Some(run.id.clone()),
             })
             .unwrap();
-        seed_step_at(
+        seed_step(
             &persistence,
             &child.id,
             "aggregator",
             0,
-            0,
             crate::status::WorkflowStepStatus::Completed,
             "[]",
-            None,
         );
         seed_step_at(
             &persistence,

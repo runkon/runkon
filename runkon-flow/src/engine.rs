@@ -28,9 +28,6 @@ use crate::types::{
 #[derive(Clone, Default)]
 #[non_exhaustive]
 pub struct ResumeContext {
-    /// (name, iteration) -> the latest completed row. Read-only view behind the
-    /// deprecated [`ResumeContext::step_map`] accessor; resume never consults it.
-    step_map: HashMap<String, HashMap<u32, WorkflowRunStep>>,
     /// (name, iteration) -> one slot per recorded occurrence, in position order;
     /// `Some(row)` when that occurrence completed.
     occurrences: HashMap<String, HashMap<u32, Vec<Option<WorkflowRunStep>>>>,
@@ -93,22 +90,22 @@ impl ResumeContext {
             })
             .collect();
         Self {
-            step_map: latest_completed_view(&occurrences),
             occurrences,
             cursors: HashMap::new(),
         }
     }
 
-    /// (name, iteration) -> the latest completed row.
+    /// (name, iteration) -> the latest completed row, built on demand from the
+    /// recorded occurrences.
     ///
-    /// Read-only so that nothing can write to it and expect resume to honor the
-    /// change: resume matches saved rows by occurrence and never reads this map.
+    /// The result is an owned copy so that nothing can write to it and expect resume
+    /// to honor the change: resume matches saved rows by occurrence and never reads it.
     #[deprecated(
         since = "0.7.2",
         note = "lossy for repeated steps; build with `ResumeContext::from_steps` instead"
     )]
-    pub fn step_map(&self) -> &HashMap<String, HashMap<u32, WorkflowRunStep>> {
-        &self.step_map
+    pub fn step_map(&self) -> HashMap<String, HashMap<u32, WorkflowRunStep>> {
+        latest_completed_view(&self.occurrences)
     }
 
     /// True when no recorded occurrence completed.

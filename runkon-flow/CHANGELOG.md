@@ -14,9 +14,10 @@
 - **Changed:** `ResumeContext` is now `#[non_exhaustive]`, so struct-literal construction
   no longer compiles. Build it with `ResumeContext::from_steps` (pass the run's saved
   steps, of every status) or `ResumeContext::default()`.
-- **Deprecated:** `ResumeContext::step_map` is now a deprecated read-only accessor
-  returning the latest completed row per `(name, iteration)`. The field is private so
-  nothing can write to it expecting resume to honor the change; resume no longer reads it.
+- **Changed (breaking):** `ResumeContext::step_map` is no longer a public field, so
+  `ctx.step_map[..]` no longer compiles. Call `ctx.step_map()` instead: a deprecated
+  read-only accessor that returns an owned map of the latest completed row per
+  `(name, iteration)`. Writing to it has no effect, and resume no longer reads it.
 - **Added:** `engine::claim_completed_step`, `engine::restore_step_row` and
   `engine::restore_call_workflow_step_row`. An executor claims a step once per run of it,
   then restores the claimed row.
