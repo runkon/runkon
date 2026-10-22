@@ -34,7 +34,7 @@ utoipa = { version = "5", optional = true }
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 
 [dev-dependencies]
-runkon-runtimes = { workspace = true, features = ["test-utils"] }
+runkon-test-support = { path = "../runkon-test-support" }
 
 [[example]]
 name = "echo_executor"

@@ -589,7 +589,7 @@ mod tests {
     /// A step reads nothing from the host's stdin, which keeps its pending data.
     #[test]
     fn script_step_does_not_read_host_stdin() {
-        use runkon_runtimes::runtime::test_util::*;
+        use runkon_test_support::*;
 
         if !is_stdin_probe_child() {
             run_in_child_with_piped_stdin(

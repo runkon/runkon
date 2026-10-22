@@ -285,7 +285,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn spawn_headless_does_not_read_host_stdin() {
-        use crate::runtime::test_util::*;
+        use runkon_test_support::*;
         use std::io::Read;
 
         if !is_stdin_probe_child() {

@@ -764,7 +764,7 @@ name = "runkon-flow"
 version = "0.7.1-alpha"
 dependencies = [
  "chrono",
- "runkon-runtimes",
+ "runkon-test-support",
  "rusqlite",
  "serde",
  "serde_json",
@@ -823,6 +823,7 @@ name = "runkon-runtimes"
 version = "0.7.1-alpha"
 dependencies = [
  "libc",
+ "runkon-test-support",
  "serde",
  "serde_json",
  "tempfile",
@@ -831,6 +832,10 @@ dependencies = [
  "tracing",
  "utoipa",
 ]
+
+[[package]]
+name = "runkon-test-support"
+version = "0.7.1-alpha"
 
 [[package]]
 name = "rusqlite"
