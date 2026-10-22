@@ -25,7 +25,7 @@ Steps:
    - Any risks or unknowns that should be resolved before implementing
    - An estimated total duration in minutes for the full implementation
 
-Write the plan to `PLAN.md` in the worktree root. This file will be used by the next step.
+Write the plan to `PLAN.md` in the worktree's git directory, `"$(git rev-parse --git-dir)/PLAN.md"`, not the worktree root. That directory is private to this worktree and outside the working tree, so git never tracks or commits the file, and it stays available to the implement and triage-reviews steps for the rest of the run.
 
 ## Do NOT include verification commands in the plan
 

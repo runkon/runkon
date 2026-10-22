@@ -4,7 +4,7 @@ can_commit: true
 model: claude-sonnet-4-6
 ---
 
-You are a software engineer. Your job is to implement the plan written in `PLAN.md`.
+You are a software engineer. Your job is to implement the plan written in `PLAN.md`, which the plan step saved in the worktree's git directory: `"$(git rev-parse --git-dir)/PLAN.md"`. It is outside the working tree, so it never shows up in `git status` or a commit.
 
 The ticket is: {{ticket_id}}
 

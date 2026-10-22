@@ -61,7 +61,7 @@ If `blocking_findings` is present but empty, that's different — it means revie
 <<<END_FLOW_OUTPUT>>>
 ```
 
-Also read `PLAN.md` (if it exists) for any constraints or decisions that could justify pushback.
+Also read the plan at `"$(git rev-parse --git-dir)/PLAN.md"` (if it exists) for any constraints or decisions that could justify pushback, including deviations the implement step recorded there.
 
 Get the PR number once: `PR_NUMBER=$(gh pr view --json number -q .number)`.
 
