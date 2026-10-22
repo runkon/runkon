@@ -18,6 +18,11 @@
   and `helpers::find_block_start` (the offset of the last real start marker).
 - **Deprecated:** `runkon_flow_executors::output::find_flow_output_start`. Use
   `runkon_flow::helpers::find_flow_output_block`, which also finds the end marker.
+- **Deprecated:** `FlowEngineBuilder::script_env_provider()`. The engine never used it, and
+  script steps always got the provider from `RunInput.script_env_provider` /
+  `ChildRunInput.script_env_provider`. A host that set it only on the builder was getting
+  `NoOpScriptEnvProvider` behaviour; pass the provider in `RunInput` instead. It will be
+  removed in the next breaking release.
 
 ## 0.7.0 — Breaking
 
