@@ -1,12 +1,16 @@
 //! Shared runtime helpers for spawning and polling agent runs.
 
 use std::borrow::Cow;
+use std::path::Path;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-use crate::tracker::{EventSink, RuntimeEvent};
+use crate::run::{RunHandle, RunStatus};
+use crate::runtime::PollError;
+use crate::tracker::{EventSink, RunEventSink, RunTracker, RuntimeEvent};
 
 /// Handle to a headless agent subprocess.
 #[cfg(unix)]
@@ -273,6 +277,308 @@ pub fn drain_stream_json<S: EventSink + ?Sized>(
     }
 
     DrainOutcome::NoResult
+}
+
+/// Event sink wrapper that keeps the terminal event (`Completed` or `Failed`)
+/// while forwarding every event to the host's sink.
+///
+/// `EventSink::on_event` returns `()`, so a host whose write of the terminal event
+/// fails cannot report it. Keeping the event here lets `poll` fall back to it
+/// (see [`resolve_completed_run`]).
+pub struct TerminalEventCapture {
+    inner: Arc<dyn RunEventSink>,
+    terminal: Mutex<Option<RuntimeEvent>>,
+}
+
+impl TerminalEventCapture {
+    pub fn new(inner: Arc<dyn RunEventSink>) -> Self {
+        Self {
+            inner,
+            terminal: Mutex::new(None),
+        }
+    }
+
+    /// Take the terminal event captured so far, if any.
+    pub fn take_terminal(&self) -> Option<RuntimeEvent> {
+        self.terminal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+}
+
+impl EventSink for TerminalEventCapture {
+    fn on_event(&self, run_id: &str, event: RuntimeEvent) {
+        if matches!(
+            event,
+            RuntimeEvent::Completed { .. } | RuntimeEvent::Failed { .. }
+        ) {
+            *self.terminal.lock().unwrap_or_else(|e| e.into_inner()) = Some(event.clone());
+        }
+        self.inner.on_event(run_id, event);
+    }
+
+    fn on_raw_value(&self, run_id: &str, value: &serde_json::Value) {
+        self.inner.on_raw_value(run_id, value);
+    }
+}
+
+/// Lay a terminal event over a run handle. A captured field that is `None`
+/// keeps the handle's existing value.
+fn overlay_terminal(row: &mut RunHandle, event: RuntimeEvent) {
+    match event {
+        RuntimeEvent::Completed {
+            result_text,
+            session_id,
+            cost_usd,
+            num_turns,
+            duration_ms,
+            input_tokens,
+            output_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
+        } => {
+            row.status = RunStatus::Completed;
+            row.result_text = result_text.or(row.result_text.take());
+            row.session_id = session_id.or(row.session_id.take());
+            row.cost_usd = cost_usd.or(row.cost_usd);
+            row.num_turns = num_turns.or(row.num_turns);
+            row.duration_ms = duration_ms.or(row.duration_ms);
+            row.input_tokens = input_tokens.or(row.input_tokens);
+            row.output_tokens = output_tokens.or(row.output_tokens);
+            row.cache_read_input_tokens = cache_read_input_tokens.or(row.cache_read_input_tokens);
+            row.cache_creation_input_tokens =
+                cache_creation_input_tokens.or(row.cache_creation_input_tokens);
+        }
+        RuntimeEvent::Failed { error, session_id } => {
+            row.status = RunStatus::Failed;
+            row.result_text = Some(error);
+            row.session_id = session_id.or(row.session_id.take());
+        }
+        _ => {}
+    }
+}
+
+/// Reconcile the host's row with the terminal event the drain saw, after
+/// [`DrainOutcome::Completed`].
+///
+/// A row the host already finished is returned unchanged. A row still `Running`,
+/// missing or unreadable means the host failed to record the terminal event, so
+/// the run is built from the event and a warning is logged. With no captured
+/// event the row, or an error, is returned as before.
+pub fn resolve_completed_run(
+    tracker: &dyn RunTracker,
+    run_id: &str,
+    terminal: Option<RuntimeEvent>,
+    pid: u32,
+    runtime_name: &str,
+    log_path: &Path,
+    context: &str,
+) -> Result<RunHandle, PollError> {
+    let row = tracker.get_run(run_id);
+    let Some(event) = terminal else {
+        return row
+            .map_err(|e| PollError::Failed(format!("DB error after drain: {e}")))?
+            .ok_or_else(|| PollError::Failed(format!("run {run_id} not found in DB after drain")));
+    };
+    let mut handle = match row {
+        Ok(Some(row)) if row.status != RunStatus::Running => return Ok(row),
+        Ok(Some(row)) => {
+            tracing::warn!(
+                "{context}: host row for run {run_id} is still running after the agent's result; using the drained result"
+            );
+            row
+        }
+        Ok(None) => {
+            tracing::warn!(
+                "{context}: host has no row for run {run_id} after the agent's result; using the drained result"
+            );
+            blank_handle(run_id, pid, runtime_name, log_path)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "{context}: failed to read run {run_id} after the agent's result ({e}); using the drained result"
+            );
+            blank_handle(run_id, pid, runtime_name, log_path)
+        }
+    };
+    overlay_terminal(&mut handle, event);
+    Ok(handle)
+}
+
+fn blank_handle(run_id: &str, pid: u32, runtime_name: &str, log_path: &Path) -> RunHandle {
+    RunHandle {
+        id: run_id.to_string(),
+        status: RunStatus::Running,
+        subprocess_pid: Some(pid as i64),
+        runtime: runtime_name.to_string(),
+        session_id: None,
+        result_text: None,
+        started_at: String::new(),
+        ended_at: None,
+        log_file: Some(log_path.display().to_string()),
+        model: None,
+        cost_usd: None,
+        num_turns: None,
+        duration_ms: None,
+        input_tokens: None,
+        output_tokens: None,
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: None,
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    use crate::error::RuntimeError;
+
+    struct RowTracker(Box<dyn Fn() -> crate::error::Result<Option<RunHandle>> + Send + Sync>);
+
+    impl RunTracker for RowTracker {
+        fn record_pid(&self, _: &str, _: u32) -> crate::error::Result<()> {
+            Ok(())
+        }
+        fn record_runtime(&self, _: &str, _: &str) -> crate::error::Result<()> {
+            Ok(())
+        }
+        fn mark_cancelled(&self, _: &str) -> crate::error::Result<()> {
+            Ok(())
+        }
+        fn mark_failed_if_running(&self, _: &str, _: &str) -> crate::error::Result<()> {
+            Ok(())
+        }
+        fn get_run(&self, _: &str) -> crate::error::Result<Option<RunHandle>> {
+            (self.0)()
+        }
+    }
+
+    #[derive(Default)]
+    struct CountingSink(Mutex<usize>);
+
+    impl EventSink for CountingSink {
+        fn on_event(&self, _: &str, _: RuntimeEvent) {
+            *self.0.lock().unwrap() += 1;
+        }
+    }
+
+    fn row(status: RunStatus) -> RunHandle {
+        let mut h = blank_handle("r1", 1, "claude", Path::new("/tmp/row.log"));
+        h.status = status;
+        h.started_at = "2024-01-01T00:00:00Z".to_string();
+        h.model = Some("m".to_string());
+        h
+    }
+
+    fn completed(text: &str) -> RuntimeEvent {
+        RuntimeEvent::Completed {
+            result_text: Some(text.to_string()),
+            session_id: Some("s1".to_string()),
+            cost_usd: Some(0.5),
+            num_turns: Some(2),
+            duration_ms: Some(10),
+            input_tokens: Some(3),
+            output_tokens: Some(4),
+            cache_read_input_tokens: None,
+            cache_creation_input_tokens: None,
+        }
+    }
+
+    fn resolve(
+        tracker: &RowTracker,
+        terminal: Option<RuntimeEvent>,
+    ) -> Result<RunHandle, PollError> {
+        resolve_completed_run(
+            tracker,
+            "r1",
+            terminal,
+            42,
+            "claude",
+            Path::new("/tmp/x.log"),
+            "Test",
+        )
+    }
+
+    #[test]
+    fn capture_forwards_all_events_and_keeps_terminal() {
+        let inner = Arc::new(CountingSink::default());
+        let capture = TerminalEventCapture::new(inner.clone());
+        capture.on_event(
+            "r1",
+            RuntimeEvent::Init {
+                model: None,
+                session_id: None,
+            },
+        );
+        assert!(capture.take_terminal().is_none());
+        capture.on_event("r1", completed("done"));
+        assert_eq!(*inner.0.lock().unwrap(), 2);
+        assert!(matches!(
+            capture.take_terminal(),
+            Some(RuntimeEvent::Completed { .. })
+        ));
+    }
+
+    #[test]
+    fn running_row_gets_captured_completed() {
+        let t = RowTracker(Box::new(|| Ok(Some(row(RunStatus::Running)))));
+        let h = resolve(&t, Some(completed("done"))).unwrap();
+        assert_eq!(h.status, RunStatus::Completed);
+        assert_eq!(h.result_text.as_deref(), Some("done"));
+        assert_eq!(h.num_turns, Some(2));
+        assert_eq!(h.started_at, "2024-01-01T00:00:00Z");
+        assert_eq!(h.model.as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn terminal_host_row_wins() {
+        let t = RowTracker(Box::new(|| {
+            let mut r = row(RunStatus::Completed);
+            r.result_text = Some("from host".to_string());
+            Ok(Some(r))
+        }));
+        let h = resolve(&t, Some(completed("drained"))).unwrap();
+        assert_eq!(h.result_text.as_deref(), Some("from host"));
+    }
+
+    #[test]
+    fn get_run_error_falls_back_to_event() {
+        let t = RowTracker(Box::new(|| Err(RuntimeError::Config("db locked".into()))));
+        let h = resolve(&t, Some(completed("done"))).unwrap();
+        assert_eq!(h.status, RunStatus::Completed);
+        assert_eq!(h.id, "r1");
+        assert_eq!(h.runtime, "claude");
+        assert_eq!(h.subprocess_pid, Some(42));
+    }
+
+    #[test]
+    fn missing_row_falls_back_to_event() {
+        let t = RowTracker(Box::new(|| Ok(None)));
+        let h = resolve(&t, Some(completed("done"))).unwrap();
+        assert_eq!(h.status, RunStatus::Completed);
+        assert_eq!(h.result_text.as_deref(), Some("done"));
+        assert_eq!(h.log_file.as_deref(), Some("/tmp/x.log"));
+    }
+
+    #[test]
+    fn running_row_gets_captured_failed() {
+        let t = RowTracker(Box::new(|| Ok(Some(row(RunStatus::Running)))));
+        let ev = RuntimeEvent::Failed {
+            error: "boom".to_string(),
+            session_id: None,
+        };
+        let h = resolve(&t, Some(ev)).unwrap();
+        assert_eq!(h.status, RunStatus::Failed);
+        assert_eq!(h.result_text.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn no_capture_keeps_existing_behaviour() {
+        let t = RowTracker(Box::new(|| Ok(None)));
+        assert!(matches!(resolve(&t, None), Err(PollError::Failed(m)) if m.contains("not found")));
+        let t = RowTracker(Box::new(|| Ok(Some(row(RunStatus::Running)))));
+        assert_eq!(resolve(&t, None).unwrap().status, RunStatus::Running);
+    }
 }
 
 #[cfg(test)]

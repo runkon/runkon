@@ -6,6 +6,9 @@
   the host's stdin.** The child's stdin is `/dev/null`, so it cannot consume data meant
   for the host, such as an MCP server's JSON-RPC stream. A `script` command that read
   stdin now reads EOF immediately.
+- **Added** `headless::TerminalEventCapture` and `headless::resolve_completed_run`
+  (re-exported at the crate root). The Claude and Gemini runtimes use them to report a
+  finished run from the agent's own result event when the host's row disagrees.
 
 ## 0.7.1 — Fixed
 
