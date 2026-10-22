@@ -2,6 +2,9 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+/// Default [`RuntimeConfig::prompt_env`] for "script" runtimes.
+pub const DEFAULT_SCRIPT_PROMPT_ENV: &str = "FLOW_PROMPT";
+
 /// Configuration for a named agent runtime (RFC 007).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuntimeConfig {
@@ -32,6 +35,12 @@ pub struct RuntimeConfig {
     /// For "script": shell command to execute.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// For "script": name of the env var that carries the prompt to `command`.
+    /// Defaults to [`DEFAULT_SCRIPT_PROMPT_ENV`] (`FLOW_PROMPT`). Must be a
+    /// non-empty name of ASCII letters, digits and `_`; anything else fails the
+    /// spawn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_env: Option<String>,
     /// Environment variables injected into the spawned subprocess via `Command::envs()`.
     /// For "claude" runtimes: merged with RuntimeOptions.env; this entry wins on conflict.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
@@ -45,6 +54,26 @@ pub struct RuntimeConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_config_prompt_env_roundtrip() {
+        let toml = r#"
+type = "script"
+command = "my-agent.sh"
+prompt_env = "CONDUCTOR_PROMPT"
+"#;
+        let rc: RuntimeConfig = toml::from_str(toml).unwrap();
+        assert_eq!(rc.prompt_env.as_deref(), Some("CONDUCTOR_PROMPT"));
+        let back = toml::to_string(&rc).unwrap();
+        assert!(
+            back.contains("prompt_env = \"CONDUCTOR_PROMPT\""),
+            "got: {back}"
+        );
+
+        let unset: RuntimeConfig = toml::from_str("type = \"script\"").unwrap();
+        assert_eq!(unset.prompt_env, None);
+        assert!(!toml::to_string(&unset).unwrap().contains("prompt_env"));
+    }
 
     #[test]
     fn runtime_config_env_and_supported_models_roundtrip() {
