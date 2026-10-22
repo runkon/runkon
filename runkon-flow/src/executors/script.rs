@@ -589,39 +589,11 @@ mod tests {
     /// A step reads nothing from the host's stdin, which keeps its pending data.
     #[test]
     fn script_step_does_not_read_host_stdin() {
-        use std::io::{Read, Write};
-        const PAYLOAD: &str = "host-owned-bytes\n";
-        const ENV: &str = "RUNKON_STDIN_PROBE_CHILD";
-        const SENTINEL: &str = "STDIN_PROBE_RAN";
+        use runkon_runtimes::runtime::test_util::*;
 
-        if std::env::var_os(ENV).is_none() {
-            // Parent: re-run this test alone in a process whose stdin has pending data.
-            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "executors::script::tests::script_step_does_not_read_host_stdin",
-                    "--exact",
-                    "--nocapture",
-                    "--test-threads=1",
-                ])
-                .env(ENV, "1")
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .unwrap();
-            let mut stdin = child.stdin.take().unwrap();
-            stdin.write_all(PAYLOAD.as_bytes()).unwrap();
-            drop(stdin);
-            let out = child.wait_with_output().unwrap();
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            assert!(
-                out.status.success(),
-                "child failed\nstdout: {stdout}\nstderr: {stderr}"
-            );
-            assert!(
-                stdout.contains(SENTINEL),
-                "child never ran the probe (wrong test path?)\nstdout: {stdout}"
+        if !is_stdin_probe_child() {
+            run_in_child_with_piped_stdin(
+                "executors::script::tests::script_step_does_not_read_host_stdin",
             );
             return;
         }
@@ -635,10 +607,7 @@ mod tests {
         assert_eq!(steps[0].status, WorkflowStepStatus::Completed);
         assert_eq!(steps[0].context_out.as_deref().unwrap_or("").trim(), "[]");
 
-        let mut rest = String::new();
-        std::io::stdin().read_to_string(&mut rest).unwrap();
-        assert_eq!(rest, PAYLOAD, "host stdin was consumed");
-        println!("{SENTINEL}");
+        assert_stdin_untouched_and_report();
     }
 
     /// A script that prints an unrecognised output block (e.g. from an older

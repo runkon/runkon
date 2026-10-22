@@ -456,7 +456,7 @@ pub(crate) fn record_pid_and_runtime(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 pub mod test_util {
     use crate::error::Result;
     use crate::run::{RunHandle, RunStatus};

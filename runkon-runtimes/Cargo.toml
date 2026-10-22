@@ -10,6 +10,8 @@ keywords = ["agent", "runtime", "subprocess", "harness", "runkon"]
 categories = ["development-tools", "os"]
 
 [features]
+# Exposes `runtime::test_util` (stdin probe helpers) to dependent crates' tests.
+test-utils = []
 utoipa = ["dep:utoipa"]
 
 [dependencies]
