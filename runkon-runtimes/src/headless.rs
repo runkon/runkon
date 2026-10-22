@@ -94,6 +94,9 @@ impl Drop for HeadlessHandle {
 ///
 /// `env` is applied via `Command::envs()` (overlay — parent env is preserved).
 /// Keys in `env` override inherited values; all other env vars pass through unchanged.
+///
+/// The child's stdin is `/dev/null`: the prompt travels in `args`, and the host's stdin
+/// may carry data meant for the host (such as a protocol stream) that the child must not read.
 #[cfg(unix)]
 pub fn spawn_headless(
     args: &[Cow<'static, str>],
@@ -105,6 +108,7 @@ pub fn spawn_headless(
     let child = Command::new(binary_path)
         .args(args.iter().map(|a| a.as_ref()))
         .current_dir(working_dir)
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .process_group(0)
@@ -276,6 +280,36 @@ mod tests {
     // ------------------------------------------------------------------
     // spawn_headless env injection tests
     // ------------------------------------------------------------------
+
+    /// The child reads nothing from the host's stdin, which keeps its pending data.
+    #[cfg(unix)]
+    #[test]
+    fn spawn_headless_does_not_read_host_stdin() {
+        use crate::runtime::test_util::*;
+        use std::io::Read;
+
+        if !is_stdin_probe_child() {
+            run_in_child_with_piped_stdin("headless::tests::spawn_headless_does_not_read_host_stdin");
+            return;
+        }
+        let args: Vec<std::borrow::Cow<'static, str>> = vec![
+            std::borrow::Cow::Borrowed("-c"),
+            std::borrow::Cow::Borrowed("printf '[%s]' \"$(cat)\""),
+        ];
+        let handle = super::spawn_headless(
+            &args,
+            std::path::Path::new("/tmp"),
+            "/bin/sh",
+            &std::collections::HashMap::new(),
+        )
+        .unwrap();
+        let (mut stdout, finish) = handle.into_drain_parts();
+        let mut output = String::new();
+        stdout.read_to_string(&mut output).unwrap();
+        finish();
+        assert_eq!(output, "[]");
+        assert_stdin_untouched_and_report();
+    }
 
     /// Env var injected via the `env` map must be visible in the child process.
     #[cfg(unix)]

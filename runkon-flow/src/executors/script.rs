@@ -195,6 +195,8 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
     for (k, v) in &env_vars {
         cmd.env(k, v);
     }
+    // The host's stdin may carry a protocol stream; a step must never read it.
+    cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
@@ -582,6 +584,61 @@ mod tests {
             .and_then(|m| serde_json::from_str(m).ok())
             .unwrap_or_default();
         assert!(markers.is_empty(), "no markers expected for plain stdout");
+    }
+
+    /// A step reads nothing from the host's stdin, which keeps its pending data.
+    #[test]
+    fn script_step_does_not_read_host_stdin() {
+        use std::io::{Read, Write};
+        const PAYLOAD: &str = "host-owned-bytes\n";
+        const ENV: &str = "RUNKON_STDIN_PROBE_CHILD";
+        const SENTINEL: &str = "STDIN_PROBE_RAN";
+
+        if std::env::var_os(ENV).is_none() {
+            // Parent: re-run this test alone in a process whose stdin has pending data.
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "executors::script::tests::script_step_does_not_read_host_stdin",
+                    "--exact",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(ENV, "1")
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut stdin = child.stdin.take().unwrap();
+            stdin.write_all(PAYLOAD.as_bytes()).unwrap();
+            drop(stdin);
+            let out = child.wait_with_output().unwrap();
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                out.status.success(),
+                "child failed\nstdout: {stdout}\nstderr: {stderr}"
+            );
+            assert!(
+                stdout.contains(SENTINEL),
+                "child never ran the probe (wrong test path?)\nstdout: {stdout}"
+            );
+            return;
+        }
+
+        let (persistence, run_id) = make_persistence();
+        let mut state = make_state(Arc::clone(&persistence), run_id.clone());
+        let node = make_node("probe", "printf '[%s]' \"$(cat)\"");
+        execute_script(&mut state, &node, 0).unwrap();
+
+        let steps = persistence.get_steps(&run_id).unwrap();
+        assert_eq!(steps[0].status, WorkflowStepStatus::Completed);
+        assert_eq!(steps[0].context_out.as_deref().unwrap_or("").trim(), "[]");
+
+        let mut rest = String::new();
+        std::io::stdin().read_to_string(&mut rest).unwrap();
+        assert_eq!(rest, PAYLOAD, "host stdin was consumed");
+        println!("{SENTINEL}");
     }
 
     /// A script that prints an unrecognised output block (e.g. from an older
