@@ -524,6 +524,7 @@ mod tests {
     use runkon_runtimes::agent_def::{AgentDef, AgentRole};
     use runkon_runtimes::headless::drain_stream_json;
     use runkon_runtimes::run::{RunHandle, RunStatus};
+    use runkon_runtimes::test_support::FixedRowTracker;
     use runkon_runtimes::tracker::{EventSink, NoopEventSink, NoopTracker};
 
     // ── event sink helper ─────────────────────────────────────────────────────
@@ -888,25 +889,6 @@ mod tests {
         use std::os::unix::process::CommandExt;
         use std::process::Stdio;
 
-        struct RunningRowTracker;
-        impl RunTracker for RunningRowTracker {
-            fn record_pid(&self, _: &str, _: u32) -> Result<()> {
-                Ok(())
-            }
-            fn record_runtime(&self, _: &str, _: &str) -> Result<()> {
-                Ok(())
-            }
-            fn mark_cancelled(&self, _: &str) -> Result<()> {
-                Ok(())
-            }
-            fn mark_failed_if_running(&self, _: &str, _: &str) -> Result<()> {
-                Ok(())
-            }
-            fn get_run(&self, _: &str) -> Result<Option<RunHandle>> {
-                Ok(Some(make_test_run("gemini", None)))
-            }
-        }
-
         let runtime = make_runtime(None, None);
         let mut script = tempfile::NamedTempFile::new().expect("tempfile");
         writeln!(script, r#"echo '{{"type":"message","role":"assistant","content":"done","delta":true,"timestamp":"2024-01-01T00:00:00Z"}}'"#).unwrap();
@@ -921,7 +903,9 @@ mod tests {
         let handle =
             runkon_runtimes::headless::HeadlessHandle::from_child(child).expect("HeadlessHandle");
         *runtime.handle.lock().unwrap() = Some(handle);
-        *runtime.tracker.lock().unwrap() = Some(Arc::new(RunningRowTracker));
+        *runtime.tracker.lock().unwrap() = Some(Arc::new(FixedRowTracker::new(make_test_run(
+            "gemini", None,
+        ))));
         *runtime.event_sink.lock().unwrap() = Some(Arc::new(NoopEventSink));
         *runtime.runtime_name.lock().unwrap() = Some("gemini".to_string());
 

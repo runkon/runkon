@@ -9,6 +9,8 @@ pub mod permission;
 pub mod process_utils;
 pub mod run;
 pub mod runtime;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_support;
 pub mod text_util;
 pub mod tracker;
 

@@ -433,25 +433,7 @@ mod capture_tests {
     use super::*;
     use crate::error::RuntimeError;
 
-    struct RowTracker(Box<dyn Fn() -> crate::error::Result<Option<RunHandle>> + Send + Sync>);
-
-    impl RunTracker for RowTracker {
-        fn record_pid(&self, _: &str, _: u32) -> crate::error::Result<()> {
-            Ok(())
-        }
-        fn record_runtime(&self, _: &str, _: &str) -> crate::error::Result<()> {
-            Ok(())
-        }
-        fn mark_cancelled(&self, _: &str) -> crate::error::Result<()> {
-            Ok(())
-        }
-        fn mark_failed_if_running(&self, _: &str, _: &str) -> crate::error::Result<()> {
-            Ok(())
-        }
-        fn get_run(&self, _: &str) -> crate::error::Result<Option<RunHandle>> {
-            (self.0)()
-        }
-    }
+    use crate::test_support::FixedRowTracker as RowTracker;
 
     #[derive(Default)]
     struct CountingSink(Mutex<usize>);
@@ -521,7 +503,7 @@ mod capture_tests {
 
     #[test]
     fn running_row_gets_captured_completed() {
-        let t = RowTracker(Box::new(|| Ok(Some(row(RunStatus::Running)))));
+        let t = RowTracker::from_fn(|| Ok(Some(row(RunStatus::Running))));
         let h = resolve(&t, Some(completed("done"))).unwrap();
         assert_eq!(h.status, RunStatus::Completed);
         assert_eq!(h.result_text.as_deref(), Some("done"));
@@ -532,18 +514,18 @@ mod capture_tests {
 
     #[test]
     fn terminal_host_row_wins() {
-        let t = RowTracker(Box::new(|| {
+        let t = RowTracker::from_fn(|| {
             let mut r = row(RunStatus::Completed);
             r.result_text = Some("from host".to_string());
             Ok(Some(r))
-        }));
+        });
         let h = resolve(&t, Some(completed("drained"))).unwrap();
         assert_eq!(h.result_text.as_deref(), Some("from host"));
     }
 
     #[test]
     fn get_run_error_falls_back_to_event() {
-        let t = RowTracker(Box::new(|| Err(RuntimeError::Config("db locked".into()))));
+        let t = RowTracker::from_fn(|| Err(RuntimeError::Config("db locked".into())));
         let h = resolve(&t, Some(completed("done"))).unwrap();
         assert_eq!(h.status, RunStatus::Completed);
         assert_eq!(h.id, "r1");
@@ -553,7 +535,7 @@ mod capture_tests {
 
     #[test]
     fn missing_row_falls_back_to_event() {
-        let t = RowTracker(Box::new(|| Ok(None)));
+        let t = RowTracker::from_fn(|| Ok(None));
         let h = resolve(&t, Some(completed("done"))).unwrap();
         assert_eq!(h.status, RunStatus::Completed);
         assert_eq!(h.result_text.as_deref(), Some("done"));
@@ -562,7 +544,7 @@ mod capture_tests {
 
     #[test]
     fn running_row_gets_captured_failed() {
-        let t = RowTracker(Box::new(|| Ok(Some(row(RunStatus::Running)))));
+        let t = RowTracker::from_fn(|| Ok(Some(row(RunStatus::Running))));
         let ev = RuntimeEvent::Failed {
             error: "boom".to_string(),
             session_id: None,
@@ -574,9 +556,9 @@ mod capture_tests {
 
     #[test]
     fn no_capture_keeps_existing_behaviour() {
-        let t = RowTracker(Box::new(|| Ok(None)));
+        let t = RowTracker::from_fn(|| Ok(None));
         assert!(matches!(resolve(&t, None), Err(PollError::Failed(m)) if m.contains("not found")));
-        let t = RowTracker(Box::new(|| Ok(Some(row(RunStatus::Running)))));
+        let t = RowTracker::from_fn(|| Ok(Some(row(RunStatus::Running))));
         assert_eq!(resolve(&t, None).unwrap().status, RunStatus::Running);
     }
 }

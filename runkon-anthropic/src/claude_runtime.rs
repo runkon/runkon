@@ -488,6 +488,7 @@ mod tests {
     use runkon_runtimes::agent_def::{AgentDef, AgentRole};
     use runkon_runtimes::headless::drain_stream_json;
     use runkon_runtimes::run::{RunHandle, RunStatus};
+    use runkon_runtimes::test_support::FixedRowTracker;
     use runkon_runtimes::tracker::{NoopEventSink, NoopTracker};
 
     fn make_test_run(runtime: &str, subprocess_pid: Option<i64>) -> RunHandle {
@@ -856,35 +857,11 @@ mod tests {
         (pid, script)
     }
 
-    /// Tracker whose `get_run` returns a fixed row, standing in for a host
-    /// whose write of the terminal event failed (or succeeded, per `status`).
-    #[cfg(unix)]
-    struct FixedRowTracker(RunHandle);
-
-    #[cfg(unix)]
-    impl RunTracker for FixedRowTracker {
-        fn record_pid(&self, _: &str, _: u32) -> Result<()> {
-            Ok(())
-        }
-        fn record_runtime(&self, _: &str, _: &str) -> Result<()> {
-            Ok(())
-        }
-        fn mark_cancelled(&self, _: &str) -> Result<()> {
-            Ok(())
-        }
-        fn mark_failed_if_running(&self, _: &str, _: &str) -> Result<()> {
-            Ok(())
-        }
-        fn get_run(&self, _: &str) -> Result<Option<RunHandle>> {
-            Ok(Some(self.0.clone()))
-        }
-    }
-
     #[cfg(unix)]
     #[test]
     fn poll_returns_drained_result_when_host_row_still_running() {
         let runtime = make_test_runtime(None, None);
-        let tracker = Arc::new(FixedRowTracker(make_test_run("claude", None)));
+        let tracker = Arc::new(FixedRowTracker::new(make_test_run("claude", None)));
         let (_pgid, _script) = inject_script_child_with_tracker(&runtime, tracker);
 
         let handle = runtime
@@ -902,7 +879,7 @@ mod tests {
         row.status = RunStatus::Completed;
         row.result_text = Some("from host".to_string());
         let (_pgid, _script) =
-            inject_script_child_with_tracker(&runtime, Arc::new(FixedRowTracker(row)));
+            inject_script_child_with_tracker(&runtime, Arc::new(FixedRowTracker::new(row)));
 
         let handle = runtime
             .poll("host-terminal", None, Duration::from_secs(30))
