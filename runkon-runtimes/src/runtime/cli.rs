@@ -51,6 +51,8 @@ impl AgentRuntime for CliRuntime {
                 RuntimeError::Config("CliRuntime: `binary` is required".to_string())
             })?;
 
+        super::validate_config_env(&self.config.env, "CliRuntime")?;
+
         let resolved_model = request
             .resolved_model()
             .or(self.config.default_model.as_deref())
@@ -102,6 +104,7 @@ impl AgentRuntime for CliRuntime {
 
         let mut cmd = std::process::Command::new(binary);
         cmd.args(&args)
+            .envs(&self.config.env)
             .stdout(std::process::Stdio::from(output_file))
             .stderr(std::process::Stdio::null())
             .stdin(stdin_cfg);
@@ -346,6 +349,7 @@ mod tests {
     use crate::runtime::RuntimeRequest;
     use crate::tracker::{EventSink, NoopTracker, RuntimeEvent};
     use std::borrow::Cow;
+    use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
     fn make_runtime(binary: &str) -> CliRuntime {
@@ -552,6 +556,67 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&workspace);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_env_is_passed_to_the_subprocess() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = std::env::temp_dir().join("cli-test-config-env-stub");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let script = tmp.join("stub-env.sh");
+        let mut f = std::fs::File::create(&script).unwrap();
+        writeln!(f, "#!/bin/sh").unwrap();
+        writeln!(f, r#"printf '{{"response": "%s"}}' "$MY_API_BASE""#).unwrap();
+        drop(f);
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let sink = Arc::new(RecordingSink::default());
+        let (mut runtime, request, workspace) =
+            make_request_with_sink("config-env-test", script.to_str().unwrap(), sink.clone());
+        runtime.config.env = HashMap::from([(
+            "MY_API_BASE".to_string(),
+            "http://localhost:8000".to_string(),
+        )]);
+
+        runtime.spawn_validated(&request).unwrap();
+        let _ = runtime.poll("config-env-test", None, std::time::Duration::from_secs(5));
+
+        let events = sink.events.lock().unwrap();
+        let result_text = events.iter().find_map(|e| {
+            if let RuntimeEvent::Completed { result_text, .. } = e {
+                result_text.clone()
+            } else {
+                None
+            }
+        });
+        let text = result_text.expect("expected Completed event with result_text");
+        assert_eq!(text, "http://localhost:8000");
+        let _ = std::fs::remove_dir_all(&workspace);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn invalid_config_env_key_fails_the_spawn() {
+        for bad in ["", "BAD=KEY", "BAD\0KEY"] {
+            let mut runtime = make_runtime("echo");
+            runtime.config.env = HashMap::from([(bad.to_string(), "v".to_string())]);
+            let (_, request, workspace) = make_request_with_sink(
+                "config-env-invalid",
+                "echo",
+                Arc::new(RecordingSink::default()),
+            );
+            let err = runtime
+                .spawn_validated(&request)
+                .expect_err("an invalid env key must fail the spawn");
+            assert!(
+                matches!(&err, RuntimeError::Config(m) if m.contains("invalid `env` key")),
+                "{bad:?}: {err:?}"
+            );
+            assert!(!workspace.exists(), "no run dir may be created");
+        }
     }
 
     #[cfg(unix)]
