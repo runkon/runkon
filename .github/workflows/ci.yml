@@ -35,3 +35,16 @@ jobs:
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2.9.1
       - run: cargo test --locked --workspace --features runkon-flow/test-utils
+
+  # Packages every crate and builds each from its packaged sources, as the
+  # Release workflow's publish does, so packaging breaks fail here instead of
+  # mid-release. On an unbumped version cargo warns that each crate already
+  # exists on crates.io; in a dry run that's only a warning.
+  publish-dry-run:
+    name: Publish dry run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2.9.1
+      - run: cargo publish --locked --workspace --dry-run
