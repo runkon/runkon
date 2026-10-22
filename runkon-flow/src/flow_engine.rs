@@ -124,7 +124,8 @@ pub struct FlowEngine {
     pub(crate) action_registry: ActionRegistry,
     pub(crate) item_provider_registry: ItemProviderRegistry,
     pub(crate) gate_resolver_registry: GateResolverRegistry,
-    /// Held for future use when FlowEngine constructs ExecutionState directly.
+    /// Unused. Only the deprecated `FlowEngineBuilder::script_env_provider()` sets it;
+    /// runs take the provider from `RunInput` / `ChildRunInput`. Removed with that method.
     #[allow(dead_code)]
     pub(crate) script_env_provider: Arc<dyn ScriptEnvProvider>,
     pub(crate) workflow_resolver: Option<Arc<dyn WorkflowResolver>>,
@@ -926,7 +927,8 @@ fn validate_nodes_impl(
 ///
 /// Register action executors with `.action()` / `.action_fallback()`,
 /// foreach item sources with `.item_provider()`, gate resolvers with
-/// `.gate_resolver()`, and environment injection with `.script_env_provider()`.
+/// `.gate_resolver()`. The script env provider is per-run state and goes in
+/// [`RunInput`] / [`ChildRunInput`].
 pub struct FlowEngineBuilder {
     named: HashMap<String, Box<dyn ActionExecutor>>,
     fallback: Option<Box<dyn ActionExecutor>>,
@@ -986,6 +988,14 @@ impl FlowEngineBuilder {
     }
 
     /// Set the script env provider. Defaults to `NoOpScriptEnvProvider`.
+    ///
+    /// Ignored: runs never read it. Script steps get their provider from
+    /// [`RunInput::script_env_provider`] or [`ChildRunInput::script_env_provider`].
+    /// Will be removed in the next breaking release.
+    #[deprecated(
+        since = "0.7.1-alpha",
+        note = "ignored: pass the provider in RunInput.script_env_provider / ChildRunInput.script_env_provider"
+    )]
     pub fn script_env_provider(mut self, provider: Box<dyn ScriptEnvProvider>) -> Self {
         self.script_env_provider = provider;
         self
@@ -1302,32 +1312,6 @@ mod tests {
             .unwrap()
             .action_fallback(Box::new(BetaExecutor));
         assert!(result.is_err(), "second action_fallback should return Err");
-    }
-
-    #[test]
-    fn custom_script_env_provider_is_stored_in_bundle() {
-        struct FixedEnvProvider;
-        impl ScriptEnvProvider for FixedEnvProvider {
-            fn env(
-                &self,
-                _ctx: &dyn RunContext,
-                _as_identity: Option<&str>,
-            ) -> HashMap<String, String> {
-                let mut m = HashMap::new();
-                m.insert("CUSTOM_VAR".to_string(), "42".to_string());
-                m
-            }
-        }
-
-        let engine = FlowEngineBuilder::new()
-            .script_env_provider(Box::new(FixedEnvProvider))
-            .build()
-            .unwrap();
-
-        let env = engine
-            .script_env_provider
-            .env(&crate::traits::run_context::NoopRunContext::default(), None);
-        assert_eq!(env.get("CUSTOM_VAR").map(String::as_str), Some("42"));
     }
 
     // --- validate() acceptance criteria ---

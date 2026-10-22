@@ -56,7 +56,8 @@ fn main() {
     // Instantiate all executor types — compilation proves zero conductor_* imports needed.
     let agent = ClaudeAgentExecutor::new(Arc::new(StubRuntimeResolver), None);
     let api = ApiCallExecutor::new("sk-placeholder".to_string());
-    let env = PathPrependingEnvProvider::new(vec![]);
+    // Hosts pass this per run in `RunInput.script_env_provider` (wrapped in `Arc`).
+    let _env = PathPrependingEnvProvider::new(vec![]);
     let (tx, _rx) = std::sync::mpsc::channel();
     let sink = ChannelEventSink(tx);
     let _persistence = InMemoryWorkflowPersistence::new();
@@ -71,7 +72,6 @@ fn main() {
     let _engine = FlowEngineBuilder::new()
         .action_fallback(Box::new(executor))
         .expect("fallback executor registration failed")
-        .script_env_provider(Box::new(env))
         .event_sink(Box::new(sink))
         .workflow_resolver(Box::new(resolver))
         .build()
