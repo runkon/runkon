@@ -5,10 +5,12 @@
 //! resumes the same agent session with a short prompt quoting the validation
 //! error, instead of failing the step and discarding the finished work.
 
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::Duration;
 
+use runkon_flow::constants::metadata_keys;
 use runkon_flow::output_schema::OutputSchema;
 use runkon_runtimes::{AgentRuntime, PollError, RunHandle, RunStatus, RuntimeRequest};
 
@@ -39,6 +41,16 @@ pub fn output_correction_prompt(error: &str, schema: &OutputSchema) -> String {
          <<<END_FLOW_OUTPUT>>> block that fixes this error and conforms to the schema below.\n\n{}",
         generate_prompt_instructions(schema)
     )
+}
+
+/// Record the correction count in step metadata when any correction ran.
+pub fn record_correction_attempts(metadata: &mut HashMap<String, String>, attempts: u32) {
+    if attempts > 0 {
+        metadata.insert(
+            metadata_keys::OUTPUT_CORRECTION_ATTEMPTS.to_string(),
+            attempts.to_string(),
+        );
+    }
 }
 
 fn spawn_and_poll(
@@ -122,6 +134,12 @@ pub fn run_agent_with_output_correction(
                 request.resume_session_id = Some(session_id);
                 let next = spawn_and_poll(runtime, &request, shutdown, step_timeout)
                     .map_err(|ce| format!("output correction failed: {ce}; original error: {e}"))?;
+                if next.status != RunStatus::Completed {
+                    return Err(format!(
+                        "output correction run ended with status {:?}; original error: {e}",
+                        next.status
+                    ));
+                }
                 // The resumed run overwrites the host's row, so carry the earlier
                 // attempts' metrics forward into the new handle.
                 let mut merged = next;
@@ -308,6 +326,26 @@ mod tests {
         assert_eq!(out.correction_attempts, 0);
         assert!(out.structured_output.is_none());
         assert_eq!(rt.spawns().len(), 1);
+    }
+
+    #[test]
+    fn non_completed_correction_run_keeps_original_error() {
+        let mut failed = handle(GOOD, Some("s"), 0.1, 1);
+        failed.status = RunStatus::Failed;
+        let rt = ScriptedRuntime::new(vec![Ok(handle(BAD, Some("s"), 0.1, 1)), Ok(failed)]);
+        let s = schema();
+        let err = run(&rt, Some(&s)).unwrap_err();
+        assert!(err.contains("Failed"), "{err}");
+        assert!(err.contains("Missing required field: 'id'"), "{err}");
+    }
+
+    #[test]
+    fn records_correction_attempts_only_when_nonzero() {
+        let mut m = HashMap::new();
+        record_correction_attempts(&mut m, 0);
+        assert!(m.is_empty());
+        record_correction_attempts(&mut m, 2);
+        assert_eq!(m[metadata_keys::OUTPUT_CORRECTION_ATTEMPTS], "2");
     }
 
     #[test]

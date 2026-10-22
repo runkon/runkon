@@ -8,7 +8,9 @@ use runkon_flow::traits::action_executor::ActionOutput;
 use runkon_runtimes::{RunEventSink, RunStatus, RunTracker, RuntimeRequest, RuntimeResolver};
 
 use runkon_flow_executors::agent_loader::{self, BuildPromptParams};
-use runkon_flow_executors::correction::{run_agent_with_output_correction, AgentRunOutcome};
+use runkon_flow_executors::correction::{
+    record_correction_attempts, run_agent_with_output_correction, AgentRunOutcome,
+};
 use runkon_flow_executors::output::record_flow_output_warning;
 
 use crate::anthropic_api::ApiCallExecutor;
@@ -225,12 +227,7 @@ impl ClaudeAgentExecutor {
                     v.to_string(),
                 );
             }
-            if correction_attempts > 0 {
-                metadata.insert(
-                    metadata_keys::OUTPUT_CORRECTION_ATTEMPTS.to_string(),
-                    correction_attempts.to_string(),
-                );
-            }
+            record_correction_attempts(&mut metadata, correction_attempts);
             record_flow_output_warning(
                 &mut metadata,
                 completed.result_text.as_deref(),
@@ -295,7 +292,8 @@ fn check_supported_models(
 mod tests {
     use super::*;
     use runkon_flow::output_schema::{FieldDef, FieldType};
-    use runkon_runtimes::{Result as RkResult, RunHandle, RuntimeError};
+    use runkon_flow_executors::test_support::{scripted_handle, ScriptedResolver};
+    use runkon_runtimes::{Result as RkResult, RuntimeError};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
     use tempfile::TempDir;
@@ -903,75 +901,6 @@ mod tests {
             Some("claude".to_string()),
             "tracker must record runtime even on the API fast-path"
         );
-    }
-
-    struct ScriptedRuntime {
-        results: std::sync::Mutex<Vec<RunHandle>>,
-        resumes: Arc<std::sync::Mutex<Vec<Option<String>>>>,
-    }
-
-    impl runkon_runtimes::AgentRuntime for ScriptedRuntime {
-        fn spawn_impl(
-            &self,
-            request: &RuntimeRequest,
-            _seal: runkon_runtimes::runtime::private::Seal,
-        ) -> RkResult<()> {
-            self.resumes
-                .lock()
-                .unwrap()
-                .push(request.resume_session_id.clone());
-            Ok(())
-        }
-        fn poll(
-            &self,
-            _run_id: &str,
-            _shutdown: Option<&Arc<AtomicBool>>,
-            _step_timeout: Duration,
-        ) -> Result<RunHandle, runkon_runtimes::PollError> {
-            Ok(self.results.lock().unwrap().remove(0))
-        }
-        fn is_alive(&self, _run: &RunHandle) -> bool {
-            false
-        }
-        fn cancel(&self, _run: &RunHandle) -> RkResult<()> {
-            Ok(())
-        }
-    }
-
-    struct ScriptedResolver {
-        results: Vec<RunHandle>,
-        resumes: Arc<std::sync::Mutex<Vec<Option<String>>>>,
-    }
-
-    impl RuntimeResolver for ScriptedResolver {
-        fn resolve(&self, _name: &str) -> RkResult<Box<dyn runkon_runtimes::AgentRuntime>> {
-            Ok(Box::new(ScriptedRuntime {
-                results: std::sync::Mutex::new(self.results.clone()),
-                resumes: self.resumes.clone(),
-            }))
-        }
-    }
-
-    fn scripted_handle(text: &str) -> RunHandle {
-        RunHandle {
-            id: "test-run".to_string(),
-            status: RunStatus::Completed,
-            subprocess_pid: None,
-            runtime: "claude".to_string(),
-            session_id: Some("sess-1".to_string()),
-            result_text: Some(text.to_string()),
-            started_at: String::new(),
-            ended_at: None,
-            log_file: None,
-            model: None,
-            cost_usd: None,
-            num_turns: Some(1),
-            duration_ms: None,
-            input_tokens: None,
-            output_tokens: None,
-            cache_read_input_tokens: None,
-            cache_creation_input_tokens: None,
-        }
     }
 
     #[test]
