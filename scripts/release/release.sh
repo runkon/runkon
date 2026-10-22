@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end release driver. Runs in order:
 #   1. tag the workspace crates locally
-#   2. push tags to origin
-#   3. publish crates to crates.io (dependency order)
+#   2. publish crates to crates.io (dependency order)
+#   3. push tags to origin (after publishing, so a failed publish leaves no tags)
 #   4. create the GitHub release
 #
 # Usage: scripts/release/release.sh [<ref>]
@@ -30,9 +30,9 @@ crates=(runkon-flow runkon-flow-executors runkon-runtimes runkon-anthropic runko
 tags=()
 for c in "${crates[@]}"; do tags+=("${c}-v${version}"); done
 
+"${here}/publish.sh"
+
 echo
 echo "pushing tags: ${tags[*]}"
 git push origin "${tags[@]}"
-
-"${here}/publish.sh"
 "${here}/gh-release.sh"
