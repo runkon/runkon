@@ -23,9 +23,9 @@ pub trait ScriptEnvProvider: Send + Sync {
     /// another prefix overrides this. Names that would land on a
     /// security-sensitive variable such as `PATH` or `GH_TOKEN` are skipped.
     ///
-    /// The prefix must be empty or contain only ASCII letters, digits and `_`
-    /// (see [`validate_input_env_prefix`]); the engine refuses to start a run
-    /// with any other prefix.
+    /// The prefix must be empty, or start with an ASCII letter or `_` followed
+    /// by letters, digits or `_` (see [`validate_input_env_prefix`]); the engine
+    /// refuses to start a run with any other prefix.
     fn input_env_prefix(&self) -> &str {
         DEFAULT_INPUT_ENV_PREFIX
     }
@@ -34,20 +34,27 @@ pub trait ScriptEnvProvider: Send + Sync {
 /// Default [`ScriptEnvProvider::input_env_prefix`].
 pub const DEFAULT_INPUT_ENV_PREFIX: &str = "FLOW_";
 
-/// Check a [`ScriptEnvProvider::input_env_prefix`] value: empty, or only ASCII
-/// letters, digits and `_`. Anything else could produce a different variable
-/// than intended (`PATH=` + `TICKET_ID` sets `PATH`) or fail every spawn (a
-/// null byte), so it's rejected rather than corrected.
+/// Check a [`ScriptEnvProvider::input_env_prefix`] value: empty, or an ASCII
+/// letter or `_` followed by letters, digits or `_`. Anything else could
+/// produce a different variable than intended (`PATH=` + `TICKET_ID` sets
+/// `PATH`), fail every spawn (a null byte), or produce names a script can't
+/// read (`$1_TICKET_ID` expands `$1`), so it's rejected rather than corrected.
 pub fn validate_input_env_prefix(prefix: &str) -> Result<(), String> {
-    if prefix
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_')
-    {
+    let mut chars = prefix.chars();
+    let valid = match chars.next() {
+        None => true,
+        Some(first) => {
+            (first.is_ascii_alphabetic() || first == '_')
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
+    };
+    if valid {
         Ok(())
     } else {
         Err(format!(
             "invalid script input env prefix {prefix:?} from ScriptEnvProvider::input_env_prefix(): \
-             it may contain only ASCII letters, digits and '_'"
+             it must be empty or start with an ASCII letter or '_', followed by letters, \
+             digits or '_'"
         ))
     }
 }
@@ -67,14 +74,29 @@ mod tests {
 
     #[test]
     fn validate_input_env_prefix_accepts_env_var_safe_prefixes() {
-        for prefix in ["", DEFAULT_INPUT_ENV_PREFIX, "CONDUCTOR_", "app2_"] {
+        for prefix in [
+            "",
+            DEFAULT_INPUT_ENV_PREFIX,
+            "CONDUCTOR_",
+            "app2_",
+            "_",
+            "_X_",
+        ] {
             assert!(validate_input_env_prefix(prefix).is_ok(), "{prefix:?}");
         }
     }
 
     #[test]
     fn validate_input_env_prefix_rejects_other_characters() {
-        for prefix in ["PATH=", "BAD\0", "MY-APP_", "WITH SPACE_", "ÜNI_"] {
+        for prefix in [
+            "PATH=",
+            "BAD\0",
+            "MY-APP_",
+            "WITH SPACE_",
+            "ÜNI_",
+            "1_",
+            "2FLOW_",
+        ] {
             let err = validate_input_env_prefix(prefix).unwrap_err();
             assert!(
                 err.contains("invalid script input env prefix"),

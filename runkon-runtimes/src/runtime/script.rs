@@ -15,6 +15,17 @@ struct ScriptState {
     start: std::time::Instant,
 }
 
+/// Whether `name` is a variable name `sh` can read back as `$name`: an ASCII
+/// letter or `_`, then ASCII letters, digits or `_`. (`$2PROMPT` would expand
+/// `$2` followed by `PROMPT`.)
+fn is_shell_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// ScriptRuntime runs any shell command via `sh -c <command>`,
 /// passing the prompt through the env var named by `prompt_env`
 /// (`FLOW_PROMPT` by default) and capturing stdout as `result_text`. No tmux
@@ -50,14 +61,10 @@ impl AgentRuntime for ScriptRuntime {
             .prompt_env
             .as_deref()
             .unwrap_or(DEFAULT_SCRIPT_PROMPT_ENV);
-        if prompt_env.is_empty()
-            || !prompt_env
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_')
-        {
+        if !is_shell_var_name(prompt_env) {
             return Err(RuntimeError::Config(format!(
-                "ScriptRuntime: invalid `prompt_env` {prompt_env:?}: it must be a non-empty \
-                 name of ASCII letters, digits and '_'"
+                "ScriptRuntime: invalid `prompt_env` {prompt_env:?}: it must be a shell \
+                 variable name (an ASCII letter or '_', then letters, digits or '_')"
             )));
         }
 
@@ -396,8 +403,23 @@ mod tests {
     }
 
     #[test]
+    fn shell_variable_names_are_accepted_as_prompt_env() {
+        for (i, name) in ["FLOW_PROMPT", "CONDUCTOR_PROMPT_2", "_PROMPT", "p"]
+            .into_iter()
+            .enumerate()
+        {
+            let out = run_with_prompt_env(
+                Some(name),
+                &format!("printf '%s' \"${name}\""),
+                &format!("test-prompt-accepted-{i}"),
+            );
+            assert_eq!(out.trim(), "hello", "{name:?}");
+        }
+    }
+
+    #[test]
     fn invalid_prompt_env_fails_the_spawn() {
-        for bad in ["", "BAD=NAME", "BAD\0NAME", "MY-PROMPT"] {
+        for bad in ["", "BAD=NAME", "BAD\0NAME", "MY-PROMPT", "2PROMPT"] {
             let runtime = ScriptRuntime::new(RuntimeConfig {
                 command: Some("echo should-not-run".to_string()),
                 prompt_env: Some(bad.to_string()),

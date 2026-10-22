@@ -37,8 +37,8 @@ pub struct RuntimeConfig {
     pub command: Option<String>,
     /// For "script": name of the env var that carries the prompt to `command`.
     /// Defaults to [`DEFAULT_SCRIPT_PROMPT_ENV`] (`FLOW_PROMPT`). Must be a
-    /// non-empty name of ASCII letters, digits and `_`; anything else fails the
-    /// spawn.
+    /// shell variable name (an ASCII letter or `_`, then letters, digits or
+    /// `_`); anything else fails the spawn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_env: Option<String>,
     /// Environment variables injected into the spawned subprocess via `Command::envs()`.
