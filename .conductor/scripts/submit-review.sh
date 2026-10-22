@@ -280,7 +280,7 @@ if [ -n "${FILED_ISSUES}" ]; then
 ${FILED_ISSUES}"
 fi
 
-REVIEW_BODY_FILE=$(mktemp "${TMPDIR:-/tmp}/conductor_review_body.XXXXXXXXXX.md")
+REVIEW_BODY_FILE=$(mktemp "${TMPDIR:-/tmp}/conductor_review_body.XXXXXXXXXX")
 trap 'rm -f "${REVIEW_BODY_FILE}"' EXIT
 echo "${REVIEW_BODY}" > "${REVIEW_BODY_FILE}"
 
