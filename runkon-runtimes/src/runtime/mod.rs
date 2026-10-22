@@ -265,6 +265,19 @@ mod tests {
     use serde_json::json;
     use test_util::NoopTracker;
 
+    #[test]
+    fn validate_config_env_accepts_valid_entries() {
+        let env = HashMap::from([("K".to_string(), "a b=c".to_string())]);
+        assert!(validate_config_env(&env, "rt").is_ok());
+    }
+
+    #[test]
+    fn validate_config_env_rejects_nul_in_value() {
+        let env = HashMap::from([("K".to_string(), "a\0b".to_string())]);
+        let err = validate_config_env(&env, "rt").unwrap_err();
+        assert!(matches!(&err, RuntimeError::Config(m) if m.contains("must not contain NUL")));
+    }
+
     fn make_request(req_model: Option<&str>, def_model: Option<&str>) -> RuntimeRequest {
         RuntimeRequest {
             run_id: "r".to_string(),
