@@ -2833,6 +2833,196 @@ mod tests {
         );
     }
 
+    // #108: a fast-forwarded `while` consumes its body's occurrences, so a same-named
+    // step after the loop (same iteration 0) matches its own record, not the loop's.
+    #[test]
+    fn resume_while_fast_forward_consumes_body_occurrences() {
+        use crate::dsl::{OnMaxIter, WhileNode};
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use crate::status::WorkflowStepStatus::Completed;
+        use std::sync::atomic::Ordering;
+
+        let persistence = Arc::new(InMemoryWorkflowPersistence::new());
+        let run = make_test_run(&persistence);
+        seed_step(
+            &persistence,
+            &run.id,
+            "beta",
+            0,
+            Completed,
+            r#"["continue"]"#,
+        );
+        // Loop body runs alpha twice per iteration; iterations 0 and 1 are done.
+        for pos in 1..5 {
+            persistence_seed_iter(&persistence, &run.id, "alpha", pos, (pos - 1) / 2);
+        }
+        let (alpha_count, _beta, mut state) =
+            make_counting_state(Arc::clone(&persistence), run.id.clone());
+        let def = make_def(
+            "wf",
+            vec![
+                call_node("beta"),
+                WorkflowNode::While(WhileNode {
+                    step: "beta".to_string(),
+                    marker: "continue".to_string(),
+                    max_iterations: 3,
+                    stuck_after: None,
+                    on_max_iter: OnMaxIter::Continue,
+                    body: vec![call_node("alpha"), call_node("alpha")],
+                }),
+                call_node("alpha"),
+            ],
+        );
+        FlowEngineBuilder::new()
+            .build()
+            .unwrap()
+            .resume(&def, &mut state)
+            .unwrap();
+        // Iteration 2 runs alpha twice, and the trailing alpha (no record) once more.
+        assert_eq!(alpha_count.load(Ordering::SeqCst), 3);
+    }
+
+    fn persistence_seed_iter(
+        persistence: &crate::persistence_memory::InMemoryWorkflowPersistence,
+        run_id: &str,
+        name: &str,
+        position: i64,
+        iteration: i64,
+    ) -> String {
+        persistence_seed_iter_linked(persistence, run_id, name, position, iteration, None)
+    }
+
+    fn persistence_seed_iter_linked(
+        persistence: &crate::persistence_memory::InMemoryWorkflowPersistence,
+        run_id: &str,
+        name: &str,
+        position: i64,
+        iteration: i64,
+        child_run_id: Option<String>,
+    ) -> String {
+        use crate::traits::persistence::{NewStep, StepUpdate, WorkflowPersistence};
+        let id = persistence
+            .insert_step(NewStep {
+                workflow_run_id: run_id.to_string(),
+                step_name: name.to_string(),
+                role: "actor".to_string(),
+                can_commit: false,
+                position,
+                iteration,
+                retry_count: Some(0),
+            })
+            .unwrap();
+        persistence
+            .update_step(
+                &id,
+                StepUpdate {
+                    generation: 0,
+                    status: crate::status::WorkflowStepStatus::Completed,
+                    child_run_id,
+                    result_text: None,
+                    context_out: None,
+                    markers_out: Some("[]".to_string()),
+                    retry_count: None,
+                    structured_output: None,
+                    step_error: None,
+                },
+            )
+            .unwrap();
+        id
+    }
+
+    // #108: the same gate twice in one iteration; only the first is recorded, so the
+    // second runs (dry-run auto-approves it and records a row).
+    #[test]
+    fn resume_runs_second_occurrence_of_repeated_gate() {
+        use crate::dsl::{ApprovalMode, GateNode, OnTimeout};
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use crate::traits::persistence::WorkflowPersistence;
+
+        let persistence = Arc::new(InMemoryWorkflowPersistence::new());
+        let run = make_test_run(&persistence);
+        persistence_seed_iter(&persistence, &run.id, "approve", 0, 0);
+        let (_a, _b, mut state) = make_counting_state(Arc::clone(&persistence), run.id.clone());
+        state.exec_config.dry_run = true;
+        let gate = || {
+            WorkflowNode::Gate(GateNode {
+                name: "approve".to_string(),
+                gate_type: "human_approval".to_string(),
+                prompt: None,
+                min_approvals: 1,
+                approval_mode: ApprovalMode::default(),
+                timeout_secs: 1,
+                on_timeout: OnTimeout::Fail,
+                as_identity: None,
+                quality_gate: None,
+                options: None,
+            })
+        };
+        let def = make_def("wf", vec![gate(), gate()]);
+        FlowEngineBuilder::new()
+            .gate_resolver(HumanApprovalResolver)
+            .build()
+            .unwrap()
+            .resume(&def, &mut state)
+            .unwrap();
+        let rows = persistence
+            .get_steps(&run.id)
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.step_name == "approve")
+            .count();
+        assert_eq!(rows, 2, "second gate must run and record its own row");
+    }
+
+    // #108: the same `call workflow` twice; the first is recorded, the second must
+    // run (it fails here: no child runner), not be skipped.
+    #[test]
+    fn resume_runs_second_occurrence_of_repeated_call_workflow() {
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use crate::traits::persistence::{NewRun, WorkflowPersistence};
+
+        let persistence = Arc::new(InMemoryWorkflowPersistence::new());
+        let run = make_test_run(&persistence);
+        let child = persistence
+            .create_run(NewRun {
+                workflow_name: "child-wf".to_string(),
+                parent_run_id: String::new(),
+                dry_run: false,
+                trigger: "manual".to_string(),
+                definition_snapshot: None,
+                parent_workflow_run_id: Some(run.id.clone()),
+            })
+            .unwrap();
+        persistence_seed_iter(&persistence, &child.id, "aggregator", 0, 0);
+        persistence_seed_iter_linked(
+            &persistence,
+            &run.id,
+            "workflow:child-wf",
+            0,
+            0,
+            Some(child.id.clone()),
+        );
+        let (_a, _b, mut state) = make_counting_state(Arc::clone(&persistence), run.id.clone());
+        let call_wf = || {
+            WorkflowNode::CallWorkflow(CallWorkflowNode {
+                workflow: "child-wf".to_string(),
+                inputs: HashMap::new(),
+                retries: 0,
+                on_fail: None,
+                as_identity: None,
+            })
+        };
+        let def = make_def("wf", vec![call_wf(), call_wf()]);
+        let result = FlowEngineBuilder::new()
+            .build()
+            .unwrap()
+            .resume(&def, &mut state);
+        // The first occurrence is restored from its child run; the second has no
+        // record and runs, failing for lack of a child runner.
+        assert!(state.step_results.contains_key("aggregator"));
+        assert!(result.map_or(true, |r| !r.all_succeeded));
+    }
+
     // AC: resume() propagates persistence errors from get_steps().
     #[test]
     fn resume_propagates_get_steps_error() {

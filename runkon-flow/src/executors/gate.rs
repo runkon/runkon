@@ -3,7 +3,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::dsl::{GateNode, GateOptions, OnFailAction, OnTimeout, QUALITY_GATE_TYPE};
-use crate::engine::{claim_completed_step, emit_event, restore_step_row, ExecutionState};
+use crate::engine::{emit_event, ExecutionState};
 use crate::engine_error::{EngineError, Result};
 use crate::events::EngineEvent;
 use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
@@ -25,9 +25,7 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
     state.position += 1;
 
     // Skip completed gates on resume — restore feedback for downstream steps
-    if let Some(row) = claim_completed_step(state, &node.name, iteration) {
-        tracing::info!("Skipping completed gate '{}'", node.name);
-        restore_step_row(state, &row, &node.name, iteration);
+    if super::skip_if_already_completed(state, &node.name, iteration, &node.name) {
         return Ok(());
     }
 

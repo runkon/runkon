@@ -26,7 +26,17 @@ use crate::types::{
 /// its skip check in an iteration is matched to the n-th recorded run of that
 /// name in that iteration. Build it with [`ResumeContext::from_steps`].
 #[derive(Clone, Default)]
+#[non_exhaustive]
+#[allow(deprecated)]
 pub struct ResumeContext {
+    /// (name, iteration) -> the latest completed row. Read-only view kept for
+    /// callers that read it; it is not consulted when resuming and cannot tell
+    /// repeated runs of a step apart.
+    #[deprecated(
+        since = "0.7.2",
+        note = "lossy for repeated steps; use `claim_completed_step`"
+    )]
+    pub step_map: HashMap<String, HashMap<u32, WorkflowRunStep>>,
     /// (name, iteration) -> one slot per recorded occurrence, in position order;
     /// `Some(row)` when that occurrence completed.
     occurrences: HashMap<String, HashMap<u32, Vec<Option<WorkflowRunStep>>>>,
@@ -88,7 +98,9 @@ impl ResumeContext {
                 (name, by_iter)
             })
             .collect();
+        #[allow(deprecated)]
         Self {
+            step_map: latest_completed_view(&occurrences),
             occurrences,
             cursors: HashMap::new(),
         }
@@ -149,6 +161,28 @@ impl ResumeContext {
                 .map(|(i, _)| *i)
         })
     }
+}
+
+/// Last completed row per `(name, iteration)`, for the deprecated `step_map` view.
+fn latest_completed_view(
+    occurrences: &HashMap<String, HashMap<u32, Vec<Option<WorkflowRunStep>>>>,
+) -> HashMap<String, HashMap<u32, WorkflowRunStep>> {
+    occurrences
+        .iter()
+        .map(|(name, by_iter)| {
+            let rows = by_iter
+                .iter()
+                .filter_map(|(iter, slots)| {
+                    slots
+                        .iter()
+                        .rev()
+                        .find_map(|s| s.clone())
+                        .map(|r| (*iter, r))
+                })
+                .collect();
+            (name.clone(), rows)
+        })
+        .collect()
 }
 
 /// Mutable runtime state for a workflow execution — no conductor-core deps.
@@ -1829,5 +1863,95 @@ mod tests {
         assert_eq!(ctx.model.as_deref(), Some("gpt-4"));
         assert!(ctx.inputs.is_empty());
         assert_eq!(ctx.event_sinks.len(), 0);
+    }
+
+    fn row(
+        name: &str,
+        iteration: i64,
+        position: u32,
+        status: WorkflowStepStatus,
+        id: &str,
+    ) -> WorkflowRunStep {
+        WorkflowRunStep {
+            id: id.to_string(),
+            step_name: name.to_string(),
+            iteration,
+            position: position.into(),
+            status,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resume_context_empty_and_failed_only_are_empty() {
+        assert!(ResumeContext::default().is_empty());
+        assert!(ResumeContext::from_steps(vec![]).is_empty());
+        let ctx = ResumeContext::from_steps(vec![row("a", 0, 0, WorkflowStepStatus::Failed, "1")]);
+        assert!(ctx.is_empty());
+        let ctx =
+            ResumeContext::from_steps(vec![row("a", 0, 0, WorkflowStepStatus::Completed, "1")]);
+        assert!(!ctx.is_empty());
+    }
+
+    #[test]
+    fn resume_context_claims_occurrences_in_position_order() {
+        let mut ctx = ResumeContext::from_steps(vec![
+            row("a", 0, 2, WorkflowStepStatus::Failed, "late"),
+            row("a", 0, 0, WorkflowStepStatus::Completed, "first"),
+        ]);
+        assert_eq!(ctx.claim("a", 0).unwrap().id, "first");
+        assert!(ctx.claim("a", 0).is_none(), "failed occurrence must run");
+        assert!(ctx.claim("a", 0).is_none(), "past the last occurrence");
+    }
+
+    #[test]
+    fn resume_context_duplicate_completed_rows_use_latest() {
+        let mut older = row("a", 0, 0, WorkflowStepStatus::Completed, "older");
+        older.started_at = Some("2026-01-01T00:00:00Z".to_string());
+        let mut newer = row("a", 0, 0, WorkflowStepStatus::Completed, "newer");
+        newer.started_at = Some("2026-01-02T00:00:00Z".to_string());
+        let mut ctx = ResumeContext::from_steps(vec![newer, older]);
+        assert_eq!(ctx.claim("a", 0).unwrap().id, "newer");
+    }
+
+    #[test]
+    fn resume_context_unknown_name_or_iteration_does_not_advance() {
+        let mut ctx =
+            ResumeContext::from_steps(vec![row("a", 0, 0, WorkflowStepStatus::Completed, "1")]);
+        assert!(ctx.claim("missing", 0).is_none());
+        assert!(ctx.claim("a", 1).is_none());
+        assert_eq!(ctx.cursor("missing", 0), 0);
+        assert_eq!(ctx.cursor("a", 1), 0);
+        assert_eq!(ctx.claim("a", 0).unwrap().id, "1");
+    }
+
+    #[test]
+    fn resume_context_advance_skips_occurrences() {
+        let mut ctx = ResumeContext::from_steps(vec![
+            row("a", 0, 0, WorkflowStepStatus::Completed, "1"),
+            row("a", 0, 1, WorkflowStepStatus::Completed, "2"),
+        ]);
+        ctx.advance("a", 0, 1);
+        assert_eq!(ctx.claim("a", 0).unwrap().id, "2");
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn resume_context_step_map_view_holds_latest_completed_row() {
+        let ctx = ResumeContext::from_steps(vec![
+            row("a", 0, 0, WorkflowStepStatus::Completed, "1"),
+            row("a", 0, 1, WorkflowStepStatus::Completed, "2"),
+        ]);
+        assert_eq!(ctx.step_map["a"][&0].id, "2");
+    }
+
+    #[test]
+    fn claim_completed_step_without_resume_ctx_is_none() {
+        let mut state = crate::test_helpers::make_test_execution_state(
+            Arc::new(crate::persistence_memory::InMemoryWorkflowPersistence::new()),
+            "run".to_string(),
+        );
+        state.resume_ctx = None;
+        assert!(claim_completed_step(&mut state, "a", 0).is_none());
     }
 }

@@ -2,8 +2,7 @@ use std::io::Read;
 
 use crate::dsl::ScriptNode;
 use crate::engine::{
-    claim_completed_step, record_step_failure, record_step_skipped, record_step_success,
-    restore_step_row, ExecutionState,
+    record_step_failure, record_step_skipped, record_step_success, ExecutionState,
 };
 use crate::engine_error::Result;
 use crate::prompt_builder::build_variable_map;
@@ -46,9 +45,7 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
     state.position += 1;
 
     // Skip completed script steps on resume
-    if let Some(row) = claim_completed_step(state, &node.name, iteration) {
-        tracing::info!("Skipping completed script step '{}'", node.name);
-        restore_step_row(state, &row, &node.name, iteration);
+    if super::skip_if_already_completed(state, &node.name, iteration, &node.name) {
         return Ok(());
     }
 
