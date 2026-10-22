@@ -24,6 +24,9 @@
   `NoOpScriptEnvProvider` behaviour; pass the provider in `RunInput` instead. It will be
   removed in the next breaking release.
 
+- **Added:** `metadata_keys::OUTPUT_CORRECTION_ATTEMPTS`. Agent executors set it on a step
+  when its structured output needed in-session corrections before passing validation.
+
 ## 0.7.0 — Breaking
 
 - **Script steps receive workflow inputs as `FLOW_<NAME>` instead of `CONDUCTOR_<NAME>`.**
