@@ -19,6 +19,9 @@
 - **Deprecated:** `runkon_flow_executors::output::find_flow_output_start`. Use
   `runkon_flow::helpers::find_flow_output_block`, which also finds the end marker.
 
+- **Added:** `metadata_keys::OUTPUT_CORRECTION_ATTEMPTS`. Agent executors set it on a step
+  when its structured output needed in-session corrections before passing validation.
+
 ## 0.7.0 — Breaking
 
 - **Script steps receive workflow inputs as `FLOW_<NAME>` instead of `CONDUCTOR_<NAME>`.**
