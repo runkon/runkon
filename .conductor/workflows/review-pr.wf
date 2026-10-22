@@ -39,6 +39,16 @@ workflow review-pr {
     call review-test-coverage   { retries = 1  if = "detect-file-types.has_code_changes" }
   }
 
+  // Replies posted on the PR since the last conductor review, so the
+  // aggregator can set aside findings that were already answered
+  // (devinrosen/conductor-ai#3050).
+  script fetch-pr-replies {
+    run = ".conductor/scripts/fetch-pr-replies.sh"
+    env = {
+      PR_NUMBER = "{{pr_number}}"
+    }
+  }
+
   call review-aggregator { output = "review-aggregator" retries = 1 }
   script submit-review {
     run = ".conductor/scripts/submit-review.sh"

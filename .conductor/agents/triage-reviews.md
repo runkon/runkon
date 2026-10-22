@@ -104,7 +104,7 @@ If classified **pushback**, post a top-level PR comment recording your rationale
 gh pr comment "${PR_NUMBER}" --body "[Pushback on ${REVIEWER} — ${FILE}:${LINE}]: <one or two sentences, state the reasoning once, be respectful, do not argue>"
 ```
 
-Note: this comment is for human visibility and audit. The reviewer swarm does not auto-read it on the next iteration — if you push back on a finding and the diff is unchanged, the same finding will resurface. The pushback-count check in step 2b is what prevents an infinite pushback loop.
+Note: the next `review-pr` run reads this comment. Its aggregator sets aside a finding that a reply posted since the last review already answered, so keep the `[Pushback on …]` prefix with the reviewer, file and line, and state the reason in a way someone reading only the comment can check. Security findings are never set aside. A finding can still come back in a later round, and the pushback-count check in step 2b is what prevents an infinite pushback loop.
 
 #### 2f. Act on clarify
 
