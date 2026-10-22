@@ -3,7 +3,7 @@ use std::process::{Child, Stdio};
 use std::sync::{atomic::AtomicBool, Arc, Mutex};
 use std::time::Duration;
 
-use crate::config::RuntimeConfig;
+use crate::config::{RuntimeConfig, DEFAULT_SCRIPT_PROMPT_ENV};
 use crate::error::{Result, RuntimeError};
 use crate::run::{RunHandle, RunStatus};
 use crate::tracker::{RunEventSink, RunTracker, RuntimeEvent};
@@ -15,9 +15,21 @@ struct ScriptState {
     start: std::time::Instant,
 }
 
+/// Whether `name` is a variable name `sh` can read back as `$name`: an ASCII
+/// letter or `_`, then ASCII letters, digits or `_`. (`$2PROMPT` would expand
+/// `$2` followed by `PROMPT`.)
+fn is_shell_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// ScriptRuntime runs any shell command via `sh -c <command>`,
-/// passing the prompt through the `CONDUCTOR_PROMPT` environment variable and
-/// capturing stdout as `result_text`. No tmux dependency.
+/// passing the prompt through the env var named by `prompt_env`
+/// (`FLOW_PROMPT` by default) and capturing stdout as `result_text`. No tmux
+/// dependency.
 pub struct ScriptRuntime {
     config: RuntimeConfig,
     state: Mutex<Option<ScriptState>>,
@@ -44,6 +56,18 @@ impl AgentRuntime for ScriptRuntime {
             )
         })?;
 
+        let prompt_env = self
+            .config
+            .prompt_env
+            .as_deref()
+            .unwrap_or(DEFAULT_SCRIPT_PROMPT_ENV);
+        if !is_shell_var_name(prompt_env) {
+            return Err(RuntimeError::Config(format!(
+                "ScriptRuntime: invalid `prompt_env` {prompt_env:?}: it must be a shell \
+                 variable name (an ASCII letter or '_', then letters, digits or '_')"
+            )));
+        }
+
         if request.agent_def.can_commit {
             tracing::warn!(
                 "ScriptRuntime: agent '{}' has can_commit=true but ScriptRuntime produces no \
@@ -54,7 +78,7 @@ impl AgentRuntime for ScriptRuntime {
 
         let child = std::process::Command::new("sh")
             .args(["-c", command])
-            .env("CONDUCTOR_PROMPT", &request.prompt)
+            .env(prompt_env, &request.prompt)
             .current_dir(&request.working_dir)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -322,6 +346,100 @@ mod tests {
             matches!(result, Err(PollError::Cancelled)),
             "poll with shutdown flag should return Cancelled; got: {result:?}"
         );
+    }
+
+    /// Records the `result_text` of a `Completed` event.
+    #[derive(Default)]
+    struct CompletedSink(Mutex<Option<String>>);
+
+    impl crate::tracker::EventSink for CompletedSink {
+        fn on_event(&self, _run_id: &str, event: RuntimeEvent) {
+            if let RuntimeEvent::Completed { result_text, .. } = event {
+                *self.0.lock().unwrap() = result_text;
+            }
+        }
+    }
+
+    /// Spawn `command` with `prompt_env` and prompt "hello"; return its stdout.
+    fn run_with_prompt_env(prompt_env: Option<&str>, command: &str, run_id: &str) -> String {
+        let runtime = ScriptRuntime::new(RuntimeConfig {
+            command: Some(command.to_string()),
+            prompt_env: prompt_env.map(str::to_string),
+            ..RuntimeConfig::default()
+        });
+        let sink = Arc::new(CompletedSink::default());
+        let request = RuntimeRequest {
+            prompt: "hello".to_string(),
+            event_sink: sink.clone(),
+            ..make_request(run_id)
+        };
+        runtime
+            .spawn_validated(&request)
+            .expect("spawn should succeed");
+        // NoopTracker keeps no runs, so poll's final lookup fails; the output
+        // has already been reported through the event sink by then.
+        let _ = runtime.poll(run_id, None, Duration::from_secs(30));
+        let out = sink.0.lock().unwrap().clone();
+        out.expect("script should complete")
+    }
+
+    const PRINT_BOTH_PROMPT_VARS: &str =
+        "printf '%s|%s' \"${FLOW_PROMPT:-unset}\" \"${CONDUCTOR_PROMPT:-unset}\"";
+
+    #[test]
+    fn prompt_is_passed_as_flow_prompt_by_default() {
+        let out = run_with_prompt_env(None, PRINT_BOTH_PROMPT_VARS, "test-prompt-default");
+        assert_eq!(out.trim(), "hello|unset");
+    }
+
+    #[test]
+    fn prompt_env_overrides_the_variable_name() {
+        let out = run_with_prompt_env(
+            Some("CONDUCTOR_PROMPT"),
+            PRINT_BOTH_PROMPT_VARS,
+            "test-prompt-override",
+        );
+        assert_eq!(out.trim(), "unset|hello");
+    }
+
+    #[test]
+    fn shell_variable_names_are_accepted_as_prompt_env() {
+        for (i, name) in [
+            "FLOW_PROMPT",
+            "CONDUCTOR_PROMPT_2",
+            "_PROMPT",
+            "p",
+            "_1",
+            "_PROMPT_2",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let out = run_with_prompt_env(
+                Some(name),
+                &format!("printf '%s' \"${name}\""),
+                &format!("test-prompt-accepted-{i}"),
+            );
+            assert_eq!(out.trim(), "hello", "{name:?}");
+        }
+    }
+
+    #[test]
+    fn invalid_prompt_env_fails_the_spawn() {
+        for bad in ["", "BAD=NAME", "BAD\0NAME", "MY-PROMPT", "2PROMPT"] {
+            let runtime = ScriptRuntime::new(RuntimeConfig {
+                command: Some("echo should-not-run".to_string()),
+                prompt_env: Some(bad.to_string()),
+                ..RuntimeConfig::default()
+            });
+            let err = runtime
+                .spawn_validated(&make_request("test-prompt-invalid"))
+                .expect_err("an invalid prompt_env must fail the spawn");
+            assert!(
+                matches!(&err, RuntimeError::Config(m) if m.contains("invalid `prompt_env`")),
+                "{bad:?}: {err:?}"
+            );
+        }
     }
 
     #[test]
