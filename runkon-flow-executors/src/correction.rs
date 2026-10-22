@@ -113,7 +113,9 @@ pub fn run_agent_with_output_correction(
                     return Err(e);
                 };
                 if attempts >= MAX_OUTPUT_CORRECTION_ATTEMPTS {
-                    return Err(format!("{e} (after {attempts} output correction attempt(s))"));
+                    return Err(format!(
+                        "{e} (after {attempts} output correction attempt(s))"
+                    ));
                 }
                 attempts += 1;
                 request.prompt = output_correction_prompt(&e, schema);
@@ -225,7 +227,8 @@ mod tests {
         }
     }
 
-    const BAD: &str = "done\n<<<FLOW_OUTPUT>>>\n{\"tasks\":[{\"id\":\"a\"},{}]}\n<<<END_FLOW_OUTPUT>>>";
+    const BAD: &str =
+        "done\n<<<FLOW_OUTPUT>>>\n{\"tasks\":[{\"id\":\"a\"},{}]}\n<<<END_FLOW_OUTPUT>>>";
     const GOOD: &str =
         "fixed\n<<<FLOW_OUTPUT>>>\n{\"tasks\":[{\"id\":\"a\"},{\"id\":\"b\"}]}\n<<<END_FLOW_OUTPUT>>>";
 
@@ -237,10 +240,7 @@ mod tests {
         }
     }
 
-    fn run(
-        rt: &ScriptedRuntime,
-        schema: Option<&OutputSchema>,
-    ) -> Result<AgentRunOutcome, String> {
+    fn run(rt: &ScriptedRuntime, schema: Option<&OutputSchema>) -> Result<AgentRunOutcome, String> {
         run_agent_with_output_correction(rt, request(), None, Duration::from_secs(1), schema)
     }
 
