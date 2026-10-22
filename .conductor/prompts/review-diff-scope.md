@@ -70,6 +70,17 @@ of unchanged code, or files mentioned in the diff stat). A finding about
 code that does not appear anywhere in the diff is almost certainly
 hallucinated — drop it.
 
+## One concern, every location
+
+When you raise a finding, check the whole diff for other instances of the
+same concern: in code, comments, docs and tests. Report them all in that
+one finding: put the first location in `file` and `line`, and end
+`message` with `Also at: <path>:<line>, <path>:<line>`. Every review
+round costs the PR a fix, CI and review cycle, so a concern reported in
+one place now and in another place on the next round costs an extra
+cycle. Each listed location must pass the path verification above;
+instances in unchanged code go in `off_diff_findings` instead.
+
 ## Output format
 
 Severity guide:

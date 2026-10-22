@@ -17,7 +17,7 @@ The conductor review swarm posts a single body-only PR review (no inline review 
 Steps:
 
 1. Find the latest `triage-reviews` entry in `{{prior_contexts}}`. Parse its `structured_output` (it is a JSON string) and read `triaged[]`. Filter to entries where `outcome == "address"`. Cross-reference with the latest `review-aggregator` entry's `blocking_findings[]` (matched by `file` + `line` + `reviewer`) to recover the full `message` text for each finding — that is the actual concern you need to address.
-2. For each `address`-classified finding, read the referenced code at `file`:`line` and understand the concern from `message`.
+2. For each `address`-classified finding, read the referenced code at `file`:`line` and understand the concern from `message`. If `message` ends with `Also at: ...`, the same concern appears at each listed location: fix every one of them, not just `file`:`line`.
 3. For each finding, apply the requested change. Triage has already pushed back on or clarified findings that are wrong/ambiguous — anything in your address list is approved for implementation.
 4. Write a brief FLOW_OUTPUT summarizing which crates and files you modified, so the verify step can scope its test commands:
    ```
