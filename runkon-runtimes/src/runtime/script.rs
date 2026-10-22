@@ -410,7 +410,9 @@ mod tests {
     fn script_runtime_does_not_read_host_stdin() {
         use crate::runtime::test_util::*;
         if !is_stdin_probe_child() {
-            run_in_child_with_piped_stdin("runtime::script::tests::script_runtime_does_not_read_host_stdin");
+            run_in_child_with_piped_stdin(
+                "runtime::script::tests::script_runtime_does_not_read_host_stdin",
+            );
             return;
         }
         let out = run_with_config(

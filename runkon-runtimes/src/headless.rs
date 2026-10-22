@@ -289,7 +289,9 @@ mod tests {
         use std::io::Read;
 
         if !is_stdin_probe_child() {
-            run_in_child_with_piped_stdin("headless::tests::spawn_headless_does_not_read_host_stdin");
+            run_in_child_with_piped_stdin(
+                "headless::tests::spawn_headless_does_not_read_host_stdin",
+            );
             return;
         }
         let args: Vec<std::borrow::Cow<'static, str>> = vec![
