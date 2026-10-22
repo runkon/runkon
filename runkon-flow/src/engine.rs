@@ -823,12 +823,37 @@ fn parse_markers_out(markers_json: Option<&str>, step_name: &str) -> Vec<String>
 
 /// Temporarily take the `ResumeContext` out of `state` so we can borrow `state`
 /// mutably while reading from the context's maps.
-pub fn restore_step(state: &mut ExecutionState, key: &str, iteration: u32) {
+fn with_resume_ctx<R>(
+    state: &mut ExecutionState,
+    f: impl FnOnce(&mut ExecutionState, &ResumeContext) -> R,
+) -> Option<R> {
     let ctx = state.resume_ctx.take();
-    if let Some(ref ctx) = ctx {
-        restore_completed_step(state, ctx, key, iteration);
-    }
+    let out = ctx.as_ref().map(|ctx| f(state, ctx));
     state.resume_ctx = ctx;
+    out
+}
+
+/// Look up a completed step in the resume context, warning when it is missing.
+fn find_completed_step<'a>(
+    ctx: &'a ResumeContext,
+    step_key: &str,
+    iteration: u32,
+) -> Option<&'a crate::types::WorkflowRunStep> {
+    let step = ctx.step_map.get(step_key).and_then(|m| m.get(&iteration));
+    if step.is_none() {
+        tracing::warn!(
+            "resume: step '{step_key}:{iteration}' in skip set but not found in resume context \
+             — downstream variable substitution may be incorrect"
+        );
+    }
+    step
+}
+
+/// Restore a completed step from the resume context into `state`.
+pub fn restore_step(state: &mut ExecutionState, key: &str, iteration: u32) {
+    with_resume_ctx(state, |state, ctx| {
+        restore_completed_step(state, ctx, key, iteration)
+    });
 }
 
 /// Restore a completed step's results from the resume context into the execution state.
@@ -838,35 +863,94 @@ pub fn restore_completed_step(
     step_key: &str,
     iteration: u32,
 ) {
-    let completed_step = ctx.step_map.get(step_key).and_then(|m| m.get(&iteration));
-
-    let Some(step) = completed_step else {
-        tracing::warn!(
-            "resume: step '{step_key}:{iteration}' in skip set but not found in resume context \
-             — downstream variable substitution may be incorrect"
-        );
+    let Some(step) = find_completed_step(ctx, step_key, iteration) else {
         return;
     };
-
-    let markers = parse_markers_out(step.markers_out.as_deref(), step_key);
-    let context = step.context_out.clone().unwrap_or_default();
 
     // Restore gate feedback if this was a gate step
     if let Some(ref feedback) = step.gate_feedback {
         state.last_gate_feedback = Some(feedback.clone());
     }
 
-    let success = crate::types::StepSuccess::from_workflow_run_step(
-        step_key.to_string(),
-        step,
-        markers,
-        context,
-        iteration,
-    );
+    let success = success_from_row(step, step_key, step_key, iteration);
     let step_result = StepResult::completed_without_metrics(&success);
     state.step_results.insert(step_key.to_string(), step_result);
 
     state.contexts.push(success.into());
+}
+
+/// Build a `StepSuccess` named `result_key` from a persisted step row.
+/// `persisted_key` is the row's step name, used only for marker-parse warnings.
+fn success_from_row(
+    step: &crate::types::WorkflowRunStep,
+    persisted_key: &str,
+    result_key: &str,
+    iteration: u32,
+) -> crate::types::StepSuccess {
+    let markers = parse_markers_out(step.markers_out.as_deref(), persisted_key);
+    let context = step.context_out.clone().unwrap_or_default();
+    crate::types::StepSuccess::from_workflow_run_step(
+        result_key.to_string(),
+        step,
+        markers,
+        context,
+        iteration,
+    )
+}
+
+/// Like [`restore_step`], but for a completed `call workflow` step: records the
+/// step the way a live run does, so conditions and `prior_contexts` match an
+/// uninterrupted run. `persisted_key` is the row's step name (`workflow:<name>`);
+/// `result_key` is the key the live path uses (`node.workflow`).
+pub fn restore_call_workflow_step(
+    state: &mut ExecutionState,
+    persisted_key: &str,
+    result_key: &str,
+    iteration: u32,
+) -> Result<()> {
+    with_resume_ctx(state, |state, ctx| {
+        restore_call_workflow_step_from(state, ctx, persisted_key, result_key, iteration)
+    })
+    .unwrap_or(Ok(()))
+}
+
+fn restore_call_workflow_step_from(
+    state: &mut ExecutionState,
+    ctx: &ResumeContext,
+    persisted_key: &str,
+    result_key: &str,
+    iteration: u32,
+) -> Result<()> {
+    let Some(step) = find_completed_step(ctx, persisted_key, iteration) else {
+        return Ok(());
+    };
+
+    // A completed call-workflow row always carries the child's run id. Without
+    // it the child's markers are unrecoverable and conditions on them would be
+    // silently skipped, so fail the resume instead.
+    let Some(child_run_id) = step.child_run_id.as_deref() else {
+        return Err(EngineError::Workflow(format!(
+            "resume: completed step '{persisted_key}:{iteration}' in workflow run '{}' has no \
+             child_run_id — cannot restore the child workflow's step markers and contexts",
+            state.workflow_run_id
+        )));
+    };
+
+    // Same order as the live path: child contexts, the step's own entry, then
+    // the child step results.
+    let (_, child_steps, child_contexts) =
+        fetch_child_completion_data(state.persistence.as_ref(), child_run_id);
+    state.contexts.extend(child_contexts);
+
+    let success = success_from_row(step, persisted_key, result_key, iteration);
+    state.step_results.insert(
+        result_key.to_string(),
+        StepResult::completed_without_metrics(&success),
+    );
+    state.contexts.push(success.into());
+
+    state.step_results.extend(child_steps);
+    Ok(())
 }
 
 /// Returned by [`fetch_child_completion_data`].

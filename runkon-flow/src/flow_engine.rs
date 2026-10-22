@@ -2303,6 +2303,147 @@ mod tests {
         );
     }
 
+    /// Seed a parent run with a completed `workflow:child-wf` step (optionally
+    /// linked to a child run holding a completed `aggregator` step that set
+    /// `has_blocking_findings`), then resume a def that branches on that marker.
+    /// Returns the alpha counter and the state after resume.
+    fn resume_after_child_workflow(
+        child_run_id_linked: bool,
+    ) -> (
+        Arc<std::sync::atomic::AtomicUsize>,
+        crate::engine::ExecutionState,
+        crate::engine_error::Result<WorkflowResult>,
+    ) {
+        use crate::dsl::{Condition, IfNode};
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use crate::status::WorkflowStepStatus;
+        use crate::traits::persistence::{NewRun, NewStep, StepUpdate, WorkflowPersistence};
+
+        let persistence = Arc::new(InMemoryWorkflowPersistence::new());
+        let parent = make_test_run(&persistence);
+        let child = persistence
+            .create_run(NewRun {
+                workflow_name: "child-wf".to_string(),
+                parent_run_id: String::new(),
+                dry_run: false,
+                trigger: "manual".to_string(),
+                definition_snapshot: None,
+                parent_workflow_run_id: Some(parent.id.clone()),
+            })
+            .unwrap();
+
+        let seed = |run_id: &str,
+                    name: &str,
+                    child_run_id: Option<String>,
+                    markers: &str,
+                    context: &str| {
+            let step_id = persistence
+                .insert_step(NewStep {
+                    workflow_run_id: run_id.to_string(),
+                    step_name: name.to_string(),
+                    role: "actor".to_string(),
+                    can_commit: false,
+                    position: 0,
+                    iteration: 0,
+                    retry_count: Some(0),
+                })
+                .unwrap();
+            persistence
+                .update_step(
+                    &step_id,
+                    StepUpdate {
+                        generation: 0,
+                        status: WorkflowStepStatus::Completed,
+                        child_run_id,
+                        result_text: None,
+                        context_out: Some(context.to_string()),
+                        markers_out: Some(markers.to_string()),
+                        retry_count: None,
+                        structured_output: None,
+                        step_error: None,
+                    },
+                )
+                .unwrap();
+        };
+        seed(
+            &child.id,
+            "aggregator",
+            None,
+            r#"["has_blocking_findings"]"#,
+            "agg ctx",
+        );
+        seed(
+            &parent.id,
+            "workflow:child-wf",
+            child_run_id_linked.then(|| child.id.clone()),
+            "[]",
+            "wf ctx",
+        );
+
+        let (alpha_count, _beta_count, mut state) =
+            make_counting_state(Arc::clone(&persistence), parent.id);
+        let def = make_def(
+            "wf",
+            vec![
+                WorkflowNode::CallWorkflow(CallWorkflowNode {
+                    workflow: "child-wf".to_string(),
+                    inputs: HashMap::new(),
+                    retries: 0,
+                    on_fail: None,
+                    as_identity: None,
+                }),
+                WorkflowNode::If(IfNode {
+                    condition: Condition::StepMarker {
+                        step: "aggregator".to_string(),
+                        marker: "has_blocking_findings".to_string(),
+                    },
+                    body: vec![call_node("alpha")],
+                }),
+            ],
+        );
+        let engine = FlowEngineBuilder::new().build().unwrap();
+        let result = engine.resume(&def, &mut state);
+        (alpha_count, state, result)
+    }
+
+    // Regression (#90): resume restores a completed child workflow's step
+    // markers and contexts, so `if <child-step>.<marker>` matches a live run.
+    #[test]
+    fn resume_restores_child_workflow_step_markers() {
+        use std::sync::atomic::Ordering;
+
+        let (alpha_count, state, result) = resume_after_child_workflow(true);
+        result.unwrap();
+
+        assert_eq!(
+            alpha_count.load(Ordering::SeqCst),
+            1,
+            "branch on the child's marker should run after resume"
+        );
+        assert!(state.step_results.contains_key("aggregator"));
+        assert!(state.step_results.contains_key("child-wf"));
+        assert!(!state.step_results.contains_key("workflow:child-wf"));
+
+        let pos = |name: &str| state.contexts.iter().position(|c| c.step == name).unwrap();
+        assert!(
+            pos("aggregator") < pos("child-wf"),
+            "child contexts come before the call_workflow's own entry"
+        );
+    }
+
+    // Rows without a child_run_id can't restore child steps: the resume fails
+    // explicitly (all_succeeded = false) rather than silently skipping
+    // branches that depend on the child's markers.
+    #[test]
+    fn resume_without_child_run_id_fails() {
+        use std::sync::atomic::Ordering;
+
+        let (alpha_count, _state, result) = resume_after_child_workflow(false);
+
+        assert!(!result.unwrap().all_succeeded);
+        assert_eq!(alpha_count.load(Ordering::SeqCst), 0);
+    }
+
     // AC: resume() skips pre-completed steps and runs remaining steps.
     // Metrics from pre-completed steps are sourced via agent_runs JOIN (conductor-side),
     // not from the removed WorkflowRunStep metric fields.
