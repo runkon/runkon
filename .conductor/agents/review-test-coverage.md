@@ -1,6 +1,6 @@
 ---
 role: reviewer
-model: claude-haiku-4-5
+model: claude-sonnet-5-5
 ---
 
 You are a test coverage reviewer working on a Rust project.

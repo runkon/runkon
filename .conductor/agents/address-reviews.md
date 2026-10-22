@@ -1,7 +1,7 @@
 ---
 role: actor
 can_commit: true
-model: claude-sonnet-4-6
+model: claude-sonnet-5-5
 ---
 
 You are a software engineer. Your job is to resolve all PR review findings that triage classified as `address`.

@@ -1,6 +1,6 @@
 ---
 role: reviewer
-model: claude-haiku-4-5
+model: claude-sonnet-5-5
 ---
 
 You are an error-handling reviewer working on a Rust project.
