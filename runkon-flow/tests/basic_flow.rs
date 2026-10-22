@@ -356,3 +356,56 @@ fn parallel_step_output_warning_is_stored_as_step_error() {
     );
     assert_warning_recorded(&steps);
 }
+
+// ---------------------------------------------------------------------------
+// Script input env prefix — an invalid provider prefix refuses the run
+// ---------------------------------------------------------------------------
+
+struct BadPrefixProvider;
+
+impl runkon_flow::ScriptEnvProvider for BadPrefixProvider {
+    fn env(
+        &self,
+        _ctx: &dyn runkon_flow::traits::run_context::RunContext,
+        _as_identity: Option<&str>,
+    ) -> HashMap<String, String> {
+        HashMap::new()
+    }
+
+    fn input_env_prefix(&self) -> &str {
+        "PATH="
+    }
+}
+
+#[test]
+fn invalid_input_env_prefix_refuses_the_run_before_any_step() {
+    let engine = FlowEngineBuilder::new()
+        .action(Box::new(MockExecutor::new("alpha")))
+        .build()
+        .expect("engine build failed");
+    let def = make_def("bad-prefix", vec![call_node("alpha")]);
+    let persistence = make_persistence();
+    let mut state = make_state(
+        "bad-prefix",
+        Arc::clone(&persistence),
+        named_executors([Box::new(MockExecutor::new("alpha")) as Box<dyn ActionExecutor>]),
+    );
+    state.script_env_provider = Arc::new(BadPrefixProvider);
+
+    let err = engine
+        .run(&def, &mut state)
+        .expect_err("an invalid prefix must refuse the run");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("invalid script input env prefix"),
+        "got: {msg}"
+    );
+    assert!(
+        msg.contains("\"PATH=\""),
+        "error should name the prefix; got: {msg}"
+    );
+    let steps = persistence
+        .get_steps(&state.workflow_run_id)
+        .expect("get_steps failed");
+    assert!(steps.is_empty(), "no step may run: {steps:?}");
+}

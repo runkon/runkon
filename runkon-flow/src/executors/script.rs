@@ -127,7 +127,17 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
     // provider's `input_env_prefix()` (`FLOW_` by default).
     // Validate that keys consist only of alphanumeric characters and underscores to
     // prevent malformed env var names if a key contains `=` or a null byte.
+    // `run_inner` rejects an invalid prefix before the run starts; this covers
+    // callers that execute a script step directly.
     let input_prefix = state.script_env_provider.input_env_prefix();
+    if let Err(e) = crate::traits::script_env_provider::validate_input_env_prefix(input_prefix) {
+        return fail_script_step(
+            state,
+            &step_id,
+            node,
+            format!("Script '{}': {e}", node.name),
+        );
+    }
     for (k, v) in &state.inputs {
         if !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             tracing::warn!(
@@ -722,6 +732,32 @@ mod tests {
         state.script_env_provider = Arc::new(PrefixProvider("CONDUCTOR_"));
         let ctx = run_with_ticket_input(&mut state, &run_id, PRINT_BOTH_PREFIXES);
         assert!(ctx.contains("flow=unset conductor=T-1"), "context: {ctx:?}");
+    }
+
+    /// An invalid prefix fails the step without running the script, rather than
+    /// injecting a variable the host didn't intend (`PATH=` + `TICKET_ID`).
+    #[test]
+    fn invalid_prefix_fails_the_step_without_running_it() {
+        let (persistence, run_id) = make_persistence();
+        let mut state = make_state(persistence, run_id.clone());
+        state.script_env_provider = Arc::new(PrefixProvider("PATH="));
+        state
+            .inputs
+            .insert("ticket_id".to_string(), "T-1".to_string());
+        // With fail_fast (the default) the failed step also fails the call.
+        let res = execute_script(&mut state, &make_node("env_prefix", "echo ran"), 0);
+        assert!(res.is_err(), "fail_fast should surface the step failure");
+        let steps = state.persistence.get_steps(&run_id).unwrap();
+        assert_eq!(steps[0].status, WorkflowStepStatus::Failed);
+        let result = steps[0].result_text.as_deref().unwrap_or("");
+        assert!(
+            result.contains("invalid script input env prefix"),
+            "result: {result:?}"
+        );
+        assert!(
+            !result.contains("ran"),
+            "script must not run; result: {result:?}"
+        );
     }
 
     /// With an empty prefix, an input must not be able to replace a
