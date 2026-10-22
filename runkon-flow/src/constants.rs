@@ -41,6 +41,9 @@ pub mod metadata_keys {
     /// engine asked for (e.g. an agent that ended without a `<<<FLOW_OUTPUT>>>`
     /// block). The engine logs it and stores it as the step's `step_error`.
     pub const OUTPUT_WARNING: &str = "output_warning";
+    /// Number of in-session corrections an agent needed before its structured
+    /// output passed schema validation. Set only when at least one was made.
+    pub const OUTPUT_CORRECTION_ATTEMPTS: &str = "output_correction_attempts";
 }
 
 pub const FLOW_OUTPUT_INSTRUCTION: &str = r#"

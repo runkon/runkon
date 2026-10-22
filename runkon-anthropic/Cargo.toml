@@ -23,6 +23,7 @@ tracing = "0.1"
 
 [dev-dependencies]
 runkon-flow = { workspace = true, features = ["test-utils"] }
+runkon-flow-executors = { workspace = true, features = ["test-utils"] }
 tempfile = "3"
 
 [[example]]
