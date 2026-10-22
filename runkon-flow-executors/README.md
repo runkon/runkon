@@ -22,7 +22,7 @@ Vendor-specific executors (Anthropic API, OpenAI API, Codex CLI, etc.) live in s
 
 ```toml
 [dependencies]
-runkon-flow-executors = "0.1.0-alpha"
+runkon-flow-executors = "0.7.0-alpha"
 ```
 
 Optional features:

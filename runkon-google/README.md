@@ -20,7 +20,7 @@ Auth is via the `x-goog-api-key` header. Pass `GEMINI_API_KEY` (or any env var y
 
 ```toml
 [dependencies]
-runkon-google = "0.6.0"
+runkon-google = "0.7.0-alpha"
 ```
 
 Optional features:
