@@ -5,7 +5,7 @@ use crate::engine::{
     check_max_iterations, check_stuck, execute_nodes, execute_single_node, ExecutionState,
 };
 use crate::engine_error::Result;
-use crate::helpers::find_max_completed_while_iteration;
+use crate::helpers::{advance_resume_past_while_iterations, find_max_completed_while_iteration};
 
 pub fn eval_condition(state: &ExecutionState, condition: &Condition) -> bool {
     match condition {
@@ -55,6 +55,9 @@ pub fn execute_while(state: &mut ExecutionState, node: &WhileNode) -> Result<()>
     } else {
         0u32
     };
+    if start_iteration > 0 {
+        advance_resume_past_while_iterations(state, node, start_iteration);
+    }
     let mut iteration = start_iteration;
     let mut prev_marker_sets: VecDeque<HashSet<String>> = VecDeque::new();
 

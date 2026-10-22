@@ -22,7 +22,7 @@ use crate::traits::persistence::WorkflowPersistence;
 use crate::traits::run_context::RunContext;
 use crate::traits::script_env_provider::{NoOpScriptEnvProvider, ScriptEnvProvider};
 use crate::traits::workflow_resolver::WorkflowResolver;
-use crate::types::{WorkflowExecConfig, WorkflowResult, WorkflowRunStep};
+use crate::types::{WorkflowExecConfig, WorkflowResult};
 use crate::workflow_resolver_directory::DirectoryWorkflowResolver;
 
 // ---------------------------------------------------------------------------
@@ -642,18 +642,9 @@ impl FlowEngine {
                     state.workflow_run_id
                 ))
             })?;
-        let mut step_map: HashMap<String, HashMap<u32, WorkflowRunStep>> = HashMap::new();
-        for s in steps
-            .into_iter()
-            .filter(|s| s.status == crate::status::WorkflowStepStatus::Completed)
-        {
-            step_map
-                .entry(s.step_name.clone())
-                .or_default()
-                .insert(s.iteration as u32, s);
-        }
-        if !step_map.is_empty() {
-            state.resume_ctx = Some(crate::engine::ResumeContext { step_map });
+        let ctx = crate::engine::ResumeContext::from_steps(steps);
+        if !ctx.is_empty() {
+            state.resume_ctx = Some(ctx);
         }
         self.run(def, state)
     }
@@ -2287,6 +2278,200 @@ mod tests {
         );
     }
 
+    /// Emits `blocking` only when `emit_marker` is set; counts runs.
+    struct MarkerExecutor {
+        name: &'static str,
+        count: Arc<std::sync::atomic::AtomicUsize>,
+        emit_marker: bool,
+    }
+    impl crate::traits::action_executor::ActionExecutor for MarkerExecutor {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn execute(
+            &self,
+            _: &dyn RunContext,
+            _: &StepInfo,
+            _: &ActionParams,
+        ) -> Result<ActionOutput, EngineError> {
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(ActionOutput {
+                markers: if self.emit_marker {
+                    vec!["blocking".to_string()]
+                } else {
+                    vec![]
+                },
+                ..Default::default()
+            })
+        }
+    }
+
+    fn seed_step(
+        persistence: &crate::persistence_memory::InMemoryWorkflowPersistence,
+        run_id: &str,
+        name: &str,
+        position: i64,
+        status: crate::status::WorkflowStepStatus,
+        markers: &str,
+    ) {
+        use crate::traits::persistence::{NewStep, StepUpdate, WorkflowPersistence};
+        let step_id = persistence
+            .insert_step(NewStep {
+                workflow_run_id: run_id.to_string(),
+                step_name: name.to_string(),
+                role: "actor".to_string(),
+                can_commit: false,
+                position,
+                iteration: 0,
+                retry_count: Some(0),
+            })
+            .unwrap();
+        persistence
+            .update_step(
+                &step_id,
+                StepUpdate {
+                    generation: 0,
+                    status,
+                    child_run_id: None,
+                    result_text: None,
+                    context_out: None,
+                    markers_out: Some(markers.to_string()),
+                    retry_count: None,
+                    structured_output: None,
+                    step_error: None,
+                },
+            )
+            .unwrap();
+    }
+
+    /// Resume `call alpha; call beta; call alpha; if alpha.blocking { call gamma }` with
+    /// `seed` rows. Returns (alpha runs, gamma runs, final alpha markers).
+    fn resume_alpha_twice(
+        emit_marker: bool,
+        seed: impl FnOnce(&crate::persistence_memory::InMemoryWorkflowPersistence, &str),
+    ) -> (usize, usize, Vec<String>) {
+        use crate::dsl::{Condition, IfNode};
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let persistence = Arc::new(InMemoryWorkflowPersistence::new());
+        let run = make_test_run(&persistence);
+        seed(&persistence, &run.id);
+
+        let alpha_count = Arc::new(AtomicUsize::new(0));
+        let gamma_count = Arc::new(AtomicUsize::new(0));
+        let beta_count = Arc::new(AtomicUsize::new(0));
+        let mut m = HashMap::new();
+        for (name, count, emit) in [
+            ("alpha", &alpha_count, emit_marker),
+            ("beta", &beta_count, false),
+            ("gamma", &gamma_count, false),
+        ] {
+            m.insert(
+                name.to_string(),
+                Box::new(MarkerExecutor {
+                    name,
+                    count: Arc::clone(count),
+                    emit_marker: emit,
+                }) as Box<dyn crate::traits::action_executor::ActionExecutor>,
+            );
+        }
+        let mut state = make_bare_state("wf");
+        state.persistence = persistence;
+        state.action_registry = Arc::new(ActionRegistry::new(m, None));
+        state.workflow_run_id = run.id;
+
+        let def = make_def(
+            "wf",
+            vec![
+                call_node("alpha"),
+                call_node("beta"),
+                call_node("alpha"),
+                WorkflowNode::If(IfNode {
+                    condition: Condition::StepMarker {
+                        step: "alpha".to_string(),
+                        marker: "blocking".to_string(),
+                    },
+                    body: vec![call_node("gamma")],
+                }),
+            ],
+        );
+        FlowEngineBuilder::new()
+            .build()
+            .unwrap()
+            .resume(&def, &mut state)
+            .unwrap();
+        let markers = state
+            .step_results
+            .get("alpha")
+            .map(|r| r.markers.clone())
+            .unwrap_or_default();
+        (
+            alpha_count.load(Ordering::SeqCst),
+            gamma_count.load(Ordering::SeqCst),
+            markers,
+        )
+    }
+
+    // Regression (#108): interrupted between two same-named steps, the second runs
+    // and conditions see its markers, not the first run's.
+    #[test]
+    fn resume_runs_second_occurrence_of_repeated_step() {
+        use crate::status::WorkflowStepStatus::Completed;
+        let seed = |p: &crate::persistence_memory::InMemoryWorkflowPersistence, id: &str| {
+            seed_step(p, id, "alpha", 0, Completed, r#"["blocking"]"#);
+            seed_step(p, id, "beta", 1, Completed, "[]");
+        };
+        let (alpha, gamma, markers) = resume_alpha_twice(false, seed);
+        assert_eq!(alpha, 1, "only the second alpha should run");
+        assert_eq!(gamma, 0, "stale first-run marker must not trigger gamma");
+        assert!(!markers.contains(&"blocking".to_string()));
+
+        // Mirror: the second run emits the marker, so gamma runs.
+        let (alpha, gamma, markers) = resume_alpha_twice(true, seed);
+        assert_eq!(alpha, 1);
+        assert_eq!(gamma, 1);
+        assert!(markers.contains(&"blocking".to_string()));
+    }
+
+    // Both runs completed: the later position wins regardless of insertion order.
+    #[test]
+    fn resume_restores_latest_occurrence_markers_by_position() {
+        use crate::status::WorkflowStepStatus::Completed;
+        let (alpha, gamma, markers) = resume_alpha_twice(true, |p, id| {
+            seed_step(p, id, "alpha", 2, Completed, r#"["blocking"]"#);
+            seed_step(p, id, "alpha", 0, Completed, "[]");
+            seed_step(p, id, "beta", 1, Completed, "[]");
+        });
+        assert_eq!(alpha, 0);
+        assert_eq!(gamma, 1);
+        assert!(markers.contains(&"blocking".to_string()));
+    }
+
+    // Retry attempts of one occurrence share a position and collapse into one run.
+    #[test]
+    fn resume_collapses_retries_into_one_occurrence() {
+        use crate::status::WorkflowStepStatus::{Completed, Failed};
+        let (alpha, _, _) = resume_alpha_twice(false, |p, id| {
+            seed_step(p, id, "alpha", 0, Failed, "[]");
+            seed_step(p, id, "alpha", 0, Completed, "[]");
+            seed_step(p, id, "beta", 1, Completed, "[]");
+        });
+        assert_eq!(alpha, 1, "first occurrence skipped, second runs");
+    }
+
+    // A failed first occurrence must not hand its slot to the later completed one.
+    #[test]
+    fn resume_failed_occurrence_before_completed_one() {
+        use crate::status::WorkflowStepStatus::{Completed, Failed};
+        let (alpha, _, _) = resume_alpha_twice(false, |p, id| {
+            seed_step(p, id, "alpha", 0, Failed, "[]");
+            seed_step(p, id, "beta", 1, Completed, "[]");
+            seed_step(p, id, "alpha", 2, Completed, "[]");
+        });
+        assert_eq!(alpha, 1, "first occurrence re-runs, second is skipped");
+    }
+
     /// Seed a parent run with a completed `workflow:child-wf` step (optionally
     /// linked to a child run holding a completed `aggregator` step that set
     /// `has_blocking_findings`), then resume a def that branches on that marker.
@@ -2684,9 +2869,7 @@ mod tests {
         let engine = FlowEngineBuilder::new().build().unwrap();
         let def = make_def("wf", vec![call_node("alpha")]);
         let mut state = make_bare_state("wf");
-        state.resume_ctx = Some(ResumeContext {
-            step_map: HashMap::new(),
-        });
+        state.resume_ctx = Some(ResumeContext::default());
         state.workflow_run_id = "run-precond".to_string();
 
         let err = engine.resume(&def, &mut state).unwrap_err();

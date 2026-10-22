@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::dsl::{ForEachNode, OnChildFail};
 use crate::engine::{
-    emit_event, record_step_failure, record_step_success, restore_step, should_skip,
+    claim_completed_step, emit_event, record_step_failure, record_step_success, restore_step_row,
     ChildWorkflowContext, ChildWorkflowInput, ExecutionState,
 };
 use crate::engine_error::{EngineError, Result};
@@ -170,9 +170,9 @@ pub fn execute_foreach(
     let step_key = format!("foreach:{}", node.name);
 
     // Skip on resume if already completed.
-    if should_skip(state, &step_key, iteration) {
+    if let Some(row) = claim_completed_step(state, &step_key, iteration) {
         tracing::info!("foreach '{}': skipping completed step", node.name);
-        restore_step(state, &step_key, iteration);
+        restore_step_row(state, &row, &step_key, iteration);
         return Ok(());
     }
 

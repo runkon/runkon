@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -21,10 +21,134 @@ use crate::types::{
 };
 
 /// Pre-loaded context for resuming a workflow run.
-#[derive(Clone)]
+///
+/// Saved step rows are matched by occurrence: the n-th time a step name reaches
+/// its skip check in an iteration is matched to the n-th recorded run of that
+/// name in that iteration. Build it with [`ResumeContext::from_steps`].
+#[derive(Clone, Default)]
 pub struct ResumeContext {
-    /// Completed step records keyed by (step_name, iteration), for O(1) zero-alloc lookup.
-    pub step_map: HashMap<String, HashMap<u32, WorkflowRunStep>>,
+    /// (name, iteration) -> one slot per recorded occurrence, in position order;
+    /// `Some(row)` when that occurrence completed.
+    occurrences: HashMap<String, HashMap<u32, Vec<Option<WorkflowRunStep>>>>,
+    /// (name, iteration) -> how many occurrences this resumed run has claimed so far.
+    cursors: HashMap<StepKey, usize>,
+}
+
+impl ResumeContext {
+    /// Group saved step rows (of every status) into occurrences.
+    ///
+    /// For one `(name, iteration)`, rows are grouped by `position` (retry attempts
+    /// share their occurrence's position) and each group is one occurrence, ordered
+    /// by position. An occurrence is completed when any of its rows is; the latest
+    /// completed row is kept. Positions are assumed to be deterministic up to the
+    /// interruption point. After a `while` fast-forward later positions shift, so
+    /// only their rank is used, never the absolute value.
+    pub fn from_steps(steps: Vec<WorkflowRunStep>) -> Self {
+        let mut grouped: HashMap<String, HashMap<u32, BTreeMap<i64, Vec<WorkflowRunStep>>>> =
+            HashMap::new();
+        for s in steps {
+            grouped
+                .entry(s.step_name.clone())
+                .or_default()
+                .entry(s.iteration as u32)
+                .or_default()
+                .entry(s.position)
+                .or_default()
+                .push(s);
+        }
+        let occurrences = grouped
+            .into_iter()
+            .map(|(name, by_iter)| {
+                let by_iter = by_iter
+                    .into_iter()
+                    .map(|(iter, by_pos)| {
+                        let slots = by_pos
+                            .into_values()
+                            .map(|rows| {
+                                let mut done: Vec<WorkflowRunStep> = rows
+                                    .into_iter()
+                                    .filter(|r| r.status == WorkflowStepStatus::Completed)
+                                    .collect();
+                                if done.len() > 1 {
+                                    tracing::warn!(
+                                        "resume: step '{name}:{iter}' has {} completed rows at \
+                                         one position; using the latest",
+                                        done.len()
+                                    );
+                                }
+                                done.sort_by(|a, b| {
+                                    (&a.started_at, &a.id).cmp(&(&b.started_at, &b.id))
+                                });
+                                done.pop()
+                            })
+                            .collect();
+                        (iter, slots)
+                    })
+                    .collect();
+                (name, by_iter)
+            })
+            .collect();
+        Self {
+            occurrences,
+            cursors: HashMap::new(),
+        }
+    }
+
+    /// True when no recorded occurrence completed.
+    pub fn is_empty(&self) -> bool {
+        !self
+            .occurrences
+            .values()
+            .flat_map(|m| m.values())
+            .any(|slots| slots.iter().any(Option::is_some))
+    }
+
+    fn cursor(&self, name: &str, iteration: u32) -> usize {
+        self.cursors
+            .get(&(name.to_string(), iteration))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// The completed row for the next unclaimed occurrence, without claiming it.
+    pub(crate) fn next_completed(&self, name: &str, iteration: u32) -> Option<&WorkflowRunStep> {
+        self.occurrences
+            .get(name)?
+            .get(&iteration)?
+            .get(self.cursor(name, iteration))?
+            .as_ref()
+    }
+
+    /// Claim the next occurrence of `(name, iteration)`, returning its completed row
+    /// if it completed. Always advances, so the n-th execution matches the n-th record.
+    pub(crate) fn claim(&mut self, name: &str, iteration: u32) -> Option<WorkflowRunStep> {
+        let row = self.next_completed(name, iteration).cloned();
+        if self
+            .occurrences
+            .get(name)
+            .is_some_and(|m| m.contains_key(&iteration))
+        {
+            self.advance(name, iteration, 1);
+        }
+        row
+    }
+
+    /// Skip `by` occurrences of `(name, iteration)`, for a fast-forwarded `while` loop.
+    pub(crate) fn advance(&mut self, name: &str, iteration: u32, by: usize) {
+        *self
+            .cursors
+            .entry((name.to_string(), iteration))
+            .or_insert(0) += by;
+    }
+
+    /// Iterations of `name` that have at least one completed occurrence.
+    pub(crate) fn completed_iterations(&self, name: &str) -> impl Iterator<Item = u32> + '_ {
+        self.occurrences.get(name).into_iter().flat_map(|m| {
+            m.iter()
+                .filter(|(_, slots)| slots.iter().any(Option::is_some))
+                .map(|(i, _)| *i)
+        })
+    }
 }
 
 /// Mutable runtime state for a workflow execution — no conductor-core deps.
@@ -799,13 +923,28 @@ pub fn handle_on_fail(
     record_step_failure(state, step_key, step_label, last_error, max_attempts, true)
 }
 
-/// Check whether a step should be skipped on resume.
+/// Check whether the next unclaimed occurrence of a step completed in the resumed run.
+/// Does not claim it.
+#[deprecated(
+    since = "0.7.2",
+    note = "does not advance the occurrence counter; use `claim_completed_step`"
+)]
 pub fn should_skip(state: &ExecutionState, step_name: &str, iteration: u32) -> bool {
-    state.resume_ctx.as_ref().is_some_and(|ctx| {
-        ctx.step_map
-            .get(step_name)
-            .is_some_and(|m| m.contains_key(&iteration))
-    })
+    state
+        .resume_ctx
+        .as_ref()
+        .is_some_and(|ctx| ctx.next_completed(step_name, iteration).is_some())
+}
+
+/// Claim the next occurrence of `step_key` in `iteration` from the resume context.
+/// Returns its completed row when the step already completed (skip it and restore
+/// the row), or `None` when it must run. Advances the occurrence counter either way.
+pub fn claim_completed_step(
+    state: &mut ExecutionState,
+    step_key: &str,
+    iteration: u32,
+) -> Option<WorkflowRunStep> {
+    state.resume_ctx.as_mut()?.claim(step_key, iteration)
 }
 
 /// Deserialize a `markers_out` JSON string into a `Vec<String>`, logging on error.
@@ -822,7 +961,7 @@ fn parse_markers_out(markers_json: Option<&str>, step_name: &str) -> Vec<String>
 }
 
 /// Temporarily take the `ResumeContext` out of `state` so we can borrow `state`
-/// mutably while reading from the context's maps.
+/// mutably while reading from the context.
 fn with_resume_ctx<R>(
     state: &mut ExecutionState,
     f: impl FnOnce(&mut ExecutionState, &ResumeContext) -> R,
@@ -833,13 +972,13 @@ fn with_resume_ctx<R>(
     out
 }
 
-/// Look up a completed step in the resume context, warning when it is missing.
+/// Look up the next unclaimed completed step in the resume context, warning when it is missing.
 fn find_completed_step<'a>(
     ctx: &'a ResumeContext,
     step_key: &str,
     iteration: u32,
 ) -> Option<&'a crate::types::WorkflowRunStep> {
-    let step = ctx.step_map.get(step_key).and_then(|m| m.get(&iteration));
+    let step = ctx.next_completed(step_key, iteration);
     if step.is_none() {
         tracing::warn!(
             "resume: step '{step_key}:{iteration}' in skip set but not found in resume context \
@@ -849,14 +988,22 @@ fn find_completed_step<'a>(
     step
 }
 
-/// Restore a completed step from the resume context into `state`.
+/// Restore the next unclaimed completed step from the resume context into `state`.
+#[deprecated(
+    since = "0.7.2",
+    note = "does not advance the occurrence counter; use `claim_completed_step` and `restore_step_row`"
+)]
 pub fn restore_step(state: &mut ExecutionState, key: &str, iteration: u32) {
     with_resume_ctx(state, |state, ctx| {
         restore_completed_step(state, ctx, key, iteration)
     });
 }
 
-/// Restore a completed step's results from the resume context into the execution state.
+/// Restore the next unclaimed completed step's results from the resume context.
+#[deprecated(
+    since = "0.7.2",
+    note = "does not advance the occurrence counter; use `claim_completed_step` and `restore_step_row`"
+)]
 pub fn restore_completed_step(
     state: &mut ExecutionState,
     ctx: &ResumeContext,
@@ -866,7 +1013,16 @@ pub fn restore_completed_step(
     let Some(step) = find_completed_step(ctx, step_key, iteration) else {
         return;
     };
+    restore_step_row(state, step, step_key, iteration);
+}
 
+/// Restore a claimed completed step row into the execution state.
+pub fn restore_step_row(
+    state: &mut ExecutionState,
+    step: &WorkflowRunStep,
+    step_key: &str,
+    iteration: u32,
+) {
     // Restore gate feedback if this was a gate step
     if let Some(ref feedback) = step.gate_feedback {
         state.last_gate_feedback = Some(feedback.clone());
@@ -902,6 +1058,10 @@ fn success_from_row(
 /// step the way a live run does, so conditions and `prior_contexts` match an
 /// uninterrupted run. `persisted_key` is the row's step name (`workflow:<name>`);
 /// `result_key` is the key the live path uses (`node.workflow`).
+#[deprecated(
+    since = "0.7.2",
+    note = "does not advance the occurrence counter; use `claim_completed_step` and `restore_call_workflow_step_row`"
+)]
 pub fn restore_call_workflow_step(
     state: &mut ExecutionState,
     persisted_key: &str,
@@ -909,22 +1069,22 @@ pub fn restore_call_workflow_step(
     iteration: u32,
 ) -> Result<()> {
     with_resume_ctx(state, |state, ctx| {
-        restore_call_workflow_step_from(state, ctx, persisted_key, result_key, iteration)
+        let Some(step) = find_completed_step(ctx, persisted_key, iteration) else {
+            return Ok(());
+        };
+        restore_call_workflow_step_row(state, step, persisted_key, result_key, iteration)
     })
     .unwrap_or(Ok(()))
 }
 
-fn restore_call_workflow_step_from(
+/// Restore a claimed completed `call workflow` row; see [`restore_call_workflow_step`].
+pub fn restore_call_workflow_step_row(
     state: &mut ExecutionState,
-    ctx: &ResumeContext,
+    step: &WorkflowRunStep,
     persisted_key: &str,
     result_key: &str,
     iteration: u32,
 ) -> Result<()> {
-    let Some(step) = find_completed_step(ctx, persisted_key, iteration) else {
-        return Ok(());
-    };
-
     // A completed call-workflow row always carries the child's run id. Without
     // it the child's markers are unrecoverable and conditions on them would be
     // silently skipped, so fail the resume instead.
