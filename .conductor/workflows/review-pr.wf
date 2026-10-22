@@ -9,6 +9,7 @@ workflow review-pr {
 
   inputs {
     scope default = "full"
+    since default = ""
   }
 
   // Resolve the PR's base branch once at workflow start. Exposes it to all
@@ -36,6 +37,16 @@ workflow review-pr {
     call review-performance     { retries = 1  if = "detect-file-types.has_code_changes" }
     call review-error-handling  { retries = 1  if = "detect-file-types.has_code_changes" }
     call review-test-coverage   { retries = 1  if = "detect-file-types.has_code_changes" }
+  }
+
+  // Replies posted on the PR since the last conductor review, so the
+  // aggregator can set aside findings that were already answered
+  // (devinrosen/conductor-ai#3050).
+  script fetch-pr-replies {
+    run = ".conductor/scripts/fetch-pr-replies.sh"
+    env = {
+      PR_NUMBER = "{{pr_number}}"
+    }
   }
 
   call review-aggregator { output = "review-aggregator" retries = 1 }

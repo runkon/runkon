@@ -21,6 +21,21 @@ if ! [[ "${PR_NUMBER}" =~ ^[0-9]+$ ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 1a. Security findings always block.
+#
+# The aggregator may set aside findings that a PR reply already answered
+# (answered_findings). A reply never clears a Security finding, so move any
+# that ended up there back into blocking_findings.
+# ---------------------------------------------------------------------------
+PRIOR_OUTPUT=$(echo "${PRIOR_OUTPUT}" | jq '
+  ((.answered_findings // []) | map(select(.reviewer == "Security"))) as $sec
+  | if ($sec | length) > 0 then
+      .blocking_findings = ((.blocking_findings // []) + ($sec | map(del(.answered_by, .reply))))
+      | .answered_findings = ((.answered_findings // []) | map(select(.reviewer != "Security")))
+    else . end
+')
+
+# ---------------------------------------------------------------------------
 # 1b. Filter hallucinated off-diff entries from blocking_findings.
 #
 # Reviewers occasionally emit findings that cite files outside the PR's diff
@@ -73,6 +88,8 @@ if [ "${DRY_RUN:-false}" = "true" ]; then
   echo "${PRIOR_OUTPUT}" | jq -r '.reviewed_by // ""'
   echo "blocking_findings:"
   echo "${PRIOR_OUTPUT}" | jq '.blocking_findings // []'
+  echo "answered_findings:"
+  echo "${PRIOR_OUTPUT}" | jq '.answered_findings // []'
   echo "off_diff_findings:"
   echo "${PRIOR_OUTPUT}" | jq '.off_diff_findings // []'
   exit 0
@@ -240,6 +257,16 @@ if [ "${HAS_BLOCKING_CHECK}" = "true" ]; then
   ')
   REVIEW_BODY="${REVIEW_BODY}
 ${BLOCKING_SECTION}"
+fi
+
+# Append findings set aside because a PR reply already answered them
+if [ "$(echo "${PRIOR_OUTPUT}" | jq '.answered_findings // [] | length')" -gt 0 ]; then
+  ANSWERED_SECTION=$(echo "${PRIOR_OUTPUT}" | jq -r '
+    "\n### Previously answered (\(.answered_findings | length), not blocking)\n",
+    ((.answered_findings)[] | "- **\(.severity)** `\(.file):\(.line)` (\(.reviewer)) — \(.message)\n  - Answered by \(.answered_by): \(.reply)")
+  ')
+  REVIEW_BODY="${REVIEW_BODY}
+${ANSWERED_SECTION}"
 fi
 
 REVIEW_BODY="${REVIEW_BODY}

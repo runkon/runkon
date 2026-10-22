@@ -8,7 +8,8 @@ branch=$(git rev-parse --abbrev-ref HEAD)
 echo "Pushed branch: $branch"
 
 if echo "$push_output" | grep -q "Everything up-to-date"; then
-  echo "<<<FLOW_OUTPUT>>> {\"markers\": []}"
+  output='{"markers": []}'
 else
-  echo "<<<FLOW_OUTPUT>>> {\"markers\": [\"pushed_new_commits\"]}"
+  output='{"markers": ["pushed_new_commits"]}'
 fi
+printf '<<<FLOW_OUTPUT>>>\n%s\n<<<END_FLOW_OUTPUT>>>\n' "$output"
