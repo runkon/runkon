@@ -825,6 +825,13 @@ mod tests {
     }
 
     #[test]
+    fn flow_output_warning_one_line_block_without_end_marker() {
+        let text = "Done.\n<<<FLOW_OUTPUT>>> {\"markers\": [\"x\"]}";
+        let w = flow_output_warning(Some(text), None).unwrap();
+        assert!(w.contains("could not be parsed"), "got: {w}");
+    }
+
+    #[test]
     fn flow_output_warning_unrecognised_marker() {
         let text = "<<<CONDUCTOR_OUTPUT>>>\n{\"markers\":[]}\n<<<END_CONDUCTOR_OUTPUT>>>";
         let w = flow_output_warning(Some(text), None).unwrap();

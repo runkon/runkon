@@ -1,5 +1,14 @@
 # Changelog — runkon-flow
 
+## 0.7.1 — Fixed
+
+- **A one-line `<<<FLOW_OUTPUT>>> {...}` with no end marker is no longer ignored.**
+  `find_output_block_marker` now matches a line that starts with an opening marker,
+  followed by anything. A script step that prints this form fails with "could not be
+  parsed (invalid JSON or missing <<<END_FLOW_OUTPUT>>>)" instead of completing with
+  `markers: []`, and an agent step gets an `OUTPUT_WARNING`. Scripts that used this form
+  must print the block over three lines with `<<<END_FLOW_OUTPUT>>>`.
+
 ## 0.7.0 — Breaking
 
 - **Script steps receive workflow inputs as `FLOW_<NAME>` instead of `CONDUCTOR_<NAME>`.**
