@@ -77,21 +77,26 @@ pub fn parse_flow_output(text: &str) -> Option<FlowOutput> {
         .ok()
 }
 
-/// Find the first line of `text` that looks like the opening marker of an
+/// Find the first line of `text` that starts with the opening marker of an
 /// output block (`<<<FLOW_OUTPUT>>>`, or any other `<<<…OUTPUT>>>` such as one
-/// from an older or third-party protocol), returning the trimmed marker.
+/// from an older or third-party protocol), returning the marker.
+///
+/// The marker may be followed by more text on the same line, as in the
+/// one-line form `<<<FLOW_OUTPUT>>> {"markers": [...]}` with no end marker,
+/// which [`parse_flow_output`] can't parse. A marker mentioned mid-line
+/// (`see <<<FLOW_OUTPUT>>> in the docs`) doesn't count.
 ///
 /// Callers use this after [`parse_flow_output`] returns `None` to tell plain
 /// stdout apart from an output block that was meant to be parsed but wasn't.
 pub fn find_output_block_marker(text: &str) -> Option<&str> {
-    text.lines().map(str::trim).find(|line| {
-        line.strip_prefix("<<<")
-            .and_then(|rest| rest.strip_suffix(">>>"))
-            .is_some_and(|name| {
-                name.ends_with("OUTPUT")
-                    && !name.starts_with("END_")
-                    && name.chars().all(|c| c.is_ascii_uppercase() || c == '_')
-            })
+    text.lines().find_map(|line| {
+        let line = line.trim_start();
+        let name_len = line.strip_prefix("<<<")?.find(">>>")?;
+        let name = &line[3..3 + name_len];
+        let is_opening_marker = name.ends_with("OUTPUT")
+            && !name.starts_with("END_")
+            && name.chars().all(|c| c.is_ascii_uppercase() || c == '_');
+        is_opening_marker.then(|| &line[..3 + name_len + 3])
     })
 }
 
@@ -405,6 +410,26 @@ mod parse_tests {
         );
     }
 
+    /// The one-line form with no end marker (#89) is recognised as a block,
+    /// so callers report it instead of treating it as plain stdout.
+    #[test]
+    fn finds_marker_followed_by_text_on_the_same_line() {
+        let one_line = r#"<<<FLOW_OUTPUT>>> {"markers": ["x"]}"#;
+        assert!(parse_flow_output(one_line).is_none());
+        assert_eq!(
+            find_output_block_marker(one_line),
+            Some("<<<FLOW_OUTPUT>>>")
+        );
+        assert_eq!(
+            find_output_block_marker("Pushed branch: x\n  <<<FLOW_OUTPUT>>>{\"markers\": []}\n"),
+            Some("<<<FLOW_OUTPUT>>>")
+        );
+        assert_eq!(
+            find_output_block_marker("<<<LEGACY_OUTPUT>>> {}"),
+            Some("<<<LEGACY_OUTPUT>>>")
+        );
+    }
+
     #[test]
     fn ignores_plain_output_and_end_markers() {
         assert_eq!(find_output_block_marker("plain stdout\nno blocks"), None);
@@ -414,6 +439,14 @@ mod parse_tests {
             None
         );
         assert_eq!(find_output_block_marker("<<<flow_output>>>"), None);
+        assert_eq!(
+            find_output_block_marker(r#"<<<END_FLOW_OUTPUT>>> {"markers": []}"#),
+            None
+        );
+        assert_eq!(
+            find_output_block_marker(r#"echo '<<<FLOW_OUTPUT>>> {"markers": []}'"#),
+            None
+        );
     }
 
     #[test]

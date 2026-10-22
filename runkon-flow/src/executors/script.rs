@@ -634,6 +634,28 @@ mod tests {
         );
     }
 
+    /// A one-line `<<<FLOW_OUTPUT>>> {…}` with no end marker must fail the step
+    /// instead of completing with `markers: []` (#89).
+    #[test]
+    fn one_line_flow_output_without_end_marker_fails_step() {
+        let (persistence, run_id) = make_persistence();
+        let mut state = make_state(Arc::clone(&persistence), run_id.clone());
+        let script = "echo '<<<FLOW_OUTPUT>>> {\"markers\": [\"pushed_new_commits\"]}'";
+        let node = make_node("push", script);
+        let result = execute_script(&mut state, &node, 0);
+        assert!(result.is_err(), "expected failure for one-line block");
+
+        let steps = persistence.get_steps(&run_id).unwrap();
+        let step = &steps[0];
+        assert_eq!(step.status, WorkflowStepStatus::Failed);
+        let err_text = step.result_text.as_deref().unwrap_or("");
+        assert!(
+            err_text.contains("could not be parsed")
+                && err_text.contains("missing <<<END_FLOW_OUTPUT>>>"),
+            "error should point at the missing end marker: {err_text}"
+        );
+    }
+
     /// `on_fail = continue` still applies to an unparseable output block.
     #[test]
     fn unrecognised_output_block_respects_on_fail_continue() {
