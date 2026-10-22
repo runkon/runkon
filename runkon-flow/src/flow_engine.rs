@@ -2864,7 +2864,6 @@ mod tests {
     #[test]
     fn resume_rejects_pre_seeded_resume_ctx() {
         use crate::engine::ResumeContext;
-        use std::collections::HashMap;
 
         let engine = FlowEngineBuilder::new().build().unwrap();
         let def = make_def("wf", vec![call_node("alpha")]);

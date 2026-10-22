@@ -995,7 +995,9 @@ fn find_completed_step<'a>(
 )]
 pub fn restore_step(state: &mut ExecutionState, key: &str, iteration: u32) {
     with_resume_ctx(state, |state, ctx| {
-        restore_completed_step(state, ctx, key, iteration)
+        if let Some(step) = find_completed_step(ctx, key, iteration) {
+            restore_step_row(state, step, key, iteration);
+        }
     });
 }
 
