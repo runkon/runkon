@@ -153,10 +153,14 @@ pub fn run_agent_with_output_correction(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::scripted_handle;
     use runkon_flow::output_schema::{ArrayItems, FieldDef, FieldType};
     use runkon_runtimes::runtime::private::Seal;
     use std::sync::Mutex;
 
+    // Not `test_support::ScriptedRuntime`: these tests assert on the prompt of
+    // each spawn and script `PollError` results, which the shared runtime
+    // (it records only `resume_session_id` and replays `RunHandle`s) cannot.
     struct ScriptedRuntime {
         requests: Mutex<Vec<(String, Option<String>)>>,
         queue: Mutex<Vec<Result<RunHandle, PollError>>>,
@@ -226,22 +230,10 @@ mod tests {
     fn handle(text: &str, session: Option<&str>, cost: f64, turns: i64) -> RunHandle {
         RunHandle {
             id: "run-1".to_string(),
-            status: RunStatus::Completed,
-            subprocess_pid: None,
-            runtime: "claude".to_string(),
             session_id: session.map(str::to_string),
-            result_text: Some(text.to_string()),
-            started_at: String::new(),
-            ended_at: None,
-            log_file: None,
-            model: None,
             cost_usd: Some(cost),
             num_turns: Some(turns),
-            duration_ms: None,
-            input_tokens: None,
-            output_tokens: None,
-            cache_read_input_tokens: None,
-            cache_creation_input_tokens: None,
+            ..scripted_handle(text)
         }
     }
 
