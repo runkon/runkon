@@ -23,9 +23,13 @@ Get the diff for this PR using the appropriate command for the review scope:
   git diff "origin/{{base_branch}}...HEAD"
   ```
 
-- If the scope is **incremental**: run `git diff HEAD~1` to see only the latest commit.
+- If the scope is **incremental**: review the commits pushed since the last
+  review. If the last-reviewed commit below is a commit SHA, run
+  `git diff "<that SHA>" HEAD`. If it is empty or still shows `{{...}}`, run
+  `git diff HEAD~1`.
 
 **Review scope: {{scope}}**
+**Last-reviewed commit: {{since}}**
 
 If the diff exceeds ~50KB, focus on files most relevant to your review area.
 

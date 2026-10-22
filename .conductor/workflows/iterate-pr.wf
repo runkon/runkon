@@ -17,9 +17,19 @@ workflow iterate-pr {
       call workflow lint-fix
     }
 
+    // Review everything since the last conductor review, or the whole PR when
+    // there is none (first cycle, rebase, force-push). devinrosen/conductor-ai#3074.
+    script review-scope {
+      run = ".conductor/scripts/review-scope.sh"
+      env = {
+        PR_NUMBER = "{{pr_number}}"
+      }
+    }
+
     call workflow review-pr {
       inputs {
-        scope = "incremental"
+        scope = "{{review_scope}}"
+        since = "{{review_since}}"
       }
     }
 

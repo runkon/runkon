@@ -9,6 +9,7 @@ workflow review-pr {
 
   inputs {
     scope default = "full"
+    since default = ""
   }
 
   // Resolve the PR's base branch once at workflow start. Exposes it to all
