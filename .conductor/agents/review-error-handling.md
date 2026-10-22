@@ -22,7 +22,7 @@ Do NOT flag:
 
 ## Scope constraint
 
-**Work from the git diff only — do NOT open or read source files, and do NOT run any shell commands** (`cargo build`, `cargo test`, `grep`, `find`, or anything else). The diff is the only input you need.
+Work from the git diff only. Run the `git diff` command from the diff scope rules to get it; don't open source files or run any other command (`cargo`, `grep`, `find` and so on). The diff is the only input you need.
 
 To distinguish test code from production code without reading files:
 - If the file path contains `/tests/` or ends with `_test.rs`, treat it as a test file.

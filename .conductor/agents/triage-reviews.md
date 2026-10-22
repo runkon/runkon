@@ -43,7 +43,7 @@ Find the latest `review-aggregator` entry in `{{prior_contexts}}`. Parse its `st
 
 ### Halting on missing data
 
-If you cannot find a `review-aggregator` entry in `{{prior_contexts}}`, OR its `structured_output` does not parse as JSON, OR `blocking_findings` is missing — **do not fall back to fetching reviews from GitHub.** A dismissed-review trap caused triage to push back against stale findings on PR #2887 (workflow run `01KQTMKWWF9E96WQYZW5KEG1V4`). Instead emit:
+If you cannot find a `review-aggregator` entry in `{{prior_contexts}}`, OR its `structured_output` does not parse as JSON, OR `blocking_findings` is missing — **do not fall back to fetching reviews from GitHub** (see hard rule 6). Instead emit:
 
 ```
 <<<FLOW_OUTPUT>>>

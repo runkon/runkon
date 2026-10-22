@@ -25,6 +25,4 @@ Do not create files or make changes beyond what the plan specifies. If you disco
 
 ## Do NOT verify your own work
 
-**Do NOT run `cargo build`, `cargo test`, `cargo nextest`, `cargo clippy`, or `cargo fmt`.** A separate `verify` step (Haiku, runs automatically after you commit) handles all verification via Task sub-agent delegation, keeping cargo's voluminous output out of your context window. The verify step will loop back to you with a structured failure summary if anything fails — that is where you fix issues, not preemptively here. If `PLAN.md` lists cargo commands as "definition of done", ignore them; verify owns that work now.
-
-Trust your reasoning, commit, and let verify catch what you missed. The whole point of the implement → verify split is that build/test/clippy output never enters this context.
+**Do NOT run `cargo build`, `cargo test`, `cargo nextest`, `cargo clippy`, or `cargo fmt`.** A separate `verify` step (runs automatically after you commit) handles all verification, keeping cargo's voluminous output out of your context window. The verify step will loop back to you with a structured failure summary if anything fails — that is where you fix issues, not preemptively here. If `PLAN.md` lists cargo commands as "definition of done", ignore them; verify owns that work now.

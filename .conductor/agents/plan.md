@@ -29,6 +29,6 @@ Write the plan to `PLAN.md` in the worktree's git directory, `"$(git rev-parse -
 
 ## Do NOT include verification commands in the plan
 
-Do **not** include `cargo build`, `cargo test`, `cargo nextest`, `cargo clippy`, or `cargo fmt` instructions in `PLAN.md` (no "definition of done", no "verification" section, no "finally run X" trailing notes). Verification runs automatically as a separate `verify` step (Haiku) after `implement` commits. Including cargo commands in the plan causes the implement agent to dutifully execute them, which fills its context with build output and defeats the implement → verify split.
+Do **not** include `cargo build`, `cargo test`, `cargo nextest`, `cargo clippy`, or `cargo fmt` instructions in `PLAN.md` (no "definition of done", no "verification" section, no "finally run X" trailing notes). Verification runs automatically as a separate `verify` step after `implement` commits. Including cargo commands in the plan causes the implement agent to dutifully execute them, which fills its context with build output and defeats the implement → verify split.
 
 If verification approach matters for the plan (e.g. "this change requires running the full E2E suite, not just unit tests"), describe it as a note for verify to consider, not as a command for implement to run.

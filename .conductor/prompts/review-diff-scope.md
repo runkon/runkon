@@ -6,9 +6,7 @@ Run every `git` command from your current working directory. Do **NOT**
 `cd` to any other path (including paths you may know from prior sessions
 or memory). The harness has already placed you in the worktree that
 holds this PR's branch — any other checkout will have a different
-`HEAD`, producing a fabricated diff that contaminates the entire review
-(this is the same class of bug that `resolve-pr-base.sh` was added to
-prevent).
+`HEAD`, producing a fabricated diff that contaminates the entire review.
 
 ### Diff command
 
