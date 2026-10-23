@@ -747,7 +747,7 @@ dependencies = [
 
 [[package]]
 name = "runkon-anthropic"
-version = "0.7.1-alpha"
+version = "0.7.2-alpha"
 dependencies = [
  "runkon-flow",
  "runkon-flow-executors",
@@ -761,7 +761,7 @@ dependencies = [
 
 [[package]]
 name = "runkon-flow"
-version = "0.7.1-alpha"
+version = "0.7.2-alpha"
 dependencies = [
  "chrono",
  "runkon-test-support",
@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "runkon-flow-executors"
-version = "0.7.1-alpha"
+version = "0.7.2-alpha"
 dependencies = [
  "runkon-flow",
  "runkon-runtimes",
@@ -794,7 +794,7 @@ dependencies = [
 
 [[package]]
 name = "runkon-google"
-version = "0.7.1-alpha"
+version = "0.7.2-alpha"
 dependencies = [
  "runkon-flow",
  "runkon-flow-executors",
@@ -808,7 +808,7 @@ dependencies = [
 
 [[package]]
 name = "runkon-notify"
-version = "0.7.1-alpha"
+version = "0.7.2-alpha"
 dependencies = [
  "serde",
  "serde_json",
@@ -820,7 +820,7 @@ dependencies = [
 
 [[package]]
 name = "runkon-runtimes"
-version = "0.7.1-alpha"
+version = "0.7.2-alpha"
 dependencies = [
  "libc",
  "runkon-test-support",
@@ -835,7 +835,7 @@ dependencies = [
 
 [[package]]
 name = "runkon-test-support"
-version = "0.7.1-alpha"
+version = "0.7.2-alpha"
 
 [[package]]
 name = "rusqlite"
