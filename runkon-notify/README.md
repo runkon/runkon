@@ -24,7 +24,7 @@ Each harness maps its own domain events to `Event` before calling `HookRunner::f
 
 ```toml
 [dependencies]
-runkon-notify = "0.7.1-alpha"
+runkon-notify = "0.7.2-alpha"
 ```
 
 Optional features:
