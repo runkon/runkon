@@ -1,0 +1,8 @@
+[package]
+name = "runkon-test-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared test helpers for the runkon workspace; not published"
+publish = false

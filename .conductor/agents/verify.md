@@ -53,7 +53,7 @@ Don't delegate the checks to a sub-agent and don't start them in the background.
 - `cargo nextest run -p runkon-flow-executors --features test-utils`
 - `cargo nextest run -p runkon-google --features test-utils`
 - `cargo nextest run -p runkon-notify --features test-utils`
-- `cargo nextest run -p runkon-runtimes` (it has no `test-utils` feature)
+- `cargo nextest run -p runkon-runtimes`
 
 Report the passed/failed counts from the summary line, and on failure the failing test names.
 
