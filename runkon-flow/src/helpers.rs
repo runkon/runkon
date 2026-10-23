@@ -370,8 +370,8 @@ pub(crate) fn format_gate_selection_context(items: &[String]) -> String {
 /// while loop. Returns the max iteration that has all body nodes completed,
 /// so the loop resumes from the iteration where it failed.
 pub fn find_max_completed_while_iteration(state: &ExecutionState, node: &WhileNode) -> u32 {
-    let step_map = match state.resume_ctx {
-        Some(ref ctx) => &ctx.step_map,
+    let ctx = match state.resume_ctx {
+        Some(ref ctx) => ctx,
         None => return 0,
     };
 
@@ -392,14 +392,9 @@ pub fn find_max_completed_while_iteration(state: &ExecutionState, node: &WhileNo
     // keys only — non-body steps from other parts of the workflow are irrelevant here.
     let mut completed_by_iter: std::collections::HashMap<u32, std::collections::HashSet<&str>> =
         std::collections::HashMap::new();
-    for (name, inner) in step_map {
-        if body_key_set.contains(name.as_str()) {
-            for iter in inner.keys() {
-                completed_by_iter
-                    .entry(*iter)
-                    .or_default()
-                    .insert(name.as_str());
-            }
+    for name in &body_key_set {
+        for iter in ctx.completed_iterations(name) {
+            completed_by_iter.entry(iter).or_default().insert(name);
         }
     }
 
@@ -412,6 +407,31 @@ pub fn find_max_completed_while_iteration(state: &ExecutionState, node: &WhileNo
         iter += 1;
     }
     iter
+}
+
+/// Mark the occurrences consumed by the fast-forwarded iterations `0..start_iteration`
+/// of a `while` loop as claimed, so later same-named steps match their own records.
+pub(crate) fn advance_resume_past_while_iterations(
+    state: &mut ExecutionState,
+    node: &WhileNode,
+    start_iteration: u32,
+) {
+    let Some(ctx) = state.resume_ctx.as_mut() else {
+        return;
+    };
+    let mut body_keys: Vec<String> = Vec::new();
+    for n in &node.body {
+        collect_leaf_step_keys_inner(n, &mut body_keys);
+    }
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for key in &body_keys {
+        *counts.entry(key.as_str()).or_default() += 1;
+    }
+    for iter in 0..start_iteration {
+        for (key, count) in &counts {
+            ctx.advance(key, iter, *count);
+        }
+    }
 }
 
 #[cfg(test)]

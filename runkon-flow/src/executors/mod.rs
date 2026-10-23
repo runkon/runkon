@@ -287,51 +287,58 @@ pub(super) fn record_dispatch_success(
 
 /// Returns `true` and performs skip cleanup if the step has already completed.
 /// Callers should `return Ok(())` (or `continue`) immediately when this returns `true`.
+///
+/// Claims the step's next recorded occurrence, so call it exactly once per run of the step.
 pub(super) fn skip_if_already_completed(
     state: &mut crate::engine::ExecutionState,
     step_key: &str,
     iteration: u32,
     label: &str,
 ) -> bool {
-    if !should_skip_logged(state, step_key, iteration, label) {
+    let Some(row) = claim_completed_logged(state, step_key, iteration, label) else {
         return false;
-    }
-    crate::engine::restore_step(state, step_key, iteration);
+    };
+    crate::engine::restore_step_row(state, &row, step_key, iteration);
     true
 }
 
-/// Shared skip check: true (after logging) if the step already completed.
-fn should_skip_logged(
-    state: &crate::engine::ExecutionState,
+/// Shared skip check: claims the next occurrence and, if it already completed,
+/// logs and returns its row.
+fn claim_completed_logged(
+    state: &mut crate::engine::ExecutionState,
     step_key: &str,
     iteration: u32,
     label: &str,
-) -> bool {
-    let skip = crate::engine::should_skip(state, step_key, iteration);
-    if skip {
+) -> Option<crate::types::WorkflowRunStep> {
+    let row = crate::engine::claim_completed_step(state, step_key, iteration);
+    if row.is_some() {
         tracing::info!(
             "Skipping completed step '{}' (iteration {})",
             label,
             iteration
         );
     }
-    skip
+    row
 }
 
 /// Like [`skip_if_already_completed`], but with a custom `restore` for steps
-/// (such as `call workflow`) that restore more than their own row. A failed
-/// restore is returned as an error rather than skipping silently.
+/// (such as `call workflow`) that restore more than their own row. `restore`
+/// receives the claimed row. A failed restore is returned as an error rather
+/// than skipping silently.
 pub(super) fn skip_if_already_completed_with(
     state: &mut crate::engine::ExecutionState,
     step_key: &str,
     iteration: u32,
     label: &str,
-    restore: impl FnOnce(&mut crate::engine::ExecutionState) -> crate::engine_error::Result<()>,
+    restore: impl FnOnce(
+        &mut crate::engine::ExecutionState,
+        &crate::types::WorkflowRunStep,
+    ) -> crate::engine_error::Result<()>,
 ) -> crate::engine_error::Result<bool> {
-    if !should_skip_logged(state, step_key, iteration, label) {
+    let Some(row) = claim_completed_logged(state, step_key, iteration, label) else {
         return Ok(false);
-    }
-    restore(state)?;
+    };
+    restore(state, &row)?;
     Ok(true)
 }
 

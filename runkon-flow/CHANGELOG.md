@@ -5,6 +5,24 @@
 - **`script` steps no longer inherit the host's stdin.** The step's stdin is `/dev/null`,
   so it cannot consume data meant for the host, such as an MCP server's JSON-RPC stream.
   A script that read stdin now reads EOF immediately.
+- **Resume matches steps by occurrence within an iteration.** A workflow that runs the
+  same `call`, `call workflow`, `gate`, `script` or `foreach` twice in one iteration
+  used to skip the second run when interrupted between them, and conditions saw the
+  first run's markers. The n-th time a step name runs in an iteration now matches the
+  n-th recorded run of that name, so the second run executes and its markers are used.
+  Existing workflows need no edits.
+- **Changed:** `ResumeContext` is now `#[non_exhaustive]`, so struct-literal construction
+  no longer compiles. Build it with `ResumeContext::from_steps` (pass the run's saved
+  steps, of every status) or `ResumeContext::default()`.
+- **Changed (breaking):** `ResumeContext::step_map` is no longer a public field, so
+  `ctx.step_map[..]` no longer compiles. Call `ctx.step_map()` instead: a deprecated
+  read-only accessor that returns an owned map of the latest completed row per
+  `(name, iteration)`. Writing to it has no effect, and resume no longer reads it.
+- **Added:** `engine::claim_completed_step`, `engine::restore_step_row` and
+  `engine::restore_call_workflow_step_row`. An executor claims a step once per run of it,
+  then restores the claimed row.
+- **Deprecated:** `engine::should_skip`, `restore_step`, `restore_completed_step` and
+  `restore_call_workflow_step`. They act on the next unclaimed run and never advance it.
 
 ## 0.7.1 — Fixed
 
