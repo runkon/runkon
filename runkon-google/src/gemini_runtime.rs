@@ -12,7 +12,9 @@ use std::sync::{atomic::AtomicBool, Arc, Mutex};
 use std::time::Duration;
 
 use runkon_runtimes::error::{Result, RuntimeError};
-use runkon_runtimes::headless::{DrainOutcome, LineEventParser, ParseSignal};
+use runkon_runtimes::headless::{
+    resolve_completed_run, DrainOutcome, LineEventParser, ParseSignal, TerminalEventCapture,
+};
 use runkon_runtimes::permission::PermissionMode;
 use runkon_runtimes::process_utils;
 use runkon_runtimes::run::RunHandle;
@@ -392,7 +394,9 @@ fn poll_unix(
     let (stderr_pipe, stdout_pipe, finish) = handle.into_stderr_drain_parts();
 
     let run_id_owned = run_id.to_string();
-    let event_sink_for_drain = event_sink.clone();
+    let capture = Arc::new(TerminalEventCapture::new(event_sink.clone()));
+    let capture_for_drain = capture.clone();
+    let log_path_for_resolve = log_path.clone();
     let (tx, rx) = std::sync::mpsc::channel::<DrainOutcome>();
 
     let stderr_run_id = run_id.to_string();
@@ -417,7 +421,7 @@ fn poll_unix(
             stdout_pipe,
             &run_id_owned,
             &log_path,
-            &*event_sink_for_drain,
+            &*capture_for_drain,
             stall_threshold,
             max_turns,
             GeminiLineEventParser::default(),
@@ -458,10 +462,15 @@ fn poll_unix(
     };
 
     match drain_outcome {
-        DrainOutcome::Completed => tracker
-            .get_run(run_id)
-            .map_err(|e| PollError::Failed(format!("DB error after drain: {e}")))?
-            .ok_or_else(|| PollError::Failed(format!("run {run_id} not found in DB after drain"))),
+        DrainOutcome::Completed => resolve_completed_run(
+            tracker.as_ref(),
+            run_id,
+            capture.take_terminal(),
+            pid,
+            &runtime_name,
+            &log_path_for_resolve,
+            "GeminiRuntime",
+        ),
         DrainOutcome::NoResult => {
             if let Err(e) = tracker.mark_failed_if_running(run_id, "agent exited without result") {
                 tracing::warn!(
@@ -515,6 +524,7 @@ mod tests {
     use runkon_runtimes::agent_def::{AgentDef, AgentRole};
     use runkon_runtimes::headless::drain_stream_json;
     use runkon_runtimes::run::{RunHandle, RunStatus};
+    use runkon_runtimes::test_support::FixedRowTracker;
     use runkon_runtimes::tracker::{EventSink, NoopEventSink, NoopTracker};
 
     // ── event sink helper ─────────────────────────────────────────────────────
@@ -868,6 +878,42 @@ mod tests {
         *runtime.tracker.lock().unwrap() = Some(Arc::new(NoopTracker));
         *runtime.event_sink.lock().unwrap() = Some(Arc::new(NoopEventSink));
         (pid, script)
+    }
+
+    /// Host row still `Running` and a no-op sink: the host failed to record the
+    /// result, so `poll` must build the run from the drained result event.
+    #[cfg(unix)]
+    #[test]
+    fn poll_returns_drained_result_when_host_row_still_running() {
+        use std::io::Write as _;
+        use std::os::unix::process::CommandExt;
+        use std::process::Stdio;
+
+        let runtime = make_runtime(None, None);
+        let mut script = tempfile::NamedTempFile::new().expect("tempfile");
+        writeln!(script, r#"echo '{{"type":"message","role":"assistant","content":"done","delta":true,"timestamp":"2024-01-01T00:00:00Z"}}'"#).unwrap();
+        writeln!(script, r#"echo '{{"type":"result","status":"success","session_id":"s","stats":{{"input_tokens":10,"output_tokens":5,"cached":0,"input":10,"total_tokens":15,"duration_ms":100,"tool_calls":0}},"timestamp":"2024-01-01T00:00:00Z"}}'"#).unwrap();
+        let child = std::process::Command::new("sh")
+            .arg(script.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .expect("sh must be available");
+        let handle =
+            runkon_runtimes::headless::HeadlessHandle::from_child(child).expect("HeadlessHandle");
+        *runtime.handle.lock().unwrap() = Some(handle);
+        *runtime.tracker.lock().unwrap() = Some(Arc::new(FixedRowTracker::new(make_test_run(
+            "gemini", None,
+        ))));
+        *runtime.event_sink.lock().unwrap() = Some(Arc::new(NoopEventSink));
+        *runtime.runtime_name.lock().unwrap() = Some("gemini".to_string());
+
+        let run = runtime
+            .poll("drained-running", None, Duration::from_secs(30))
+            .expect("poll should use the drained result");
+        assert_eq!(run.status, RunStatus::Completed);
+        assert_eq!(run.result_text.as_deref(), Some("done"));
     }
 
     #[cfg(unix)]

@@ -22,6 +22,7 @@ ureq = { version = "2", features = ["json"] }
 tracing = "0.1"
 
 [dev-dependencies]
+runkon-runtimes = { workspace = true, features = ["test-utils"] }
 runkon-flow = { workspace = true, features = ["test-utils"] }
 runkon-flow-executors = { workspace = true, features = ["test-utils"] }
 tempfile = "3"
