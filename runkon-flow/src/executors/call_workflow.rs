@@ -1,7 +1,7 @@
 use crate::dsl::CallWorkflowNode;
 use crate::engine::{
     fetch_child_completion_data, handle_on_fail, record_step_success, resolve_child_inputs,
-    restore_call_workflow_step, ExecutionState,
+    restore_call_workflow_step_row, ExecutionState,
 };
 use crate::engine_error::{EngineError, Result};
 use crate::extensions::LlmRunMetrics;
@@ -23,7 +23,9 @@ pub fn execute_call_workflow(
         &wf_step_name,
         iteration,
         &node.workflow,
-        |state| restore_call_workflow_step(state, &wf_step_name, &node.workflow, iteration),
+        |state, row| {
+            restore_call_workflow_step_row(state, row, &wf_step_name, &node.workflow, iteration)
+        },
     )? {
         return Ok(());
     }

@@ -168,7 +168,7 @@ pub fn make_state(
 
 /// Wrap `make_state` and set `resume_ctx` to signal a workflow resume.
 ///
-/// The `step_map` is empty so all steps execute normally — tests that
+/// The resume context is empty so all steps execute normally — tests that
 /// need skipping behaviour should populate it directly after calling this helper.
 pub fn make_state_with_resume_ctx(
     wf_name: &str,
@@ -176,9 +176,7 @@ pub fn make_state_with_resume_ctx(
     named_executors: HashMap<String, Box<dyn ActionExecutor>>,
 ) -> ExecutionState {
     let mut state = make_state(wf_name, persistence, named_executors);
-    state.resume_ctx = Some(ResumeContext {
-        step_map: HashMap::new(),
-    });
+    state.resume_ctx = Some(ResumeContext::default());
     state
 }
 
