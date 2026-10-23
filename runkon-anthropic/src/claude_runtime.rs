@@ -5,7 +5,9 @@ use std::sync::{atomic::AtomicBool, Arc, Mutex};
 use std::time::Duration;
 
 use runkon_runtimes::error::{Result, RuntimeError};
-use runkon_runtimes::headless::{DrainOutcome, LineEventParser, ParseSignal};
+use runkon_runtimes::headless::{
+    resolve_completed_run, DrainOutcome, LineEventParser, ParseSignal, TerminalEventCapture,
+};
 use runkon_runtimes::permission::PermissionMode;
 use runkon_runtimes::process_utils;
 use runkon_runtimes::run::RunHandle;
@@ -346,7 +348,9 @@ fn poll_unix(
     let (stderr_pipe, stdout_pipe, finish) = handle.into_stderr_drain_parts();
 
     let run_id_owned = run_id.to_string();
-    let event_sink_for_drain = event_sink.clone();
+    let capture = Arc::new(TerminalEventCapture::new(event_sink.clone()));
+    let capture_for_drain = capture.clone();
+    let log_path_for_resolve = log_path.clone();
     let (tx, rx) = std::sync::mpsc::channel::<DrainOutcome>();
 
     let stderr_run_id = run_id.to_string();
@@ -371,7 +375,7 @@ fn poll_unix(
             stdout_pipe,
             &run_id_owned,
             &log_path,
-            &*event_sink_for_drain,
+            &*capture_for_drain,
             stall_threshold,
             max_turns,
             ClaudeLineEventParser,
@@ -422,10 +426,15 @@ fn poll_unix(
     };
 
     match drain_outcome {
-        DrainOutcome::Completed => tracker
-            .get_run(run_id)
-            .map_err(|e| PollError::Failed(format!("DB error after drain: {e}")))?
-            .ok_or_else(|| PollError::Failed(format!("run {run_id} not found in DB after drain"))),
+        DrainOutcome::Completed => resolve_completed_run(
+            tracker.as_ref(),
+            run_id,
+            capture.take_terminal(),
+            pid,
+            &runtime_name,
+            &log_path_for_resolve,
+            "ClaudeRuntime",
+        ),
         DrainOutcome::NoResult => {
             if let Err(e) = tracker.mark_failed_if_running(run_id, "agent exited without result") {
                 tracing::warn!(
@@ -479,6 +488,7 @@ mod tests {
     use runkon_runtimes::agent_def::{AgentDef, AgentRole};
     use runkon_runtimes::headless::drain_stream_json;
     use runkon_runtimes::run::{RunHandle, RunStatus};
+    use runkon_runtimes::test_support::FixedRowTracker;
     use runkon_runtimes::tracker::{NoopEventSink, NoopTracker};
 
     fn make_test_run(runtime: &str, subprocess_pid: Option<i64>) -> RunHandle {
@@ -813,6 +823,14 @@ mod tests {
     /// event, then blocks in `wait` — simulating claude waiting for cargo nextest.
     #[cfg(unix)]
     fn inject_script_child(runtime: &ClaudeRuntime) -> (u32, tempfile::NamedTempFile) {
+        inject_script_child_with_tracker(runtime, Arc::new(NoopTracker))
+    }
+
+    #[cfg(unix)]
+    fn inject_script_child_with_tracker(
+        runtime: &ClaudeRuntime,
+        tracker: Arc<dyn RunTracker>,
+    ) -> (u32, tempfile::NamedTempFile) {
         use std::io::Write as _;
         use std::os::unix::process::CommandExt;
         use std::process::Stdio;
@@ -833,10 +851,40 @@ mod tests {
             .expect("HeadlessHandle from_child failed");
         let pid = handle.pid();
         *runtime.handle.lock().unwrap() = Some(handle);
-        *runtime.tracker.lock().unwrap() = Some(Arc::new(NoopTracker));
+        *runtime.tracker.lock().unwrap() = Some(tracker);
         *runtime.event_sink.lock().unwrap() = Some(Arc::new(NoopEventSink));
         *runtime.runtime_name.lock().unwrap() = Some("claude".to_string());
         (pid, script)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn poll_returns_drained_result_when_host_row_still_running() {
+        let runtime = make_test_runtime(None, None);
+        let tracker = Arc::new(FixedRowTracker::new(make_test_run("claude", None)));
+        let (_pgid, _script) = inject_script_child_with_tracker(&runtime, tracker);
+
+        let handle = runtime
+            .poll("drained-running", None, Duration::from_secs(30))
+            .expect("poll should use the drained result");
+        assert_eq!(handle.status, RunStatus::Completed);
+        assert_eq!(handle.result_text.as_deref(), Some("done"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn poll_prefers_terminal_host_row() {
+        let runtime = make_test_runtime(None, None);
+        let mut row = make_test_run("claude", None);
+        row.status = RunStatus::Completed;
+        row.result_text = Some("from host".to_string());
+        let (_pgid, _script) =
+            inject_script_child_with_tracker(&runtime, Arc::new(FixedRowTracker::new(row)));
+
+        let handle = runtime
+            .poll("host-terminal", None, Duration::from_secs(30))
+            .expect("poll should return the host row");
+        assert_eq!(handle.result_text.as_deref(), Some("from host"));
     }
 
     /// After poll returns, the drain thread must kill the whole process group.
@@ -846,8 +894,8 @@ mod tests {
         let runtime = make_test_runtime(None, None);
         let (pgid, _script) = inject_script_child(&runtime);
 
-        // poll returns Err::Failed because NoopTracker.get_run returns None;
-        // that is expected — we are testing process-group cleanup, not DB.
+        // poll returns Ok built from the drained result event because
+        // NoopTracker.get_run returns None; we are testing process-group cleanup, not DB.
         let _ = runtime.poll("pgkill-test", None, Duration::from_secs(30));
 
         // Assert the process group is dead within 10 s.
