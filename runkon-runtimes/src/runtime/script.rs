@@ -29,7 +29,7 @@ fn is_shell_var_name(name: &str) -> bool {
 /// ScriptRuntime runs any shell command via `sh -c <command>`,
 /// passing the prompt through the env var named by `prompt_env`
 /// (`FLOW_PROMPT` by default) and capturing stdout as `result_text`. No tmux
-/// dependency.
+/// dependency. The command's stdin is `/dev/null`, so it never reads the host's stdin.
 pub struct ScriptRuntime {
     config: RuntimeConfig,
     state: Mutex<Option<ScriptState>>,
@@ -89,6 +89,7 @@ impl AgentRuntime for ScriptRuntime {
             .envs(&self.config.env)
             .env(prompt_env, &request.prompt)
             .current_dir(&request.working_dir)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -402,6 +403,25 @@ mod tests {
         let _ = runtime.poll(run_id, None, Duration::from_secs(30));
         let out = sink.0.lock().unwrap().clone();
         out.expect("script should complete")
+    }
+
+    /// The script reads nothing from the host's stdin, which keeps its pending data.
+    #[test]
+    fn script_runtime_does_not_read_host_stdin() {
+        use runkon_test_support::*;
+        if !is_stdin_probe_child() {
+            run_in_child_with_piped_stdin(
+                "runtime::script::tests::script_runtime_does_not_read_host_stdin",
+            );
+            return;
+        }
+        let out = run_with_config(
+            RuntimeConfig::default(),
+            "printf '[%s]' \"$(cat)\"",
+            "test-host-stdin",
+        );
+        assert_eq!(out.trim(), "[]");
+        assert_stdin_untouched_and_report();
     }
 
     const PRINT_BOTH_PROMPT_VARS: &str =

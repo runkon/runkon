@@ -1,5 +1,12 @@
 # Changelog — runkon-runtimes
 
+## 0.7.2 — Fixed
+
+- **`spawn_headless` (the `claude` runtime) and the `script` runtime no longer inherit
+  the host's stdin.** The child's stdin is `/dev/null`, so it cannot consume data meant
+  for the host, such as an MCP server's JSON-RPC stream. A `script` command that read
+  stdin now reads EOF immediately.
+
 ## 0.7.1 — Fixed
 
 - **`cli` and `script` runtimes now apply `RuntimeConfig.env`** to the spawned process

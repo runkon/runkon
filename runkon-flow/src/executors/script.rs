@@ -195,6 +195,8 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
     for (k, v) in &env_vars {
         cmd.env(k, v);
     }
+    // The host's stdin may carry a protocol stream; a step must never read it.
+    cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
@@ -582,6 +584,30 @@ mod tests {
             .and_then(|m| serde_json::from_str(m).ok())
             .unwrap_or_default();
         assert!(markers.is_empty(), "no markers expected for plain stdout");
+    }
+
+    /// A step reads nothing from the host's stdin, which keeps its pending data.
+    #[test]
+    fn script_step_does_not_read_host_stdin() {
+        use runkon_test_support::*;
+
+        if !is_stdin_probe_child() {
+            run_in_child_with_piped_stdin(
+                "executors::script::tests::script_step_does_not_read_host_stdin",
+            );
+            return;
+        }
+
+        let (persistence, run_id) = make_persistence();
+        let mut state = make_state(Arc::clone(&persistence), run_id.clone());
+        let node = make_node("probe", "printf '[%s]' \"$(cat)\"");
+        execute_script(&mut state, &node, 0).unwrap();
+
+        let steps = persistence.get_steps(&run_id).unwrap();
+        assert_eq!(steps[0].status, WorkflowStepStatus::Completed);
+        assert_eq!(steps[0].context_out.as_deref().unwrap_or("").trim(), "[]");
+
+        assert_stdin_untouched_and_report();
     }
 
     /// A script that prints an unrecognised output block (e.g. from an older

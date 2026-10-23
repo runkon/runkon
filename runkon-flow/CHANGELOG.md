@@ -1,5 +1,11 @@
 # Changelog — runkon-flow
 
+## 0.7.2 — Fixed
+
+- **`script` steps no longer inherit the host's stdin.** The step's stdin is `/dev/null`,
+  so it cannot consume data meant for the host, such as an MCP server's JSON-RPC stream.
+  A script that read stdin now reads EOF immediately.
+
 ## 0.7.1 — Fixed
 
 - **A one-line `<<<FLOW_OUTPUT>>> {...}` with no end marker is no longer ignored.**
