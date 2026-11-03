@@ -25,7 +25,14 @@ fn resolve_cause(
             step_name: None,
             error,
         }),
-        _ => None,
+        Ok(None) => None,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to fetch child workflow run '{}' while resolving its failure cause: {e}",
+                result.workflow_run_id
+            );
+            None
+        }
     }
 }
 

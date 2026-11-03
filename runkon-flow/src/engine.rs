@@ -1898,6 +1898,143 @@ mod tests {
         assert_eq!(c.step_name.as_deref(), Some("first"));
     }
 
+    fn seed_step_with(
+        p: &crate::persistence_memory::InMemoryWorkflowPersistence,
+        run: &str,
+        name: &str,
+        position: i64,
+        iteration: i64,
+        update: crate::traits::persistence::StepUpdate,
+    ) {
+        use crate::traits::persistence::NewStep;
+        let id = p
+            .insert_step(NewStep {
+                workflow_run_id: run.to_string(),
+                step_name: name.to_string(),
+                role: "actor".to_string(),
+                can_commit: false,
+                position,
+                iteration,
+                retry_count: Some(0),
+                gate: None,
+            })
+            .unwrap();
+        p.update_step(&id, update).unwrap();
+    }
+
+    fn bare_update(
+        status: WorkflowStepStatus,
+        step_error: Option<&str>,
+        result_text: Option<&str>,
+    ) -> crate::traits::persistence::StepUpdate {
+        crate::traits::persistence::StepUpdate {
+            generation: 0,
+            status,
+            child_run_id: None,
+            result_text: result_text.map(str::to_string),
+            context_out: None,
+            markers_out: None,
+            retry_count: Some(0),
+            structured_output: None,
+            step_error: step_error.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn find_run_failure_cause_reports_timed_out_step() {
+        let p = crate::persistence_memory::InMemoryWorkflowPersistence::new();
+        p.seed_run("r");
+        seed_step_with(
+            &p,
+            "r",
+            "slow",
+            0,
+            0,
+            bare_update(WorkflowStepStatus::TimedOut, None, None),
+        );
+        let c = find_run_failure_cause(&p, "r").unwrap();
+        assert_eq!(c.step_name.as_deref(), Some("slow"));
+        assert_eq!(c.error, WorkflowStepStatus::TimedOut.to_string());
+    }
+
+    #[test]
+    fn find_run_failure_cause_error_falls_back_to_result_text_then_status() {
+        let p = crate::persistence_memory::InMemoryWorkflowPersistence::new();
+        p.seed_run("r");
+        seed_step_with(
+            &p,
+            "r",
+            "text-only",
+            0,
+            0,
+            bare_update(WorkflowStepStatus::Failed, None, Some("from result text")),
+        );
+        let c = find_run_failure_cause(&p, "r").unwrap();
+        assert_eq!(c.error, "from result text");
+
+        let p = crate::persistence_memory::InMemoryWorkflowPersistence::new();
+        p.seed_run("r");
+        seed_step_with(
+            &p,
+            "r",
+            "bare",
+            0,
+            0,
+            bare_update(WorkflowStepStatus::Failed, None, None),
+        );
+        let c = find_run_failure_cause(&p, "r").unwrap();
+        assert_eq!(c.error, WorkflowStepStatus::Failed.to_string());
+
+        // step_error wins over result_text.
+        let p = crate::persistence_memory::InMemoryWorkflowPersistence::new();
+        p.seed_run("r");
+        seed_step_with(
+            &p,
+            "r",
+            "both",
+            0,
+            0,
+            bare_update(WorkflowStepStatus::Failed, Some("err"), Some("text")),
+        );
+        assert_eq!(find_run_failure_cause(&p, "r").unwrap().error, "err");
+    }
+
+    #[test]
+    fn find_run_failure_cause_none_when_get_steps_fails() {
+        let p = crate::persistence_memory::InMemoryWorkflowPersistence::new();
+        p.seed_run("r");
+        seed_step(&p, "r", "boom", 0, 0, Some("exited 1"));
+        p.set_fail_get_steps(true);
+        assert!(find_run_failure_cause(&p, "r").is_none());
+    }
+
+    #[test]
+    fn find_run_failure_cause_keys_steps_per_iteration() {
+        // Same step name in two iterations: each (name, iteration, position) is its own
+        // step, so an iteration-0 failure is still reported when iteration 1 succeeded.
+        let p = crate::persistence_memory::InMemoryWorkflowPersistence::new();
+        p.seed_run("r");
+        seed_step_with(
+            &p,
+            "r",
+            "loop-step",
+            0,
+            0,
+            bare_update(WorkflowStepStatus::Failed, Some("iter0 failed"), None),
+        );
+        seed_step_with(
+            &p,
+            "r",
+            "loop-step",
+            1,
+            1,
+            bare_update(WorkflowStepStatus::Completed, None, Some("ok")),
+        );
+        let c = find_run_failure_cause(&p, "r").unwrap();
+        assert_eq!(c.step_name.as_deref(), Some("loop-step"));
+        assert_eq!(c.error, "iter0 failed");
+    }
+
     #[test]
     fn find_run_failure_cause_none_without_failed_steps() {
         let p = crate::persistence_memory::InMemoryWorkflowPersistence::new();
