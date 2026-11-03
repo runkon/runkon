@@ -26,6 +26,7 @@ runkon-runtimes = { workspace = true, features = ["test-utils"] }
 runkon-flow = { workspace = true, features = ["test-utils"] }
 runkon-flow-executors = { workspace = true, features = ["test-utils"] }
 tempfile = "3"
+runkon-test-support = { path = "../runkon-test-support" }
 
 [[example]]
 name = "standalone_flow"

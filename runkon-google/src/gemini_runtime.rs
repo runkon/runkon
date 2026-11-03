@@ -527,6 +527,19 @@ mod tests {
     use runkon_runtimes::test_support::FixedRowTracker;
     use runkon_runtimes::tracker::{EventSink, NoopEventSink, NoopTracker};
 
+    /// Body of the Gemini stub script: records argv to `args_file` and emits a success result.
+    #[cfg(unix)]
+    fn gemini_stub_body(args_file: &str) -> String {
+        format!(
+            concat!(
+                "printf '%s\\n' \"$@\" > {args_file}\n",
+                r#"echo '{{"type":"result","status":"success","session_id":"s","stats":{{"input_tokens":1,"output_tokens":1,"cached":0,"input":1,"total_tokens":2,"duration_ms":10,"tool_calls":0}}}}'"#,
+                "\n"
+            ),
+            args_file = args_file,
+        )
+    }
+
     // ── event sink helper ─────────────────────────────────────────────────────
 
     #[derive(Default, Clone)]
@@ -955,21 +968,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resume_flag_wired_in_spawn() {
-        use std::io::Write as _;
-        use std::os::unix::fs::PermissionsExt as _;
-
         let tmp = tempfile::tempdir().unwrap();
         let args_file = tmp.path().join("args.txt");
         let args_file_str = args_file.to_str().unwrap();
 
         let script_path = tmp.path().join("stub-resume.sh");
-        {
-            let mut f = std::fs::File::create(&script_path).unwrap();
-            writeln!(f, "#!/bin/sh").unwrap();
-            writeln!(f, "printf '%s\\n' \"$@\" > {args_file_str}").unwrap();
-            writeln!(f, r#"echo '{{"type":"result","status":"success","session_id":"s","stats":{{"input_tokens":1,"output_tokens":1,"cached":0,"input":1,"total_tokens":2,"duration_ms":10,"tool_calls":0}}}}'"#).unwrap();
-        }
-        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        runkon_test_support::write_sh_script(&script_path, &gemini_stub_body(args_file_str));
 
         let runtime = GeminiRuntime::new(GeminiRuntimeOptions {
             binary_path: script_path.clone(),
@@ -1012,21 +1016,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn approval_mode_other_wired() {
-        use std::io::Write as _;
-        use std::os::unix::fs::PermissionsExt as _;
-
         let tmp = tempfile::tempdir().unwrap();
         let args_file = tmp.path().join("args-approval.txt");
         let args_file_str = args_file.to_str().unwrap();
 
         let script_path = tmp.path().join("stub-approval.sh");
-        {
-            let mut f = std::fs::File::create(&script_path).unwrap();
-            writeln!(f, "#!/bin/sh").unwrap();
-            writeln!(f, "printf '%s\\n' \"$@\" > {args_file_str}").unwrap();
-            writeln!(f, r#"echo '{{"type":"result","status":"success","session_id":"s","stats":{{"input_tokens":1,"output_tokens":1,"cached":0,"input":1,"total_tokens":2,"duration_ms":10,"tool_calls":0}}}}'"#).unwrap();
-        }
-        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        runkon_test_support::write_sh_script(&script_path, &gemini_stub_body(args_file_str));
 
         let runtime = GeminiRuntime::new(GeminiRuntimeOptions {
             binary_path: script_path.clone(),
@@ -1061,21 +1056,12 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn approval_mode_non_other_no_flag() {
-        use std::io::Write as _;
-        use std::os::unix::fs::PermissionsExt as _;
-
         let tmp = tempfile::tempdir().unwrap();
         let args_file = tmp.path().join("args-no-approval.txt");
         let args_file_str = args_file.to_str().unwrap();
 
         let script_path = tmp.path().join("stub-no-approval.sh");
-        {
-            let mut f = std::fs::File::create(&script_path).unwrap();
-            writeln!(f, "#!/bin/sh").unwrap();
-            writeln!(f, "printf '%s\\n' \"$@\" > {args_file_str}").unwrap();
-            writeln!(f, r#"echo '{{"type":"result","status":"success","session_id":"s","stats":{{"input_tokens":1,"output_tokens":1,"cached":0,"input":1,"total_tokens":2,"duration_ms":10,"tool_calls":0}}}}'"#).unwrap();
-        }
-        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        runkon_test_support::write_sh_script(&script_path, &gemini_stub_body(args_file_str));
 
         let runtime = GeminiRuntime::new(GeminiRuntimeOptions {
             binary_path: script_path.clone(),
