@@ -1,5 +1,18 @@
 # Changelog — runkon-flow
 
+## Unreleased
+
+- **Fixed:** human gate steps are stored with `gate_type`, `gate_prompt`, `gate_timeout`
+  and the resolved `gate_options`, written in the same insert as the step. Hosts no longer
+  need a persistence decorator for this, so conductor-ai's `GateMetadataPersistence` can be
+  removed.
+- **Fixed:** a gate whose `options` step reference cannot be resolved now fails before a
+  waiting step or `GateWaiting` event is recorded, instead of leaving an orphaned row.
+- **Changed (breaking):** `NewStep` has a new `gate: Option<GateStepInfo>` field. Struct
+  literals must add `gate: None`. Custom `WorkflowPersistence` backends should store it:
+  `gate_timeout` as `GateStepInfo::timeout_text()` (`"{secs}s"`) and `gate_options` as
+  `GateStepInfo::options_json()` (a `[{"value","label"}]` JSON array).
+
 ## 0.7.2 — Fixed
 
 - **`script` steps no longer inherit the host's stdin.** The step's stdin is `/dev/null`,

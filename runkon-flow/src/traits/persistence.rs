@@ -32,6 +32,48 @@ pub struct NewStep {
     pub iteration: i64,
     /// `Some(n)` → insert as running with retry_count=n; `None` → insert as pending.
     pub retry_count: Option<i64>,
+    /// Gate metadata. `Some` only for human gate steps; backends must persist it
+    /// in the same write that creates the row (`gate_type`, `gate_prompt`,
+    /// `gate_timeout`, `gate_options`) so no reader sees a gate step without it.
+    pub gate: Option<GateStepInfo>,
+}
+
+/// One selectable option of a human gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateOption {
+    pub value: String,
+    pub label: String,
+}
+
+/// Metadata describing a human gate step, carried on [`NewStep::gate`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GateStepInfo {
+    pub gate_type: String,
+    pub prompt: Option<String>,
+    pub timeout_secs: u64,
+    /// Resolved options; empty when the gate defines none.
+    pub options: Vec<GateOption>,
+}
+
+impl GateStepInfo {
+    /// Column format for `gate_timeout`: `"{secs}s"`.
+    pub fn timeout_text(&self) -> String {
+        format!("{}s", self.timeout_secs)
+    }
+
+    /// Column format for `gate_options`: a JSON array of `{"value","label"}`
+    /// objects, or `None` when there are no options.
+    pub fn options_json(&self) -> Option<String> {
+        if self.options.is_empty() {
+            return None;
+        }
+        let arr: Vec<serde_json::Value> = self
+            .options
+            .iter()
+            .map(|o| serde_json::json!({"value": o.value, "label": o.label}))
+            .collect();
+        Some(serde_json::Value::Array(arr).to_string())
+    }
 }
 
 /// Fields to update on an existing workflow step.
@@ -354,5 +396,42 @@ mod tests {
         assert!(update.context_out.is_none());
         assert!(update.markers_out.is_none());
         assert!(update.structured_output.is_none());
+    }
+}
+
+#[cfg(test)]
+mod gate_info_tests {
+    use super::*;
+
+    fn info(options: Vec<GateOption>) -> GateStepInfo {
+        GateStepInfo {
+            gate_type: "human".into(),
+            prompt: Some("ok?".into()),
+            timeout_secs: 90,
+            options,
+        }
+    }
+
+    #[test]
+    fn timeout_text_format() {
+        assert_eq!(info(vec![]).timeout_text(), "90s");
+    }
+
+    #[test]
+    fn options_json_empty_is_none() {
+        assert_eq!(info(vec![]).options_json(), None);
+    }
+
+    #[test]
+    fn options_json_shape() {
+        let json = info(vec![GateOption {
+            value: "a".into(),
+            label: "Alpha".into(),
+        }])
+        .options_json()
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v[0]["value"], "a");
+        assert_eq!(v[0]["label"], "Alpha");
     }
 }

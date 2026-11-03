@@ -30,6 +30,18 @@ pub(super) fn insert_step_record(
     iteration: u32,
     retry_count: Option<i64>,
 ) -> crate::engine_error::Result<String> {
+    insert_step_inner(state, step_name, role, pos, iteration, retry_count, None)
+}
+
+fn insert_step_inner(
+    state: &crate::engine::ExecutionState,
+    step_name: &str,
+    role: &str,
+    pos: i64,
+    iteration: u32,
+    retry_count: Option<i64>,
+    gate: Option<crate::traits::persistence::GateStepInfo>,
+) -> crate::engine_error::Result<String> {
     use crate::traits::persistence::NewStep;
     state
         .persistence
@@ -41,6 +53,7 @@ pub(super) fn insert_step_record(
             position: pos,
             iteration: iteration as i64,
             retry_count,
+            gate,
         })
         .map_err(p_err)
 }
@@ -50,7 +63,6 @@ pub(super) fn insert_step_record(
 /// Used for terminal/transitional statuses set at insert time:
 /// gate dry-run (Completed), gate waiting (Waiting), parallel conditional-skip (Skipped).
 /// Returns the new step_id.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn insert_step_with_status(
     state: &crate::engine::ExecutionState,
     step_name: &str,
@@ -61,8 +73,34 @@ pub(super) fn insert_step_with_status(
     status: crate::status::WorkflowStepStatus,
     result_text: Option<String>,
 ) -> crate::engine_error::Result<String> {
+    insert_step_with_status_and_gate(
+        state,
+        step_name,
+        role,
+        pos,
+        iteration,
+        retry_count,
+        status,
+        result_text,
+        None,
+    )
+}
+
+/// Like [`insert_step_with_status`], but writes gate metadata in the same insert.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn insert_step_with_status_and_gate(
+    state: &crate::engine::ExecutionState,
+    step_name: &str,
+    role: &str,
+    pos: i64,
+    iteration: u32,
+    retry_count: Option<i64>,
+    status: crate::status::WorkflowStepStatus,
+    result_text: Option<String>,
+    gate: Option<crate::traits::persistence::GateStepInfo>,
+) -> crate::engine_error::Result<String> {
     use crate::traits::persistence::StepUpdate;
-    let step_id = insert_step_record(state, step_name, role, pos, iteration, retry_count)?;
+    let step_id = insert_step_inner(state, step_name, role, pos, iteration, retry_count, gate)?;
     let generation = state.expect_lease_generation();
     state.persistence.update_step(
         &step_id,

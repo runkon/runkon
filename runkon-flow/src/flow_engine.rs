@@ -2240,6 +2240,7 @@ mod tests {
                 position: 0,
                 iteration: 0,
                 retry_count: Some(0),
+                gate: None,
             })
             .unwrap();
         persistence
@@ -2347,6 +2348,7 @@ mod tests {
                 position,
                 iteration,
                 retry_count: Some(0),
+                gate: None,
             })
             .unwrap();
         persistence
@@ -2538,6 +2540,7 @@ mod tests {
                     position: 0,
                     iteration: 0,
                     retry_count: Some(0),
+                    gate: None,
                 })
                 .unwrap();
             persistence
@@ -2658,6 +2661,7 @@ mod tests {
                 position: 0,
                 iteration: 0,
                 retry_count: Some(0),
+                gate: None,
             })
             .unwrap();
         persistence
@@ -2746,6 +2750,7 @@ mod tests {
                 position: 0,
                 iteration: 0,
                 retry_count: Some(0),
+                gate: None,
             })
             .unwrap();
         persistence
@@ -2777,6 +2782,7 @@ mod tests {
                         position: iter * 2 + pos_offset + 1,
                         iteration: iter,
                         retry_count: Some(0),
+                        gate: None,
                     })
                     .unwrap();
                 persistence

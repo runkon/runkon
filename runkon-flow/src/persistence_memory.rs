@@ -341,13 +341,13 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
             context_out: None,
             markers_out: None,
             retry_count,
-            gate_type: None,
-            gate_prompt: None,
-            gate_timeout: None,
+            gate_type: new_step.gate.as_ref().map(|g| g.gate_type.clone()),
+            gate_prompt: new_step.gate.as_ref().and_then(|g| g.prompt.clone()),
+            gate_timeout: new_step.gate.as_ref().map(|g| g.timeout_text()),
             gate_approved_by: None,
             gate_approved_at: None,
             gate_feedback: None,
-            gate_options: None,
+            gate_options: new_step.gate.as_ref().and_then(|g| g.options_json()),
             gate_selections: None,
             fan_out_total: None,
             fan_out_completed: 0,
@@ -635,6 +635,7 @@ mod tests {
             position: 0,
             iteration: 0,
             retry_count: None,
+            gate: None,
         }
     }
 
@@ -708,6 +709,7 @@ mod tests {
                 position: 0,
                 iteration: 0,
                 retry_count: Some(0),
+                gate: None,
             })
             .unwrap();
 
@@ -715,6 +717,32 @@ mod tests {
         assert_eq!(steps[0].id, step_id);
         assert_eq!(steps[0].status, WorkflowStepStatus::Running);
         assert!(steps[0].started_at.is_some());
+    }
+
+    #[test]
+    fn test_insert_gate_step_persists_metadata() {
+        use crate::traits::persistence::{GateOption, GateStepInfo};
+        let p = InMemoryWorkflowPersistence::new();
+        let run = p.create_run(make_new_run("test")).unwrap();
+        let mut ns = make_new_step(&run.id, "g");
+        ns.gate = Some(GateStepInfo {
+            gate_type: "human".into(),
+            prompt: Some("ok?".into()),
+            timeout_secs: 30,
+            options: vec![GateOption {
+                value: "a".into(),
+                label: "Alpha".into(),
+            }],
+        });
+        p.insert_step(ns).unwrap();
+        let steps = p.get_steps(&run.id).unwrap();
+        assert_eq!(steps[0].gate_type.as_deref(), Some("human"));
+        assert_eq!(steps[0].gate_prompt.as_deref(), Some("ok?"));
+        assert_eq!(steps[0].gate_timeout.as_deref(), Some("30s"));
+        assert_eq!(
+            steps[0].gate_options.as_deref(),
+            Some(r#"[{"label":"Alpha","value":"a"}]"#)
+        );
     }
 
     #[test]

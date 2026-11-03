@@ -7,7 +7,7 @@ use crate::engine::{emit_event, ExecutionState};
 use crate::engine_error::{EngineError, Result};
 use crate::events::EngineEvent;
 use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
-use crate::traits::persistence::{GateApprovalState, StepUpdate};
+use crate::traits::persistence::{GateApprovalState, GateOption, GateStepInfo, StepUpdate};
 
 fn resume_run_status(state: &ExecutionState, gate_name: &str, context: &str) {
     if let Err(e) = state.persistence.update_run_status(
@@ -20,57 +20,8 @@ fn resume_run_status(state: &ExecutionState, gate_name: &str, context: &str) {
     }
 }
 
-pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32) -> Result<()> {
-    let pos = state.position;
-    state.position += 1;
-
-    // Skip completed gates on resume — restore feedback for downstream steps
-    if super::skip_if_already_completed(state, &node.name, iteration, &node.name) {
-        return Ok(());
-    }
-
-    // Quality gates evaluate immediately — no blocking/waiting.
-    if node.gate_type == QUALITY_GATE_TYPE {
-        return execute_quality_gate(state, node, pos, iteration);
-    }
-
-    // Dry-run: auto-approve all gates
-    if state.exec_config.dry_run {
-        tracing::info!("gate '{}': dry-run auto-approved", node.name);
-        super::insert_step_with_status(
-            state,
-            &node.name,
-            "reviewer",
-            pos,
-            iteration,
-            None,
-            WorkflowStepStatus::Completed,
-            Some("dry-run: auto-approved".to_string()),
-        )?;
-        return Ok(());
-    }
-
-    // Insert step and mark as waiting
-    let step_id = super::insert_step_with_status(
-        state,
-        &node.name,
-        "gate",
-        pos,
-        iteration,
-        None,
-        WorkflowStepStatus::Waiting,
-        None,
-    )?;
-
-    emit_event(
-        state,
-        EngineEvent::GateWaiting {
-            gate_name: node.name.clone(),
-        },
-    );
-
-    // Resolve gate options (if any) — stored for future use by gate resolvers
-    let _resolved_options: HashMap<String, String> = if let Some(ref gate_opts) = node.options {
+fn resolve_gate_options(state: &ExecutionState, node: &GateNode) -> Result<Vec<GateOption>> {
+    let map: HashMap<String, String> = if let Some(ref gate_opts) = node.options {
         match gate_opts {
             GateOptions::Static(map) => map.clone(),
             GateOptions::StepRef(dotted) => {
@@ -114,6 +65,72 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
     } else {
         HashMap::new()
     };
+    let mut options: Vec<GateOption> = map
+        .into_iter()
+        .map(|(value, label)| GateOption { value, label })
+        .collect();
+    options.sort_by(|a, b| a.value.cmp(&b.value));
+    Ok(options)
+}
+
+pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32) -> Result<()> {
+    let pos = state.position;
+    state.position += 1;
+
+    // Skip completed gates on resume — restore feedback for downstream steps
+    if super::skip_if_already_completed(state, &node.name, iteration, &node.name) {
+        return Ok(());
+    }
+
+    // Quality gates evaluate immediately — no blocking/waiting.
+    if node.gate_type == QUALITY_GATE_TYPE {
+        return execute_quality_gate(state, node, pos, iteration);
+    }
+
+    // Dry-run: auto-approve all gates
+    if state.exec_config.dry_run {
+        tracing::info!("gate '{}': dry-run auto-approved", node.name);
+        super::insert_step_with_status(
+            state,
+            &node.name,
+            "reviewer",
+            pos,
+            iteration,
+            None,
+            WorkflowStepStatus::Completed,
+            Some("dry-run: auto-approved".to_string()),
+        )?;
+        return Ok(());
+    }
+
+    // Resolve options first so a bad StepRef fails before any row or event exists.
+    let options = resolve_gate_options(state, node)?;
+    let gate_info = GateStepInfo {
+        gate_type: node.gate_type.clone(),
+        prompt: node.prompt.clone(),
+        timeout_secs: node.timeout_secs,
+        options,
+    };
+
+    // Insert step (with gate metadata) and mark as waiting
+    let step_id = super::insert_step_with_status_and_gate(
+        state,
+        &node.name,
+        "gate",
+        pos,
+        iteration,
+        None,
+        WorkflowStepStatus::Waiting,
+        None,
+        Some(gate_info),
+    )?;
+
+    emit_event(
+        state,
+        EngineEvent::GateWaiting {
+            gate_name: node.name.clone(),
+        },
+    );
 
     tracing::info!("Gate '{}' waiting (type = {})", node.name, node.gate_type);
 
