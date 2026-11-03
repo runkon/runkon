@@ -318,3 +318,49 @@ impl crate::traits::persistence::WorkflowPersistence for CountingPersistence {
         self.inner.get_fan_out_items(step_run_id, f)
     }
 }
+
+/// Insert a step row on `run` at `iteration` (retry 0) and apply `update` to it.
+pub fn seed_step_with(
+    p: &crate::persistence_memory::InMemoryWorkflowPersistence,
+    run: &str,
+    name: &str,
+    position: i64,
+    iteration: i64,
+    update: crate::traits::persistence::StepUpdate,
+) {
+    use crate::traits::persistence::{NewStep, WorkflowPersistence};
+    let id = p
+        .insert_step(NewStep {
+            workflow_run_id: run.to_string(),
+            step_name: name.to_string(),
+            role: "actor".to_string(),
+            can_commit: false,
+            position,
+            iteration,
+            retry_count: Some(0),
+            gate: None,
+        })
+        .unwrap();
+    p.update_step(&id, update).unwrap();
+}
+
+/// A `StepUpdate` with an arbitrary status and optional error/result fields, for
+/// states the `completed`/`failed` constructors cannot express (a `TimedOut` step,
+/// a failure with only `result_text`, or with neither field).
+pub fn bare_step_update(
+    status: crate::status::WorkflowStepStatus,
+    step_error: Option<&str>,
+    result_text: Option<&str>,
+) -> crate::traits::persistence::StepUpdate {
+    crate::traits::persistence::StepUpdate {
+        generation: 0,
+        status,
+        child_run_id: None,
+        result_text: result_text.map(str::to_string),
+        context_out: None,
+        markers_out: None,
+        retry_count: Some(0),
+        structured_output: None,
+        step_error: step_error.map(str::to_string),
+    }
+}
