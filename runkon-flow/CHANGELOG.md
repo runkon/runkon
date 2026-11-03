@@ -1,5 +1,13 @@
 # Changelog — runkon-flow
 
+## 0.8.1 — Fixed
+
+- **Fixed:** `SqliteWorkflowPersistence::insert_step` stores `retry_count` 0 for a step
+  inserted with `retry_count: None` (pending steps, including every waiting human gate),
+  instead of NULL. In 0.8.0-alpha those inserts failed with
+  `NOT NULL constraint failed: workflow_run_steps.retry_count` on any SQLite host, so a
+  workflow that reached a gate could not continue.
+
 ## 0.8.0 — Breaking
 
 - **Added:** a failed `call workflow` step now records the child's failing step and its

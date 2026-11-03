@@ -21,7 +21,7 @@ The crate is harness-neutral: no Anthropic-specific, GitHub-specific, or otherwi
 
 ```toml
 [dependencies]
-runkon-flow = "0.8.0-alpha"
+runkon-flow = "0.8.1-alpha"
 ```
 
 Optional features:
