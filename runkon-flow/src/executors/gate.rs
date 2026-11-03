@@ -7,7 +7,7 @@ use crate::engine::{emit_event, ExecutionState};
 use crate::engine_error::{EngineError, Result};
 use crate::events::EngineEvent;
 use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
-use crate::traits::persistence::{GateApprovalState, StepUpdate};
+use crate::traits::persistence::{GateApprovalState, GateOption, GateStepInfo, StepUpdate};
 
 fn resume_run_status(state: &ExecutionState, gate_name: &str, context: &str) {
     if let Err(e) = state.persistence.update_run_status(
@@ -20,57 +20,8 @@ fn resume_run_status(state: &ExecutionState, gate_name: &str, context: &str) {
     }
 }
 
-pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32) -> Result<()> {
-    let pos = state.position;
-    state.position += 1;
-
-    // Skip completed gates on resume — restore feedback for downstream steps
-    if super::skip_if_already_completed(state, &node.name, iteration, &node.name) {
-        return Ok(());
-    }
-
-    // Quality gates evaluate immediately — no blocking/waiting.
-    if node.gate_type == QUALITY_GATE_TYPE {
-        return execute_quality_gate(state, node, pos, iteration);
-    }
-
-    // Dry-run: auto-approve all gates
-    if state.exec_config.dry_run {
-        tracing::info!("gate '{}': dry-run auto-approved", node.name);
-        super::insert_step_with_status(
-            state,
-            &node.name,
-            "reviewer",
-            pos,
-            iteration,
-            None,
-            WorkflowStepStatus::Completed,
-            Some("dry-run: auto-approved".to_string()),
-        )?;
-        return Ok(());
-    }
-
-    // Insert step and mark as waiting
-    let step_id = super::insert_step_with_status(
-        state,
-        &node.name,
-        "gate",
-        pos,
-        iteration,
-        None,
-        WorkflowStepStatus::Waiting,
-        None,
-    )?;
-
-    emit_event(
-        state,
-        EngineEvent::GateWaiting {
-            gate_name: node.name.clone(),
-        },
-    );
-
-    // Resolve gate options (if any) — stored for future use by gate resolvers
-    let _resolved_options: HashMap<String, String> = if let Some(ref gate_opts) = node.options {
+fn resolve_gate_options(state: &ExecutionState, node: &GateNode) -> Result<Vec<GateOption>> {
+    let map: HashMap<String, String> = if let Some(ref gate_opts) = node.options {
         match gate_opts {
             GateOptions::Static(map) => map.clone(),
             GateOptions::StepRef(dotted) => {
@@ -107,13 +58,91 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
                     ))
                 })?;
                 obj.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect()
+                    .map(|(k, v)| {
+                        v.as_str().map(|s| (k.clone(), s.to_string())).ok_or_else(|| {
+                            EngineError::Workflow(format!(
+                                "Gate '{}': option '{k}' in field '{field_key}' of step '{step_key}' structured_output is not a string",
+                                node.name
+                            ))
+                        })
+                    })
+                    .collect::<Result<HashMap<String, String>>>()?
             }
         }
     } else {
         HashMap::new()
     };
+    let mut options: Vec<GateOption> = map
+        .into_iter()
+        .map(|(value, label)| GateOption { value, label })
+        .collect();
+    options.sort_by(|a, b| a.value.cmp(&b.value));
+    Ok(options)
+}
+
+pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32) -> Result<()> {
+    let pos = state.position;
+    state.position += 1;
+
+    // Skip completed gates on resume — restore feedback for downstream steps
+    if super::skip_if_already_completed(state, &node.name, iteration, &node.name) {
+        return Ok(());
+    }
+
+    // Quality gates evaluate immediately — no blocking/waiting.
+    if node.gate_type == QUALITY_GATE_TYPE {
+        return execute_quality_gate(state, node, pos, iteration);
+    }
+
+    // Dry-run: auto-approve all gates
+    if state.exec_config.dry_run {
+        tracing::info!("gate '{}': dry-run auto-approved", node.name);
+        super::insert_step_with_status(
+            state,
+            super::StepSpec {
+                step_name: &node.name,
+                role: "reviewer",
+                pos,
+                iteration,
+                retry_count: None,
+                status: WorkflowStepStatus::Completed,
+                result_text: Some("dry-run: auto-approved".to_string()),
+                gate: None,
+            },
+        )?;
+        return Ok(());
+    }
+
+    // Resolve options first so a bad StepRef fails before any row or event exists.
+    let options = resolve_gate_options(state, node)?;
+    let gate_info = GateStepInfo {
+        gate_type: node.gate_type.clone(),
+        prompt: node.prompt.clone(),
+        timeout_secs: node.timeout_secs,
+        options,
+    };
+
+    // Insert step (with gate metadata) and mark as waiting
+    let step_id = super::insert_step_with_status(
+        state,
+        super::StepSpec {
+            step_name: &node.name,
+            role: "gate",
+            pos,
+            iteration,
+            retry_count: None,
+            status: WorkflowStepStatus::Waiting,
+            result_text: None,
+            gate: Some(gate_info),
+        },
+    )?;
+
+    emit_event(
+        state,
+        EngineEvent::GateWaiting {
+            gate_name: node.name.clone(),
+        },
+    );
 
     tracing::info!("Gate '{}' waiting (type = {})", node.name, node.gate_type);
 
@@ -370,5 +399,147 @@ pub fn handle_gate_timeout(
             resume_run_status(state, &node.name, "after timeout (continue)");
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::dsl::{ApprovalMode, GateNode, GateOptions, OnTimeout};
+    use crate::events::EventSink;
+    use crate::test_helpers::{
+        make_test_execution_state, CountingPersistence, ForwardSink, VecSink,
+    };
+    use crate::traits::persistence::{NewRun, WorkflowPersistence};
+    use crate::types::StepResult;
+
+    fn gate_node(options: Option<GateOptions>, timeout_secs: u64) -> GateNode {
+        GateNode {
+            name: "approve".into(),
+            gate_type: "human_approval".into(),
+            prompt: Some("ship it?".into()),
+            min_approvals: 1,
+            approval_mode: ApprovalMode::default(),
+            timeout_secs,
+            on_timeout: OnTimeout::Fail,
+            as_identity: None,
+            quality_gate: None,
+            options,
+        }
+    }
+
+    fn make_state(sink: Arc<VecSink>) -> (ExecutionState, Arc<CountingPersistence>, String) {
+        let cp = Arc::new(CountingPersistence::new());
+        let run_id = cp
+            .create_run(NewRun {
+                workflow_name: "wf".to_string(),
+                parent_run_id: String::new(),
+                dry_run: false,
+                trigger: "manual".to_string(),
+                definition_snapshot: None,
+                parent_workflow_run_id: None,
+            })
+            .unwrap()
+            .id;
+        let p: Arc<dyn WorkflowPersistence> = Arc::clone(&cp) as _;
+        let mut state = make_test_execution_state(p, run_id.clone());
+        state.event_sinks = Arc::from(vec![Arc::new(ForwardSink(sink)) as Arc<dyn EventSink>]);
+        (state, cp, run_id)
+    }
+
+    fn with_structured(state: &mut ExecutionState, json: &str) {
+        state.step_results.insert(
+            "prev".into(),
+            StepResult {
+                step_name: "prev".into(),
+                structured_output: Some(json.into()),
+                ..StepResult::default()
+            },
+        );
+    }
+
+    fn step_ref(s: &str) -> Option<GateOptions> {
+        Some(GateOptions::StepRef(s.into()))
+    }
+
+    #[test]
+    fn execute_gate_persists_gate_metadata_at_insert() {
+        let (mut state, cp, run_id) = make_state(VecSink::new());
+        let mut opts = HashMap::new();
+        opts.insert("b".to_string(), "Beta".to_string());
+        opts.insert("a".to_string(), "Alpha".to_string());
+        let node = gate_node(Some(GateOptions::Static(opts)), 0);
+        // timeout_secs = 0 → the poll loop times out immediately; we only care about the row.
+        let _ = execute_gate(&mut state, &node, 0);
+        let steps = cp.get_steps(&run_id).unwrap();
+        assert_eq!(steps.len(), 1);
+        let s = &steps[0];
+        assert_eq!(s.gate_type.as_deref(), Some("human_approval"));
+        assert_eq!(s.gate_prompt.as_deref(), Some("ship it?"));
+        assert_eq!(s.gate_timeout.as_deref(), Some("0s"));
+        assert_eq!(
+            s.gate_options.as_deref(),
+            Some(r#"[{"label":"Alpha","value":"a"},{"label":"Beta","value":"b"}]"#)
+        );
+    }
+
+    #[test]
+    fn unresolvable_step_ref_fails_before_any_row_or_event() {
+        let cases: [(&str, Option<&str>); 5] = [
+            ("nodot", None),
+            ("missing.field", None),
+            ("prev.field", None), // no structured_output
+            ("prev.field", Some("not json")),
+            ("prev.field", Some(r#"{"field": "scalar"}"#)),
+        ];
+        for (dotted, structured) in cases {
+            let sink = VecSink::new();
+            let (mut state, cp, run_id) = make_state(Arc::clone(&sink));
+            if dotted.starts_with("prev") {
+                state.step_results.insert(
+                    "prev".into(),
+                    StepResult {
+                        step_name: "prev".into(),
+                        structured_output: structured.map(String::from),
+                        ..StepResult::default()
+                    },
+                );
+            }
+            let node = gate_node(step_ref(dotted), 0);
+            let err = execute_gate(&mut state, &node, 0);
+            assert!(err.is_err(), "{dotted} / {structured:?} should fail");
+            assert!(cp.get_steps(&run_id).unwrap().is_empty());
+            assert!(!sink
+                .collected()
+                .iter()
+                .any(|e| matches!(e.event, EngineEvent::GateWaiting { .. })));
+        }
+    }
+
+    #[test]
+    fn step_ref_options_are_resolved_and_sorted() {
+        let (mut state, _cp, _id) = make_state(VecSink::new());
+        with_structured(&mut state, r#"{"field": {"z": "Zed", "a": "Alpha"}}"#);
+        let opts = resolve_gate_options(&state, &gate_node(step_ref("prev.field"), 0)).unwrap();
+        let got: Vec<(&str, &str)> = opts
+            .iter()
+            .map(|o| (o.value.as_str(), o.label.as_str()))
+            .collect();
+        assert_eq!(got, vec![("a", "Alpha"), ("z", "Zed")]);
+    }
+
+    #[test]
+    fn step_ref_non_string_option_value_is_an_error() {
+        let (mut state, _cp, _id) = make_state(VecSink::new());
+        with_structured(&mut state, r#"{"field": {"a": "Alpha", "bad": 3}}"#);
+        let err = resolve_gate_options(&state, &gate_node(step_ref("prev.field"), 0)).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("'bad'") && msg.contains("not a string"),
+            "{msg}"
+        );
     }
 }

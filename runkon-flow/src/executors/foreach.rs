@@ -1230,6 +1230,7 @@ mod tests {
                         position: 0,
                         iteration: 0,
                         retry_count: Some(0),
+                        gate: None,
                     })
                     .unwrap();
                 self.persistence
@@ -1417,6 +1418,7 @@ mod tests {
                             position: 0,
                             iteration: 0,
                             retry_count: Some(0),
+                            gate: None,
                         })
                         .unwrap();
                     self.persistence

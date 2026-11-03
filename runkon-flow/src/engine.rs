@@ -1756,6 +1756,7 @@ mod tests {
                 position: 2,
                 iteration: 0,
                 retry_count: Some(0),
+                gate: None,
             })
             .unwrap();
         let step_a = p
@@ -1767,6 +1768,7 @@ mod tests {
                 position: 1,
                 iteration: 0,
                 retry_count: Some(0),
+                gate: None,
             })
             .unwrap();
 
