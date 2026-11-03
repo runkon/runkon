@@ -5,11 +5,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use runkon_flow::dsl::{
-    ApprovalMode, GateNode, OnFailAction, OnTimeout, QualityGateConfig, WorkflowNode,
+    ApprovalMode, GateNode, GateOptions, OnFailAction, OnTimeout, QualityGateConfig, WorkflowNode,
     QUALITY_GATE_TYPE,
 };
 use runkon_flow::engine_error::EngineError;
-use runkon_flow::status::WorkflowStepStatus;
+use runkon_flow::status::{WorkflowRunStatus, WorkflowStepStatus};
 use runkon_flow::traits::action_executor::ActionOutput;
 use runkon_flow::traits::gate_resolver::{GateParams, GatePoll, GateResolver};
 use runkon_flow::traits::persistence::WorkflowPersistence;
@@ -501,6 +501,75 @@ impl common::ActionExecutor for StructuredOutputExecutor {
             ..Default::default()
         })
     }
+}
+
+// ---------------------------------------------------------------------------
+// Gate options StepRef that cannot be resolved → no waiting row, no event
+// ---------------------------------------------------------------------------
+
+#[test]
+fn human_gate_with_unresolvable_options_step_ref_writes_no_row() {
+    let sink = VecSink::new();
+    let engine = FlowEngineBuilder::new()
+        .gate_resolver(StubApprovalResolver)
+        .action(Box::new(StructuredOutputExecutor {
+            label: "prior".to_string(),
+            confidence: 90,
+        }))
+        .event_sink(Box::new(ForwardSink(Arc::clone(&sink))))
+        .build()
+        .expect("engine build failed");
+
+    // `prior` emits {"confidence": 90}, so `prior.choices` names a missing field.
+    let mut gate = gate_node("approval");
+    if let WorkflowNode::Gate(g) = &mut gate {
+        g.options = Some(GateOptions::StepRef("prior.choices".to_string()));
+    }
+    let def = make_def("gate-stepref-missing", vec![call_node("prior"), gate]);
+
+    let persistence = make_persistence();
+    let mut state = make_state(
+        "gate-stepref-missing",
+        Arc::clone(&persistence),
+        named_executors([Box::new(StructuredOutputExecutor {
+            label: "prior".to_string(),
+            confidence: 90,
+        }) as Box<dyn ActionExecutor>]),
+    );
+    let run_id = state.workflow_run_id.clone();
+
+    let result = engine
+        .run(&def, &mut state)
+        .expect("run returns Ok on a body error");
+    assert!(
+        !result.all_succeeded,
+        "unresolvable options StepRef should fail the run"
+    );
+
+    let run = persistence
+        .get_run(&run_id)
+        .expect("get_run failed")
+        .expect("run should exist");
+    assert_eq!(run.status, WorkflowRunStatus::Failed);
+
+    let steps = persistence.get_steps(&run_id).expect("get_steps failed");
+    assert!(
+        steps.iter().any(|s| s.step_name == "prior"),
+        "run should have reached the gate (prior step recorded)"
+    );
+    assert!(
+        !steps.iter().any(|s| s.step_name == "approval"),
+        "no gate step row should be written; got: {:?}",
+        steps.iter().map(|s| &s.step_name).collect::<Vec<_>>()
+    );
+
+    let events = sink.collected();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.event, runkon_flow::EngineEvent::GateWaiting { .. })),
+        "no GateWaiting event should be emitted"
+    );
 }
 
 // ---------------------------------------------------------------------------
