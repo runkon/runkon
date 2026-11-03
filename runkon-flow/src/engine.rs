@@ -1847,12 +1847,20 @@ mod tests {
             .unwrap();
         match fail {
             Some(err) => p
-                .update_step(&id, StepUpdate::failed(0, err.to_string(), retry))
+                .update_step(&id, StepUpdate::failed(0, err.to_string(), retry as u32))
                 .unwrap(),
             None => p
                 .update_step(
                     &id,
-                    StepUpdate::completed(0, None, Some("ok".into()), None, None, retry, None),
+                    StepUpdate::completed(
+                        0,
+                        None,
+                        Some("ok".into()),
+                        None,
+                        None,
+                        retry as u32,
+                        None,
+                    ),
                 )
                 .unwrap(),
         }
