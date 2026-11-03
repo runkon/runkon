@@ -715,57 +715,35 @@ impl WorkflowPersistence for SqliteWorkflowPersistence {
     fn insert_step(&self, new_step: NewStep) -> Result<String, EngineError> {
         let conn = self.lock()?;
         let id = new_id();
-        let gate_type = new_step.gate.as_ref().map(|g| g.gate_type.clone());
-        let gate_prompt = new_step.gate.as_ref().and_then(|g| g.prompt.clone());
-        let gate_timeout = new_step.gate.as_ref().map(|g| g.timeout_text());
-        let gate_options = new_step.gate.as_ref().and_then(|g| g.options_json());
-        if let Some(retry_count) = new_step.retry_count {
-            let now = Utc::now().to_rfc3339();
-            conn.execute(
-                "INSERT INTO workflow_run_steps \
-                 (id, workflow_run_id, step_name, role, can_commit, status, position, iteration, \
-                  started_at, retry_count, gate_type, gate_prompt, gate_timeout, gate_options) \
-                 VALUES (:id, :workflow_run_id, :step_name, :role, :can_commit, 'running', :position, :iteration, :started_at, :retry_count, :gate_type, :gate_prompt, :gate_timeout, :gate_options)",
-                named_params![
-                    ":id": id,
-                    ":workflow_run_id": new_step.workflow_run_id,
-                    ":step_name": new_step.step_name,
-                    ":role": new_step.role,
-                    ":can_commit": new_step.can_commit as i64,
-                    ":position": new_step.position,
-                    ":iteration": new_step.iteration,
-                    ":started_at": now,
-                    ":retry_count": retry_count,
-                    ":gate_type": gate_type,
-                    ":gate_prompt": gate_prompt,
-                    ":gate_timeout": gate_timeout,
-                    ":gate_options": gate_options,
-                ],
-            )
-            .map_err(db_err)?;
-        } else {
-            conn.execute(
-                "INSERT INTO workflow_run_steps \
-                 (id, workflow_run_id, step_name, role, can_commit, status, position, iteration, \
-                  gate_type, gate_prompt, gate_timeout, gate_options) \
-                 VALUES (:id, :workflow_run_id, :step_name, :role, :can_commit, :status, :position, :iteration, :gate_type, :gate_prompt, :gate_timeout, :gate_options)",
-                named_params![
-                    ":id": id,
-                    ":workflow_run_id": new_step.workflow_run_id,
-                    ":step_name": new_step.step_name,
-                    ":role": new_step.role,
-                    ":can_commit": new_step.can_commit as i64,
-                    ":status": "pending",
-                    ":position": new_step.position,
-                    ":iteration": new_step.iteration,
-                    ":gate_type": gate_type,
-                    ":gate_prompt": gate_prompt,
-                    ":gate_timeout": gate_timeout,
-                    ":gate_options": gate_options,
-                ],
-            )
-            .map_err(db_err)?;
-        }
+        let gate = new_step.gate_columns();
+        // retry_count Some -> running with started_at set atomically; None -> pending.
+        let (status, started_at, retry_count) = match new_step.retry_count {
+            Some(rc) => ("running", Some(Utc::now().to_rfc3339()), Some(rc)),
+            None => ("pending", None, None),
+        };
+        conn.execute(
+            "INSERT INTO workflow_run_steps \
+             (id, workflow_run_id, step_name, role, can_commit, status, position, iteration, \
+              started_at, retry_count, gate_type, gate_prompt, gate_timeout, gate_options) \
+             VALUES (:id, :workflow_run_id, :step_name, :role, :can_commit, :status, :position, :iteration, :started_at, :retry_count, :gate_type, :gate_prompt, :gate_timeout, :gate_options)",
+            named_params![
+                ":id": id,
+                ":workflow_run_id": new_step.workflow_run_id,
+                ":step_name": new_step.step_name,
+                ":role": new_step.role,
+                ":can_commit": new_step.can_commit as i64,
+                ":status": status,
+                ":position": new_step.position,
+                ":iteration": new_step.iteration,
+                ":started_at": started_at,
+                ":retry_count": retry_count,
+                ":gate_type": gate.gate_type,
+                ":gate_prompt": gate.gate_prompt,
+                ":gate_timeout": gate.gate_timeout,
+                ":gate_options": gate.gate_options,
+            ],
+        )
+        .map_err(db_err)?;
         Ok(id)
     }
 
@@ -1227,6 +1205,16 @@ mod tests {
                 }),
                 None,
             ),
+            (
+                "g_running",
+                Some(GateStepInfo {
+                    gate_type: "human".into(),
+                    prompt: None,
+                    timeout_secs: 5,
+                    options: vec![],
+                }),
+                Some(0),
+            ),
             ("plain", None, Some(0)),
         ] {
             p.insert_step(NewStep {
@@ -1250,6 +1238,12 @@ mod tests {
             g.gate_options.as_deref(),
             Some(r#"[{"label":"Alpha","value":"a"}]"#)
         );
+        let gr = steps.iter().find(|s| s.step_name == "g_running").unwrap();
+        assert_eq!(gr.status, crate::status::WorkflowStepStatus::Running);
+        assert_eq!(gr.gate_type.as_deref(), Some("human"));
+        assert!(gr.gate_prompt.is_none());
+        assert_eq!(gr.gate_timeout.as_deref(), Some("5s"));
+        assert!(gr.gate_options.is_none());
         let plain = steps.iter().find(|s| s.step_name == "plain").unwrap();
         assert!(plain.gate_type.is_none() && plain.gate_options.is_none());
     }

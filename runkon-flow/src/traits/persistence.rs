@@ -55,6 +55,32 @@ pub struct GateStepInfo {
     pub options: Vec<GateOption>,
 }
 
+/// The four gate columns of a step row, derived from [`NewStep::gate`].
+/// All `None` for non-gate steps. Backends destructure this instead of
+/// re-deriving each column.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct GateColumns {
+    pub gate_type: Option<String>,
+    pub gate_prompt: Option<String>,
+    pub gate_timeout: Option<String>,
+    pub gate_options: Option<String>,
+}
+
+impl NewStep {
+    /// Gate column values to write with this step's row.
+    pub fn gate_columns(&self) -> GateColumns {
+        match &self.gate {
+            Some(g) => GateColumns {
+                gate_type: Some(g.gate_type.clone()),
+                gate_prompt: g.prompt.clone(),
+                gate_timeout: Some(g.timeout_text()),
+                gate_options: g.options_json(),
+            },
+            None => GateColumns::default(),
+        }
+    }
+}
+
 impl GateStepInfo {
     /// Column format for `gate_timeout`: `"{secs}s"`.
     pub fn timeout_text(&self) -> String {

@@ -58,8 +58,15 @@ fn resolve_gate_options(state: &ExecutionState, node: &GateNode) -> Result<Vec<G
                     ))
                 })?;
                 obj.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect()
+                    .map(|(k, v)| {
+                        v.as_str().map(|s| (k.clone(), s.to_string())).ok_or_else(|| {
+                            EngineError::Workflow(format!(
+                                "Gate '{}': option '{k}' in field '{field_key}' of step '{step_key}' structured_output is not a string",
+                                node.name
+                            ))
+                        })
+                    })
+                    .collect::<Result<HashMap<String, String>>>()?
             }
         }
     } else {
@@ -92,13 +99,16 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
         tracing::info!("gate '{}': dry-run auto-approved", node.name);
         super::insert_step_with_status(
             state,
-            &node.name,
-            "reviewer",
-            pos,
-            iteration,
-            None,
-            WorkflowStepStatus::Completed,
-            Some("dry-run: auto-approved".to_string()),
+            super::StepSpec {
+                step_name: &node.name,
+                role: "reviewer",
+                pos,
+                iteration,
+                retry_count: None,
+                status: WorkflowStepStatus::Completed,
+                result_text: Some("dry-run: auto-approved".to_string()),
+                gate: None,
+            },
         )?;
         return Ok(());
     }
@@ -113,16 +123,18 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
     };
 
     // Insert step (with gate metadata) and mark as waiting
-    let step_id = super::insert_step_with_status_and_gate(
+    let step_id = super::insert_step_with_status(
         state,
-        &node.name,
-        "gate",
-        pos,
-        iteration,
-        None,
-        WorkflowStepStatus::Waiting,
-        None,
-        Some(gate_info),
+        super::StepSpec {
+            step_name: &node.name,
+            role: "gate",
+            pos,
+            iteration,
+            retry_count: None,
+            status: WorkflowStepStatus::Waiting,
+            result_text: None,
+            gate: Some(gate_info),
+        },
     )?;
 
     emit_event(
@@ -387,5 +399,147 @@ pub fn handle_gate_timeout(
             resume_run_status(state, &node.name, "after timeout (continue)");
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::dsl::{ApprovalMode, GateNode, GateOptions, OnTimeout};
+    use crate::events::EventSink;
+    use crate::test_helpers::{
+        make_test_execution_state, CountingPersistence, ForwardSink, VecSink,
+    };
+    use crate::traits::persistence::{NewRun, WorkflowPersistence};
+    use crate::types::StepResult;
+
+    fn gate_node(options: Option<GateOptions>, timeout_secs: u64) -> GateNode {
+        GateNode {
+            name: "approve".into(),
+            gate_type: "human_approval".into(),
+            prompt: Some("ship it?".into()),
+            min_approvals: 1,
+            approval_mode: ApprovalMode::default(),
+            timeout_secs,
+            on_timeout: OnTimeout::Fail,
+            as_identity: None,
+            quality_gate: None,
+            options,
+        }
+    }
+
+    fn make_state(sink: Arc<VecSink>) -> (ExecutionState, Arc<CountingPersistence>, String) {
+        let cp = Arc::new(CountingPersistence::new());
+        let run_id = cp
+            .create_run(NewRun {
+                workflow_name: "wf".to_string(),
+                parent_run_id: String::new(),
+                dry_run: false,
+                trigger: "manual".to_string(),
+                definition_snapshot: None,
+                parent_workflow_run_id: None,
+            })
+            .unwrap()
+            .id;
+        let p: Arc<dyn WorkflowPersistence> = Arc::clone(&cp) as _;
+        let mut state = make_test_execution_state(p, run_id.clone());
+        state.event_sinks = Arc::from(vec![Arc::new(ForwardSink(sink)) as Arc<dyn EventSink>]);
+        (state, cp, run_id)
+    }
+
+    fn with_structured(state: &mut ExecutionState, json: &str) {
+        state.step_results.insert(
+            "prev".into(),
+            StepResult {
+                step_name: "prev".into(),
+                structured_output: Some(json.into()),
+                ..StepResult::default()
+            },
+        );
+    }
+
+    fn step_ref(s: &str) -> Option<GateOptions> {
+        Some(GateOptions::StepRef(s.into()))
+    }
+
+    #[test]
+    fn execute_gate_persists_gate_metadata_at_insert() {
+        let (mut state, cp, run_id) = make_state(VecSink::new());
+        let mut opts = HashMap::new();
+        opts.insert("b".to_string(), "Beta".to_string());
+        opts.insert("a".to_string(), "Alpha".to_string());
+        let node = gate_node(Some(GateOptions::Static(opts)), 0);
+        // timeout_secs = 0 → the poll loop times out immediately; we only care about the row.
+        let _ = execute_gate(&mut state, &node, 0);
+        let steps = cp.get_steps(&run_id).unwrap();
+        assert_eq!(steps.len(), 1);
+        let s = &steps[0];
+        assert_eq!(s.gate_type.as_deref(), Some("human_approval"));
+        assert_eq!(s.gate_prompt.as_deref(), Some("ship it?"));
+        assert_eq!(s.gate_timeout.as_deref(), Some("0s"));
+        assert_eq!(
+            s.gate_options.as_deref(),
+            Some(r#"[{"label":"Alpha","value":"a"},{"label":"Beta","value":"b"}]"#)
+        );
+    }
+
+    #[test]
+    fn unresolvable_step_ref_fails_before_any_row_or_event() {
+        let cases: [(&str, Option<&str>); 5] = [
+            ("nodot", None),
+            ("missing.field", None),
+            ("prev.field", None), // no structured_output
+            ("prev.field", Some("not json")),
+            ("prev.field", Some(r#"{"field": "scalar"}"#)),
+        ];
+        for (dotted, structured) in cases {
+            let sink = VecSink::new();
+            let (mut state, cp, run_id) = make_state(Arc::clone(&sink));
+            if dotted.starts_with("prev") {
+                state.step_results.insert(
+                    "prev".into(),
+                    StepResult {
+                        step_name: "prev".into(),
+                        structured_output: structured.map(String::from),
+                        ..StepResult::default()
+                    },
+                );
+            }
+            let node = gate_node(step_ref(dotted), 0);
+            let err = execute_gate(&mut state, &node, 0);
+            assert!(err.is_err(), "{dotted} / {structured:?} should fail");
+            assert!(cp.get_steps(&run_id).unwrap().is_empty());
+            assert!(!sink
+                .collected()
+                .iter()
+                .any(|e| matches!(e.event, EngineEvent::GateWaiting { .. })));
+        }
+    }
+
+    #[test]
+    fn step_ref_options_are_resolved_and_sorted() {
+        let (mut state, _cp, _id) = make_state(VecSink::new());
+        with_structured(&mut state, r#"{"field": {"z": "Zed", "a": "Alpha"}}"#);
+        let opts = resolve_gate_options(&state, &gate_node(step_ref("prev.field"), 0)).unwrap();
+        let got: Vec<(&str, &str)> = opts
+            .iter()
+            .map(|o| (o.value.as_str(), o.label.as_str()))
+            .collect();
+        assert_eq!(got, vec![("a", "Alpha"), ("z", "Zed")]);
+    }
+
+    #[test]
+    fn step_ref_non_string_option_value_is_an_error() {
+        let (mut state, _cp, _id) = make_state(VecSink::new());
+        with_structured(&mut state, r#"{"field": {"a": "Alpha", "bad": 3}}"#);
+        let err = resolve_gate_options(&state, &gate_node(step_ref("prev.field"), 0)).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("'bad'") && msg.contains("not a string"),
+            "{msg}"
+        );
     }
 }

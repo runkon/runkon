@@ -322,6 +322,7 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
         } else {
             (WorkflowStepStatus::Pending, None, 0)
         };
+        let gate_cols = new_step.gate_columns();
         let step = WorkflowRunStep {
             id: id.clone(),
             workflow_run_id: new_step.workflow_run_id,
@@ -341,13 +342,13 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
             context_out: None,
             markers_out: None,
             retry_count,
-            gate_type: new_step.gate.as_ref().map(|g| g.gate_type.clone()),
-            gate_prompt: new_step.gate.as_ref().and_then(|g| g.prompt.clone()),
-            gate_timeout: new_step.gate.as_ref().map(|g| g.timeout_text()),
+            gate_type: gate_cols.gate_type,
+            gate_prompt: gate_cols.gate_prompt,
+            gate_timeout: gate_cols.gate_timeout,
             gate_approved_by: None,
             gate_approved_at: None,
             gate_feedback: None,
-            gate_options: new_step.gate.as_ref().and_then(|g| g.options_json()),
+            gate_options: gate_cols.gate_options,
             gate_selections: None,
             fan_out_total: None,
             fan_out_completed: 0,

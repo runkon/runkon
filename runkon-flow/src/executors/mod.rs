@@ -58,24 +58,29 @@ fn insert_step_inner(
         .map_err(p_err)
 }
 
+/// Everything needed to insert a step and immediately apply a non-Running status.
+pub(super) struct StepSpec<'a> {
+    pub step_name: &'a str,
+    pub role: &'a str,
+    pub pos: i64,
+    pub iteration: u32,
+    pub retry_count: Option<i64>,
+    pub status: crate::status::WorkflowStepStatus,
+    pub result_text: Option<String>,
+    /// Gate metadata, written in the same insert as the row (human gates only).
+    pub gate: Option<crate::traits::persistence::GateStepInfo>,
+}
+
 /// Insert a step then immediately apply a non-Running status update.
 ///
 /// Used for terminal/transitional statuses set at insert time:
 /// gate dry-run (Completed), gate waiting (Waiting), parallel conditional-skip (Skipped).
 /// Returns the new step_id.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn insert_step_with_status(
     state: &crate::engine::ExecutionState,
-    step_name: &str,
-    role: &str,
-    pos: i64,
-    iteration: u32,
-    retry_count: Option<i64>,
-    status: crate::status::WorkflowStepStatus,
-    result_text: Option<String>,
+    spec: StepSpec<'_>,
 ) -> crate::engine_error::Result<String> {
-    insert_step_with_status_and_gate(
-        state,
+    let StepSpec {
         step_name,
         role,
         pos,
@@ -83,23 +88,8 @@ pub(super) fn insert_step_with_status(
         retry_count,
         status,
         result_text,
-        None,
-    )
-}
-
-/// Like [`insert_step_with_status`], but writes gate metadata in the same insert.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn insert_step_with_status_and_gate(
-    state: &crate::engine::ExecutionState,
-    step_name: &str,
-    role: &str,
-    pos: i64,
-    iteration: u32,
-    retry_count: Option<i64>,
-    status: crate::status::WorkflowStepStatus,
-    result_text: Option<String>,
-    gate: Option<crate::traits::persistence::GateStepInfo>,
-) -> crate::engine_error::Result<String> {
+        gate,
+    } = spec;
     use crate::traits::persistence::StepUpdate;
     let step_id = insert_step_inner(state, step_name, role, pos, iteration, retry_count, gate)?;
     let generation = state.expect_lease_generation();

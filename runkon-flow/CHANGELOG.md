@@ -11,7 +11,10 @@
 - **Changed (breaking):** `NewStep` has a new `gate: Option<GateStepInfo>` field. Struct
   literals must add `gate: None`. Custom `WorkflowPersistence` backends should store it:
   `gate_timeout` as `GateStepInfo::timeout_text()` (`"{secs}s"`) and `gate_options` as
-  `GateStepInfo::options_json()` (a `[{"value","label"}]` JSON array).
+  `GateStepInfo::options_json()` (a `[{"value","label"}]` JSON array). Both are derived
+  by `NewStep::gate_columns()`, which backends can use directly.
+- **Changed:** a `StepRef` gate option whose value is not a JSON string is now an error
+  naming the gate, step, field and key, instead of being silently dropped.
 
 ## 0.7.2 — Fixed
 
