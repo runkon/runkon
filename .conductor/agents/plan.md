@@ -21,6 +21,7 @@ Steps:
 3. Produce a structured plan that includes:
    - A summary of what needs to be built or changed
    - A list of files to create or modify, with a brief description of each change
+   - If the change needs a changelog entry, list the fragment file `<crate>/changelog.d/{{ticket_source_id}}.md` for each affected crate, with the entry's gist. Never list `CHANGELOG.md` itself.
    - Any non-obvious design decisions or tradeoffs
    - Any risks or unknowns that should be resolved before implementing
    - An estimated total duration in minutes for the full implementation
