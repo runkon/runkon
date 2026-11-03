@@ -460,4 +460,47 @@ mod gate_info_tests {
         assert_eq!(v[0]["value"], "a");
         assert_eq!(v[0]["label"], "Alpha");
     }
+
+    fn new_step(gate: Option<GateStepInfo>) -> NewStep {
+        NewStep {
+            workflow_run_id: "run".into(),
+            step_name: "gate".into(),
+            role: "gate".into(),
+            can_commit: false,
+            position: 0,
+            iteration: 0,
+            retry_count: None,
+            gate,
+        }
+    }
+
+    #[test]
+    fn gate_columns_none_is_default() {
+        assert_eq!(new_step(None).gate_columns(), GateColumns::default());
+    }
+
+    #[test]
+    fn gate_columns_without_prompt_or_options() {
+        let mut g = info(vec![]);
+        g.prompt = None;
+        let cols = new_step(Some(g)).gate_columns();
+        assert_eq!(cols.gate_type.as_deref(), Some("human"));
+        assert_eq!(cols.gate_timeout.as_deref(), Some("90s"));
+        assert_eq!(cols.gate_prompt, None);
+        assert_eq!(cols.gate_options, None);
+    }
+
+    #[test]
+    fn gate_columns_with_prompt_and_options() {
+        let cols = new_step(Some(info(vec![GateOption {
+            value: "a".into(),
+            label: "Alpha".into(),
+        }])))
+        .gate_columns();
+        assert_eq!(cols.gate_type.as_deref(), Some("human"));
+        assert_eq!(cols.gate_prompt.as_deref(), Some("ok?"));
+        assert_eq!(cols.gate_timeout.as_deref(), Some("90s"));
+        let v: serde_json::Value = serde_json::from_str(&cols.gate_options.unwrap()).unwrap();
+        assert_eq!(v, serde_json::json!([{"value": "a", "label": "Alpha"}]));
+    }
 }
