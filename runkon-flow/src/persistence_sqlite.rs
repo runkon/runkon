@@ -717,9 +717,11 @@ impl WorkflowPersistence for SqliteWorkflowPersistence {
         let id = new_id();
         let gate = new_step.gate_columns();
         // retry_count Some -> running with started_at set atomically; None -> pending.
+        // A pending step stores retry_count 0: the column is NOT NULL DEFAULT 0, and this
+        // single INSERT always names it, so the default no longer applies (#128).
         let (status, started_at, retry_count) = match new_step.retry_count {
-            Some(rc) => ("running", Some(Utc::now().to_rfc3339()), Some(rc)),
-            None => ("pending", None, None),
+            Some(rc) => ("running", Some(Utc::now().to_rfc3339()), rc),
+            None => ("pending", None, 0),
         };
         conn.execute(
             "INSERT INTO workflow_run_steps \
@@ -1246,6 +1248,64 @@ mod tests {
         assert!(gr.gate_options.is_none());
         let plain = steps.iter().find(|s| s.step_name == "plain").unwrap();
         assert!(plain.gate_type.is_none() && plain.gate_options.is_none());
+    }
+
+    /// #128: `retry_count: None` must store 0, not NULL, against the canonical schema's
+    /// `retry_count INTEGER NOT NULL DEFAULT 0`. A waiting gate inserts with `None`.
+    #[test]
+    fn insert_step_stores_retry_count_zero_for_pending_and_given_value_for_running() {
+        use crate::status::WorkflowStepStatus;
+        use crate::traits::persistence::{GateStepInfo, NewRun, NewStep};
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        create_canonical_schema(&conn).unwrap();
+        let p = SqliteWorkflowPersistence::from_shared_connection(std::sync::Arc::new(
+            std::sync::Mutex::new(conn),
+        ));
+        let run = p
+            .create_run(NewRun {
+                workflow_name: "retry-wf".to_string(),
+                parent_run_id: String::new(),
+                dry_run: false,
+                trigger: "manual".to_string(),
+                definition_snapshot: None,
+                parent_workflow_run_id: None,
+            })
+            .unwrap();
+        let waiting_gate = Some(GateStepInfo {
+            gate_type: "human_approval".into(),
+            prompt: Some("approve?".into()),
+            timeout_secs: 60,
+            options: vec![],
+        });
+        for (name, role, gate, retry) in [
+            ("pending", "agent", None, None),
+            ("waiting-gate", "gate", waiting_gate, None),
+            ("running", "agent", None, Some(3)),
+        ] {
+            p.insert_step(NewStep {
+                workflow_run_id: run.id.clone(),
+                step_name: name.to_string(),
+                role: role.to_string(),
+                can_commit: false,
+                position: 0,
+                iteration: 0,
+                retry_count: retry,
+                gate,
+            })
+            .unwrap_or_else(|e| panic!("insert_step({name}) must succeed: {e:?}"));
+        }
+        let steps = p.get_steps(&run.id).unwrap();
+        let step = |n: &str| steps.iter().find(|s| s.step_name == n).unwrap();
+        assert_eq!(step("pending").status, WorkflowStepStatus::Pending);
+        assert_eq!(step("pending").retry_count, 0);
+        assert_eq!(step("waiting-gate").status, WorkflowStepStatus::Pending);
+        assert_eq!(step("waiting-gate").retry_count, 0);
+        assert_eq!(
+            step("waiting-gate").gate_type.as_deref(),
+            Some("human_approval")
+        );
+        assert_eq!(step("running").status, WorkflowStepStatus::Running);
+        assert_eq!(step("running").retry_count, 3);
     }
 
     #[test]

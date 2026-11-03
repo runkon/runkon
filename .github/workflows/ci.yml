@@ -41,7 +41,8 @@ jobs:
       - uses: actions/checkout@v5
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2.9.1
-      - run: cargo test --locked --workspace --features runkon-flow/test-utils
+      # runkon-flow/sqlite gates the SQLite persistence backend and its tests (#128).
+      - run: cargo test --locked --workspace --features runkon-flow/test-utils,runkon-flow/sqlite
 
   # Packages every crate and builds each from its packaged sources, as the
   # Release workflow's publish does, so packaging breaks fail here instead of

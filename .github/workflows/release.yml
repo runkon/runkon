@@ -40,7 +40,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.1
 
       - name: Pre-flight build & test
-        run: cargo test --locked --workspace --features runkon-flow/test-utils
+        run: cargo test --locked --workspace --features runkon-flow/test-utils,runkon-flow/sqlite
 
       - name: Configure git identity
         run: |
