@@ -40,6 +40,8 @@ pub struct InMemoryWorkflowPersistence {
     fail_get_fan_out_items: AtomicBool,
     /// When `true`, `get_steps` returns a `Workflow` error.
     fail_get_steps: AtomicBool,
+    /// When `true`, `get_run` returns a `Persistence` error.
+    fail_get_run: AtomicBool,
     /// When `true`, `acquire_lease` returns a `Persistence` error.
     fail_acquire_lease: AtomicBool,
 }
@@ -56,6 +58,7 @@ impl InMemoryWorkflowPersistence {
             }),
             fail_get_fan_out_items: AtomicBool::new(false),
             fail_get_steps: AtomicBool::new(false),
+            fail_get_run: AtomicBool::new(false),
             fail_acquire_lease: AtomicBool::new(false),
         }
     }
@@ -81,6 +84,14 @@ impl InMemoryWorkflowPersistence {
     #[cfg(any(test, feature = "test-utils"))]
     pub fn set_fail_get_steps(&self, fail: bool) {
         self.fail_get_steps
+            .store(fail, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Inject a failure into `get_run`. When `fail` is `true`, every call to
+    /// `get_run` returns `EngineError::Persistence`.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn set_fail_get_run(&self, fail: bool) {
+        self.fail_get_run
             .store(fail, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -264,6 +275,11 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
     }
 
     fn get_run(&self, run_id: &str) -> Result<Option<WorkflowRun>, EngineError> {
+        if self.fail_get_run.load(Ordering::Relaxed) {
+            return Err(EngineError::Persistence(
+                "injected get_run failure".to_string(),
+            ));
+        }
         let store = self.lock()?;
         Ok(store.runs.get(run_id).cloned())
     }
