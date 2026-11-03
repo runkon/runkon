@@ -129,6 +129,13 @@ fn run_top(
         Arc::clone(&persistence) as Arc<dyn WorkflowPersistence>,
         run.id.clone(),
     );
+    state.action_registry = Arc::new(ActionRegistry::from_executors(
+        named_executors([
+            Box::new(FailingExecutor) as Box<dyn ActionExecutor>,
+            Box::new(MockExecutor::new("ok-agent")) as Box<dyn ActionExecutor>,
+        ]),
+        None,
+    ));
     state.workflow_name = top.name.clone();
     state.child_runner = Some(Arc::new(runner));
     let result = engine.run(top, &mut state).expect("run returns a result");
