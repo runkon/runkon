@@ -717,9 +717,11 @@ impl WorkflowPersistence for SqliteWorkflowPersistence {
         let id = new_id();
         let gate = new_step.gate_columns();
         // retry_count Some -> running with started_at set atomically; None -> pending.
+        // A pending step stores retry_count 0: the column is NOT NULL DEFAULT 0, and this
+        // single INSERT always names it, so the default no longer applies (#128).
         let (status, started_at, retry_count) = match new_step.retry_count {
-            Some(rc) => ("running", Some(Utc::now().to_rfc3339()), Some(rc)),
-            None => ("pending", None, None),
+            Some(rc) => ("running", Some(Utc::now().to_rfc3339()), rc),
+            None => ("pending", None, 0),
         };
         conn.execute(
             "INSERT INTO workflow_run_steps \
