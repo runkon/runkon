@@ -1,12 +1,33 @@
 use crate::dsl::CallWorkflowNode;
 use crate::engine::{
-    fetch_child_completion_data, handle_on_fail, record_step_success, resolve_child_inputs,
+    child_failure_message, fetch_child_completion_data, find_run_failure_cause, handle_on_fail, record_step_success, resolve_child_inputs,
     restore_call_workflow_step_row, ExecutionState,
 };
 use crate::engine_error::{EngineError, Result};
-use crate::extensions::LlmRunMetrics;
+use crate::extensions::{LlmRunMetrics, RunFailureCause};
 use crate::prompt_builder::build_variable_map;
 use crate::traits::persistence::StepUpdate;
+
+/// Find why a failed child run failed: the cause the child's engine attached to its
+/// result, else the failing step in the parent's store, else the child run's own error.
+fn resolve_cause(
+    state: &ExecutionState,
+    result: &crate::types::WorkflowResult,
+) -> Option<RunFailureCause> {
+    if let Some(c) = result.extensions.get::<RunFailureCause>() {
+        return Some((*c).clone());
+    }
+    if let Some(c) = find_run_failure_cause(state.persistence.as_ref(), &result.workflow_run_id) {
+        return Some(c);
+    }
+    match state.persistence.get_run(&result.workflow_run_id) {
+        Ok(Some(run)) => run.error.map(|error| RunFailureCause {
+            step_name: None,
+            error,
+        }),
+        _ => None,
+    }
+}
 
 pub fn execute_call_workflow(
     state: &mut ExecutionState,
@@ -192,7 +213,11 @@ pub fn execute_call_workflow(
                     return Ok(());
                 }
                 Ok(result) => {
-                    let msg = format!("Sub-workflow '{}' failed (resume)", node.workflow);
+                    let cause = resolve_cause(state, &result);
+                    let msg = child_failure_message(
+                        &format!("Sub-workflow '{}' failed (resume)", node.workflow),
+                        cause.as_ref(),
+                    );
                     tracing::warn!(
                         "'{}': resume of child run '{}' did not succeed (all_succeeded=false)",
                         node.workflow,
@@ -335,7 +360,11 @@ pub fn execute_call_workflow(
                     record_child_success(state, &step_id, &result, attempt)?;
                     return Ok(());
                 } else {
-                    let msg = format!("Sub-workflow '{}' failed", node.workflow);
+                    let cause = resolve_cause(state, &result);
+                    let msg = child_failure_message(
+                        &format!("Sub-workflow '{}' failed", node.workflow),
+                        cause.as_ref(),
+                    );
                     tracing::warn!(
                         "{} (attempt {}/{}) [child_run_id={}]",
                         msg,

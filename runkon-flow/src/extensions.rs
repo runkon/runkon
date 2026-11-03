@@ -58,6 +58,17 @@ pub struct LlmRunMetrics {
     pub model: Option<String>,
 }
 
+/// Why a workflow run failed, inserted into `WorkflowResult.extensions` by the engine
+/// when a run finishes failed (not cancelled).
+///
+/// `step_name` is `None` when the failure was a run-level error with no failed step row
+/// (for example a body `EngineError`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunFailureCause {
+    pub step_name: Option<String>,
+    pub error: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,5 +149,17 @@ mod tests {
         assert_eq!(v.total_turns, Some(3));
         assert_eq!(v.total_cost_usd, Some(0.05));
         assert_eq!(v.model.as_deref(), Some("claude-opus-4"));
+    }
+
+    #[test]
+    fn run_failure_cause_round_trips() {
+        let mut ext = Extensions::default();
+        ext.insert(RunFailureCause {
+            step_name: Some("submit-review".into()),
+            error: "exited 1".into(),
+        });
+        let v = ext.get::<RunFailureCause>().expect("should find cause");
+        assert_eq!(v.step_name.as_deref(), Some("submit-review"));
+        assert_eq!(v.error, "exited 1");
     }
 }
