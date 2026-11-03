@@ -142,13 +142,18 @@ pub fn execute_parallel(
                 );
                 super::insert_step_with_status(
                     state,
-                    agent_label,
-                    "actor",
-                    pos,
-                    iteration,
-                    None,
-                    WorkflowStepStatus::Skipped,
-                    Some(format!("skipped: {cond_step}.{cond_marker} not emitted")),
+                    super::StepSpec {
+                        step_name: agent_label,
+                        role: "actor",
+                        pos,
+                        iteration,
+                        retry_count: None,
+                        status: WorkflowStepStatus::Skipped,
+                        result_text: Some(format!(
+                            "skipped: {cond_step}.{cond_marker} not emitted"
+                        )),
+                        gate: None,
+                    },
                 )?;
                 skipped_count += 1;
                 continue;

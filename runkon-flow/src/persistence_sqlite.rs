@@ -715,44 +715,35 @@ impl WorkflowPersistence for SqliteWorkflowPersistence {
     fn insert_step(&self, new_step: NewStep) -> Result<String, EngineError> {
         let conn = self.lock()?;
         let id = new_id();
-        if let Some(retry_count) = new_step.retry_count {
-            let now = Utc::now().to_rfc3339();
-            conn.execute(
-                "INSERT INTO workflow_run_steps \
-                 (id, workflow_run_id, step_name, role, can_commit, status, position, iteration, \
-                  started_at, retry_count) \
-                 VALUES (:id, :workflow_run_id, :step_name, :role, :can_commit, 'running', :position, :iteration, :started_at, :retry_count)",
-                named_params![
-                    ":id": id,
-                    ":workflow_run_id": new_step.workflow_run_id,
-                    ":step_name": new_step.step_name,
-                    ":role": new_step.role,
-                    ":can_commit": new_step.can_commit as i64,
-                    ":position": new_step.position,
-                    ":iteration": new_step.iteration,
-                    ":started_at": now,
-                    ":retry_count": retry_count,
-                ],
-            )
-            .map_err(db_err)?;
-        } else {
-            conn.execute(
-                "INSERT INTO workflow_run_steps \
-                 (id, workflow_run_id, step_name, role, can_commit, status, position, iteration) \
-                 VALUES (:id, :workflow_run_id, :step_name, :role, :can_commit, :status, :position, :iteration)",
-                named_params![
-                    ":id": id,
-                    ":workflow_run_id": new_step.workflow_run_id,
-                    ":step_name": new_step.step_name,
-                    ":role": new_step.role,
-                    ":can_commit": new_step.can_commit as i64,
-                    ":status": "pending",
-                    ":position": new_step.position,
-                    ":iteration": new_step.iteration,
-                ],
-            )
-            .map_err(db_err)?;
-        }
+        let gate = new_step.gate_columns();
+        // retry_count Some -> running with started_at set atomically; None -> pending.
+        let (status, started_at, retry_count) = match new_step.retry_count {
+            Some(rc) => ("running", Some(Utc::now().to_rfc3339()), Some(rc)),
+            None => ("pending", None, None),
+        };
+        conn.execute(
+            "INSERT INTO workflow_run_steps \
+             (id, workflow_run_id, step_name, role, can_commit, status, position, iteration, \
+              started_at, retry_count, gate_type, gate_prompt, gate_timeout, gate_options) \
+             VALUES (:id, :workflow_run_id, :step_name, :role, :can_commit, :status, :position, :iteration, :started_at, :retry_count, :gate_type, :gate_prompt, :gate_timeout, :gate_options)",
+            named_params![
+                ":id": id,
+                ":workflow_run_id": new_step.workflow_run_id,
+                ":step_name": new_step.step_name,
+                ":role": new_step.role,
+                ":can_commit": new_step.can_commit as i64,
+                ":status": status,
+                ":position": new_step.position,
+                ":iteration": new_step.iteration,
+                ":started_at": started_at,
+                ":retry_count": retry_count,
+                ":gate_type": gate.gate_type,
+                ":gate_prompt": gate.gate_prompt,
+                ":gate_timeout": gate.gate_timeout,
+                ":gate_options": gate.gate_options,
+            ],
+        )
+        .map_err(db_err)?;
         Ok(id)
     }
 
@@ -1183,6 +1174,81 @@ mod tests {
     }
 
     #[test]
+    fn insert_step_persists_gate_metadata_at_insert() {
+        use crate::traits::persistence::{GateOption, GateStepInfo, NewRun, NewStep};
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        create_canonical_schema(&conn).unwrap();
+        let p = SqliteWorkflowPersistence::from_shared_connection(std::sync::Arc::new(
+            std::sync::Mutex::new(conn),
+        ));
+        let run = p
+            .create_run(NewRun {
+                workflow_name: "gate-wf".to_string(),
+                parent_run_id: String::new(),
+                dry_run: false,
+                trigger: "manual".to_string(),
+                definition_snapshot: None,
+                parent_workflow_run_id: None,
+            })
+            .unwrap();
+        for (name, gate, retry) in [
+            (
+                "g",
+                Some(GateStepInfo {
+                    gate_type: "human".into(),
+                    prompt: Some("ok?".into()),
+                    timeout_secs: 60,
+                    options: vec![GateOption {
+                        value: "a".into(),
+                        label: "Alpha".into(),
+                    }],
+                }),
+                None,
+            ),
+            (
+                "g_running",
+                Some(GateStepInfo {
+                    gate_type: "human".into(),
+                    prompt: None,
+                    timeout_secs: 5,
+                    options: vec![],
+                }),
+                Some(0),
+            ),
+            ("plain", None, Some(0)),
+        ] {
+            p.insert_step(NewStep {
+                workflow_run_id: run.id.clone(),
+                step_name: name.to_string(),
+                role: "gate".to_string(),
+                can_commit: false,
+                position: 0,
+                iteration: 0,
+                retry_count: retry,
+                gate,
+            })
+            .unwrap();
+        }
+        let steps = p.get_steps(&run.id).unwrap();
+        let g = steps.iter().find(|s| s.step_name == "g").unwrap();
+        assert_eq!(g.gate_type.as_deref(), Some("human"));
+        assert_eq!(g.gate_prompt.as_deref(), Some("ok?"));
+        assert_eq!(g.gate_timeout.as_deref(), Some("60s"));
+        assert_eq!(
+            g.gate_options.as_deref(),
+            Some(r#"[{"label":"Alpha","value":"a"}]"#)
+        );
+        let gr = steps.iter().find(|s| s.step_name == "g_running").unwrap();
+        assert_eq!(gr.status, crate::status::WorkflowStepStatus::Running);
+        assert_eq!(gr.gate_type.as_deref(), Some("human"));
+        assert!(gr.gate_prompt.is_none());
+        assert_eq!(gr.gate_timeout.as_deref(), Some("5s"));
+        assert!(gr.gate_options.is_none());
+        let plain = steps.iter().find(|s| s.step_name == "plain").unwrap();
+        assert!(plain.gate_type.is_none() && plain.gate_options.is_none());
+    }
+
+    #[test]
     fn create_canonical_schema_is_idempotent() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         create_canonical_schema(&conn).expect("first call must succeed");
@@ -1231,6 +1297,7 @@ mod tests {
                 position: 0,
                 iteration: 0,
                 retry_count: None,
+                gate: None,
             })
             .expect("insert_step must succeed");
 
