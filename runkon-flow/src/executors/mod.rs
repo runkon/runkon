@@ -63,6 +63,7 @@ fn insert_step_inner(
 /// Used for terminal/transitional statuses set at insert time:
 /// gate dry-run (Completed), gate waiting (Waiting), parallel conditional-skip (Skipped).
 /// Returns the new step_id.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn insert_step_with_status(
     state: &crate::engine::ExecutionState,
     step_name: &str,
