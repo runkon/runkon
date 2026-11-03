@@ -1824,6 +1824,9 @@ mod tests {
         }
     }
 
+    use crate::test_helpers::{bare_step_update as bare_update, seed_step_with};
+
+    /// Seed a step at `position` that either failed with `fail` or completed.
     fn seed_step(
         p: &crate::persistence_memory::InMemoryWorkflowPersistence,
         run: &str,
@@ -1832,38 +1835,14 @@ mod tests {
         retry: i64,
         fail: Option<&str>,
     ) {
-        use crate::traits::persistence::{NewStep, StepUpdate};
-        let id = p
-            .insert_step(NewStep {
-                workflow_run_id: run.to_string(),
-                step_name: name.to_string(),
-                role: "actor".to_string(),
-                can_commit: false,
-                position,
-                iteration: 0,
-                retry_count: Some(retry),
-                gate: None,
-            })
-            .unwrap();
-        match fail {
-            Some(err) => p
-                .update_step(&id, StepUpdate::failed(0, err.to_string(), retry as u32))
-                .unwrap(),
-            None => p
-                .update_step(
-                    &id,
-                    StepUpdate::completed(
-                        0,
-                        None,
-                        Some("ok".into()),
-                        None,
-                        None,
-                        retry as u32,
-                        None,
-                    ),
-                )
-                .unwrap(),
-        }
+        use crate::traits::persistence::StepUpdate;
+        let update = match fail {
+            Some(err) => StepUpdate::failed(0, err.to_string(), retry as u32),
+            None => {
+                StepUpdate::completed(0, None, Some("ok".into()), None, None, retry as u32, None)
+            }
+        };
+        seed_step_with(p, run, name, position, 0, update);
     }
 
     #[test]
@@ -1896,48 +1875,6 @@ mod tests {
         seed_step(&p, "r", "first", 1, 0, Some("a"));
         let c = find_run_failure_cause(&p, "r").unwrap();
         assert_eq!(c.step_name.as_deref(), Some("first"));
-    }
-
-    fn seed_step_with(
-        p: &crate::persistence_memory::InMemoryWorkflowPersistence,
-        run: &str,
-        name: &str,
-        position: i64,
-        iteration: i64,
-        update: crate::traits::persistence::StepUpdate,
-    ) {
-        use crate::traits::persistence::NewStep;
-        let id = p
-            .insert_step(NewStep {
-                workflow_run_id: run.to_string(),
-                step_name: name.to_string(),
-                role: "actor".to_string(),
-                can_commit: false,
-                position,
-                iteration,
-                retry_count: Some(0),
-                gate: None,
-            })
-            .unwrap();
-        p.update_step(&id, update).unwrap();
-    }
-
-    fn bare_update(
-        status: WorkflowStepStatus,
-        step_error: Option<&str>,
-        result_text: Option<&str>,
-    ) -> crate::traits::persistence::StepUpdate {
-        crate::traits::persistence::StepUpdate {
-            generation: 0,
-            status,
-            child_run_id: None,
-            result_text: result_text.map(str::to_string),
-            context_out: None,
-            markers_out: None,
-            retry_count: Some(0),
-            structured_output: None,
-            step_error: step_error.map(str::to_string),
-        }
     }
 
     #[test]

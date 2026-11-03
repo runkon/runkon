@@ -12,8 +12,9 @@ use runkon_flow::engine::{ChildWorkflowContext, ChildWorkflowInput, ChildWorkflo
 use runkon_flow::engine_error::Result as EngineResult;
 use runkon_flow::persistence_memory::InMemoryWorkflowPersistence;
 use runkon_flow::status::{WorkflowRunStatus, WorkflowStepStatus};
+use runkon_flow::test_helpers::seed_step_with;
 use runkon_flow::traits::action_executor::ActionRegistry;
-use runkon_flow::traits::persistence::{NewRun, NewStep, StepUpdate, WorkflowPersistence};
+use runkon_flow::traits::persistence::{NewRun, StepUpdate, WorkflowPersistence};
 use runkon_flow::types::{WorkflowResult, WorkflowRun};
 use runkon_flow::{FlowEngine, FlowEngineBuilder, RunFailureCause};
 
@@ -270,7 +271,6 @@ fn cancelled_run_carries_no_cause_extension() {
 /// A runner that returns a failed result with no extensions, as a runner that is not
 /// the built-in engine would, for either a fresh or a resumed child.
 struct StubFailingRunner {
-    persistence: Arc<InMemoryWorkflowPersistence>,
     child_run_id: String,
     resumable: Option<WorkflowRun>,
 }
@@ -311,27 +311,20 @@ impl ChildWorkflowRunner for StubFailingRunner {
         _parent_run_id: &str,
         _workflow_name: &str,
     ) -> EngineResult<Option<WorkflowRun>> {
-        let _ = &self.persistence;
         Ok(self.resumable.clone())
     }
 }
 
 /// Seed a failed step row on `run_id`.
 fn seed_failed_step(p: &InMemoryWorkflowPersistence, run_id: &str, name: &str, err: &str) {
-    let id = p
-        .insert_step(NewStep {
-            workflow_run_id: run_id.to_string(),
-            step_name: name.to_string(),
-            role: "actor".to_string(),
-            can_commit: false,
-            position: 0,
-            iteration: 0,
-            retry_count: Some(0),
-            gate: None,
-        })
-        .unwrap();
-    p.update_step(&id, StepUpdate::failed(0, err.to_string(), 0))
-        .unwrap();
+    seed_step_with(
+        p,
+        run_id,
+        name,
+        0,
+        0,
+        StepUpdate::failed(0, err.to_string(), 0),
+    );
 }
 
 /// Run a top workflow calling `child` through a [`StubFailingRunner`] whose child run
@@ -345,7 +338,6 @@ fn stub_parent_error(
     let run = new_run(&p, "top", None);
     let mut state = test_state(&p, &run.id, "top");
     state.child_runner = Some(Arc::new(StubFailingRunner {
-        persistence: Arc::clone(&p),
         child_run_id: child_run_id.to_string(),
         resumable,
     }));
@@ -404,4 +396,15 @@ fn resume_path_failure_appends_child_cause() {
         err,
         "Sub-workflow 'child' failed (resume): leaf: leaf exploded"
     );
+}
+
+#[test]
+fn resolve_cause_get_run_error_gives_bare_message() {
+    let p = make_persistence();
+    let child = new_run(&p, "child", None);
+    // A failing get_run must degrade the cause to the bare message, not panic or
+    // abort the parent run.
+    p.set_fail_get_run(true);
+    let err = stub_parent_error(p, &child.id, None);
+    assert_eq!(err, "Sub-workflow 'child' failed");
 }
