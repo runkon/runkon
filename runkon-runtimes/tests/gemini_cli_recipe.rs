@@ -73,7 +73,7 @@ fn make_request(run_id: &str, sink: Arc<RecordingSink>) -> RuntimeRequest {
 
 fn write_stub(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
     let path = dir.join(name);
-    runkon_test_support::write_executable_script(&path, &format!("#!/bin/sh\n{body}"));
+    runkon_test_support::write_sh_script(&path, body);
     path
 }
 

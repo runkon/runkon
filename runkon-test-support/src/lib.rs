@@ -86,3 +86,10 @@ pub fn write_executable_script(path: &std::path::Path, contents: &str) {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// Write a `/bin/sh` script to `path`: prepends `#!/bin/sh\n` to `body`, then delegates to
+/// [`write_executable_script`] so callers never spell the shebang themselves.
+#[cfg(unix)]
+pub fn write_sh_script(path: &std::path::Path, body: &str) {
+    write_executable_script(path, &format!("#!/bin/sh\n{body}"));
+}

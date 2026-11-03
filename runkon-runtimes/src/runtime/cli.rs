@@ -520,10 +520,9 @@ mod tests {
         let tmp = std::env::temp_dir().join("cli-test-resume-stub");
         std::fs::create_dir_all(&tmp).unwrap();
         let script = tmp.join("stub-resume.sh");
-        runkon_test_support::write_executable_script(
+        runkon_test_support::write_sh_script(
             &script,
-            r#"#!/bin/sh
-printf '{"response": "%s"}' "$*"
+            r#"printf '{"response": "%s"}' "$*"
 "#,
         );
 
@@ -562,10 +561,9 @@ printf '{"response": "%s"}' "$*"
         let tmp = std::env::temp_dir().join("cli-test-config-env-stub");
         std::fs::create_dir_all(&tmp).unwrap();
         let script = tmp.join("stub-env.sh");
-        runkon_test_support::write_executable_script(
+        runkon_test_support::write_sh_script(
             &script,
-            r#"#!/bin/sh
-printf '{"response": "%s"}' "$MY_API_BASE"
+            r#"printf '{"response": "%s"}' "$MY_API_BASE"
 "#,
         );
 
@@ -621,10 +619,9 @@ printf '{"response": "%s"}' "$MY_API_BASE"
         let tmp = std::env::temp_dir().join("cli-test-extra-args-stub");
         std::fs::create_dir_all(&tmp).unwrap();
         let script = tmp.join("stub-extra.sh");
-        runkon_test_support::write_executable_script(
+        runkon_test_support::write_sh_script(
             &script,
-            r#"#!/bin/sh
-printf '{"response": "%s"}' "$*"
+            r#"printf '{"response": "%s"}' "$*"
 "#,
         );
 
