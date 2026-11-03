@@ -6,8 +6,6 @@
 
 #![cfg(unix)]
 
-use std::io::Write as _;
-use std::os::unix::fs::PermissionsExt as _;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -75,11 +73,7 @@ fn make_request(run_id: &str, sink: Arc<RecordingSink>) -> RuntimeRequest {
 
 fn write_stub(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
     let path = dir.join(name);
-    let mut f = std::fs::File::create(&path).unwrap();
-    writeln!(f, "#!/bin/sh").unwrap();
-    write!(f, "{body}").unwrap();
-    drop(f);
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    runkon_test_support::write_executable_script(&path, &format!("#!/bin/sh\n{body}"));
     path
 }
 

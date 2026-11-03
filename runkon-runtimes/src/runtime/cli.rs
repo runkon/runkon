@@ -517,17 +517,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn spawn_impl_resume_flag_appended() {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-
         let tmp = std::env::temp_dir().join("cli-test-resume-stub");
         std::fs::create_dir_all(&tmp).unwrap();
         let script = tmp.join("stub-resume.sh");
-        let mut f = std::fs::File::create(&script).unwrap();
-        writeln!(f, "#!/bin/sh").unwrap();
-        writeln!(f, r#"printf '{{"response": "%s"}}' "$*""#).unwrap();
-        drop(f);
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        runkon_test_support::write_executable_script(
+            &script,
+            r#"#!/bin/sh
+printf '{"response": "%s"}' "$*"
+"#,
+        );
 
         let sink = Arc::new(RecordingSink::default());
         let (runtime, mut request, workspace) =
@@ -561,17 +559,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn config_env_is_passed_to_the_subprocess() {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-
         let tmp = std::env::temp_dir().join("cli-test-config-env-stub");
         std::fs::create_dir_all(&tmp).unwrap();
         let script = tmp.join("stub-env.sh");
-        let mut f = std::fs::File::create(&script).unwrap();
-        writeln!(f, "#!/bin/sh").unwrap();
-        writeln!(f, r#"printf '{{"response": "%s"}}' "$MY_API_BASE""#).unwrap();
-        drop(f);
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        runkon_test_support::write_executable_script(
+            &script,
+            r#"#!/bin/sh
+printf '{"response": "%s"}' "$MY_API_BASE"
+"#,
+        );
 
         let sink = Arc::new(RecordingSink::default());
         let (mut runtime, request, workspace) =
@@ -622,17 +618,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn spawn_impl_extra_cli_args_forwarded() {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-
         let tmp = std::env::temp_dir().join("cli-test-extra-args-stub");
         std::fs::create_dir_all(&tmp).unwrap();
         let script = tmp.join("stub-extra.sh");
-        let mut f = std::fs::File::create(&script).unwrap();
-        writeln!(f, "#!/bin/sh").unwrap();
-        writeln!(f, r#"printf '{{"response": "%s"}}' "$*""#).unwrap();
-        drop(f);
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        runkon_test_support::write_executable_script(
+            &script,
+            r#"#!/bin/sh
+printf '{"response": "%s"}' "$*"
+"#,
+        );
 
         let sink = Arc::new(RecordingSink::default());
         let (runtime, mut request, workspace) =
