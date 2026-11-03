@@ -22,7 +22,7 @@ Designed to compose with `runkon-flow` (a workflow engine consumes this crate vi
 
 ```toml
 [dependencies]
-runkon-runtimes = "0.7.2-alpha"
+runkon-runtimes = "0.8.0-alpha"
 ```
 
 Optional features:
