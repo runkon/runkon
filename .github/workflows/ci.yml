@@ -18,6 +18,13 @@ jobs:
       - run: rustup toolchain install
       - run: cargo fmt --all --check
 
+  changelog-fragments:
+    name: Changelog fragments
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: scripts/release/changelog.sh --check
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
