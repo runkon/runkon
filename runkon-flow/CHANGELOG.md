@@ -1,5 +1,32 @@
 # Changelog — runkon-flow
 
+## 0.8.0 — Breaking
+
+- **Added:** a failed `call workflow` step now records the child's failing step and its
+  error in its `step_error`/`result_text`, e.g.
+  `Sub-workflow 'review-pr' failed: submit-review: <error>`. Nested calls chain, so the
+  top-level step names the leaf step. The appended cause is truncated to 2000 characters.
+  Hosts no longer need to walk `child_run_id` to show the cause.
+- **Added:** `RunFailureCause { step_name, error }` is inserted into
+  `WorkflowResult.extensions` when a run ends failed, and
+  `engine::find_run_failure_cause` looks the cause up from a run's steps.
+- **Changed:** hosts that match the exact text `Sub-workflow '<name>' failed` should match
+  on the prefix instead.
+
+- **Fixed:** human gate steps are stored with `gate_type`, `gate_prompt`, `gate_timeout`
+  and the resolved `gate_options`, written in the same insert as the step. Hosts no longer
+  need a persistence decorator for this, so conductor-ai's `GateMetadataPersistence` can be
+  removed.
+- **Fixed:** a gate whose `options` step reference cannot be resolved now fails before a
+  waiting step or `GateWaiting` event is recorded, instead of leaving an orphaned row.
+- **Changed (breaking):** `NewStep` has a new `gate: Option<GateStepInfo>` field. Struct
+  literals must add `gate: None`. Custom `WorkflowPersistence` backends should store it:
+  `gate_timeout` as `GateStepInfo::timeout_text()` (`"{secs}s"`) and `gate_options` as
+  `GateStepInfo::options_json()` (a `[{"value","label"}]` JSON array). Both are derived
+  by `NewStep::gate_columns()`, which backends can use directly.
+- **Changed:** a `StepRef` gate option whose value is not a JSON string is now an error
+  naming the gate, step, field and key, instead of being silently dropped.
+
 ## 0.7.2 — Fixed
 
 - **`script` steps no longer inherit the host's stdin.** The step's stdin is `/dev/null`,
