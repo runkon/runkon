@@ -168,7 +168,10 @@ fn three_level_failure_chains_to_leaf_step() {
     let (result, p) = run_top(&top, vec![submit, review]);
 
     let err = workflow_step_error(&p, &result.workflow_run_id, "workflow:review-pr");
-    assert!(err.starts_with("Sub-workflow 'review-pr' failed: "), "{err}");
+    assert!(
+        err.starts_with("Sub-workflow 'review-pr' failed: "),
+        "{err}"
+    );
     assert!(err.contains("submit-review"), "{err}");
     assert!(err.contains("failing"), "{err}");
     assert!(err.contains("intentional test failure"), "{err}");

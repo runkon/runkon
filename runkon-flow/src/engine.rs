@@ -668,8 +668,8 @@ pub fn run_workflow_engine(
             Some(&summary),
             body_error.as_deref(),
         )?;
-        failure_cause = find_run_failure_cause(state.persistence.as_ref(), &wf_run_id)
-            .or_else(|| {
+        failure_cause =
+            find_run_failure_cause(state.persistence.as_ref(), &wf_run_id).or_else(|| {
                 body_error.clone().map(|error| RunFailureCause {
                     step_name: None,
                     error,
@@ -1931,11 +1931,18 @@ mod tests {
         assert!(!m.ends_with('…'));
         let long = RunFailureCause {
             step_name: None,
-            error: format!("{}é{}", "x".repeat(MAX_CHILD_FAILURE_CAUSE_CHARS - 1), "yyy"),
+            error: format!(
+                "{}é{}",
+                "x".repeat(MAX_CHILD_FAILURE_CAUSE_CHARS - 1),
+                "yyy"
+            ),
         };
         let m = child_failure_message("b", Some(&long));
         assert!(m.ends_with('…'));
-        assert_eq!(m.chars().count(), "b: ".len() + MAX_CHILD_FAILURE_CAUSE_CHARS + 1);
+        assert_eq!(
+            m.chars().count(),
+            "b: ".len() + MAX_CHILD_FAILURE_CAUSE_CHARS + 1
+        );
     }
 
     #[test]
