@@ -271,12 +271,11 @@ mod tests {
     use crate::dsl::{Condition, IfNode, UnlessNode};
     use crate::engine::ExecutionState;
     use crate::persistence_memory::InMemoryWorkflowPersistence;
-    use crate::traits::action_executor::ActionRegistry;
-    use crate::traits::item_provider::ItemProviderRegistry;
+
     use crate::traits::persistence::{NewRun, WorkflowPersistence};
     use crate::traits::run_context::NoopRunContext;
-    use crate::traits::script_env_provider::NoOpScriptEnvProvider;
-    use crate::types::{StepResult, WorkflowExecConfig};
+
+    use crate::types::StepResult;
 
     use super::{eval_condition, execute_if, execute_unless};
 
@@ -291,49 +290,14 @@ mod tests {
             parent_workflow_run_id: None,
         };
         let run = persistence.create_run(new_run).unwrap();
-        ExecutionState {
-            persistence,
-            action_registry: Arc::new(ActionRegistry::new(Default::default(), None)),
-            script_env_provider: Arc::new(NoOpScriptEnvProvider),
-            workflow_run_id: run.id,
-            workflow_name: "test-wf".to_string(),
-            run_ctx: Arc::new(NoopRunContext::default().with_working_dir("/tmp"))
-                as Arc<dyn crate::traits::run_context::RunContext>,
-            extra_plugin_dirs: vec![],
-            model: None,
-            exec_config: WorkflowExecConfig::default(),
-            inputs: Default::default(),
-            parent_run_id: "parent-1".to_string(),
-            depth: 0,
-            target_label: None,
-            step_results: Default::default(),
-            contexts: vec![],
-            position: 0,
-            all_succeeded: true,
-            total_cost: 0.0,
-            total_turns: 0,
-            total_duration_ms: 0,
-            total_input_tokens: 0,
-            total_output_tokens: 0,
-            total_cache_read_input_tokens: 0,
-            total_cache_creation_input_tokens: 0,
-            has_llm_metrics: false,
-            last_gate_feedback: None,
-            block_output: None,
-            block_with: vec![],
-            resume_ctx: None,
-            default_as_identity: None,
-            triggered_by_hook: false,
-            schema_resolver: None,
-            child_runner: None,
-            last_heartbeat_at: Arc::new(AtomicI64::new(0)),
-            registry: Arc::new(ItemProviderRegistry::default()),
-            event_sinks: Arc::from(vec![]),
-            cancellation: crate::cancellation::CancellationToken::new(),
-            current_execution_id: Arc::new(std::sync::Mutex::new(None)),
-            owner_token: None,
-            lease_generation: None,
-        }
+        let mut state = crate::test_helpers::make_test_execution_state(persistence, run.id);
+        state.workflow_name = "test-wf".to_string();
+        state.run_ctx = Arc::new(NoopRunContext::default().with_working_dir("/tmp"))
+            as Arc<dyn crate::traits::run_context::RunContext>;
+        state.parent_run_id = "parent-1".to_string();
+        state.last_heartbeat_at = Arc::new(AtomicI64::new(0));
+        state.lease_generation = None;
+        state
     }
 
     fn make_step_result_with_marker(marker: &str) -> StepResult {

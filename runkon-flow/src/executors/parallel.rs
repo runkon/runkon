@@ -407,11 +407,9 @@ mod tests {
     use crate::persistence_memory::InMemoryWorkflowPersistence;
     use crate::status::WorkflowStepStatus;
     use crate::traits::action_executor::{ActionExecutor, ActionOutput, ActionParams};
-    use crate::traits::item_provider::ItemProviderRegistry;
+
     use crate::traits::persistence::WorkflowPersistence;
-    use crate::traits::run_context::NoopRunContext;
-    use crate::traits::script_env_provider::NoOpScriptEnvProvider;
-    use crate::types::WorkflowExecConfig;
+
     use std::collections::HashMap;
     use std::sync::Arc;
 
@@ -466,50 +464,9 @@ mod tests {
         run_id: String,
         registry: crate::traits::action_executor::ActionRegistry,
     ) -> ExecutionState {
-        ExecutionState {
-            persistence,
-            action_registry: Arc::new(registry),
-            script_env_provider: Arc::new(NoOpScriptEnvProvider),
-            workflow_run_id: run_id,
-            workflow_name: "wf".to_string(),
-            run_ctx: Arc::new(NoopRunContext::default())
-                as Arc<dyn crate::traits::run_context::RunContext>,
-            extra_plugin_dirs: vec![],
-            model: None,
-            exec_config: WorkflowExecConfig::default(),
-            inputs: HashMap::new(),
-            parent_run_id: String::new(),
-            depth: 0,
-            target_label: None,
-            step_results: HashMap::new(),
-            contexts: vec![],
-            position: 0,
-            all_succeeded: true,
-            total_cost: 0.0,
-            total_turns: 0,
-            total_duration_ms: 0,
-            total_input_tokens: 0,
-            total_output_tokens: 0,
-            total_cache_read_input_tokens: 0,
-            total_cache_creation_input_tokens: 0,
-            has_llm_metrics: false,
-            last_gate_feedback: None,
-            block_output: None,
-            block_with: vec![],
-            resume_ctx: None,
-            default_as_identity: None,
-            triggered_by_hook: false,
-            schema_resolver: None,
-            child_runner: None,
-            last_heartbeat_at: ExecutionState::new_heartbeat(),
-            registry: Arc::new(ItemProviderRegistry::new()),
-            event_sinks: Arc::from(vec![]),
-            cancellation: crate::cancellation::CancellationToken::new(),
-            current_execution_id: Arc::new(std::sync::Mutex::new(None)),
-            owner_token: None,
-            // Run was created with generation=0; use that so update_step check passes.
-            lease_generation: Some(0),
-        }
+        let mut state = crate::test_helpers::make_test_execution_state(persistence, run_id);
+        state.action_registry = Arc::new(registry);
+        state
     }
 
     /// Verifies the ActionOutput dispatch path: markers, context, and metrics from

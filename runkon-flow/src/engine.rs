@@ -12,6 +12,7 @@ use crate::extensions::{Extensions, LlmRunMetrics, RunFailureCause};
 use crate::output_schema::OutputSchema;
 use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
 use crate::traits::action_executor::ActionRegistry;
+use crate::traits::gate_resolver::GateResolverRegistry;
 use crate::traits::item_provider::ItemProviderRegistry;
 use crate::traits::persistence::WorkflowPersistence;
 use crate::traits::run_context::RunContext;
@@ -248,6 +249,10 @@ pub struct ExecutionState {
     pub block_with: Vec<String>,
     pub resume_ctx: Option<ResumeContext>,
     pub default_as_identity: Option<String>,
+    /// Gate resolvers polled while a gate waits. The engine overwrites this with its own
+    /// registry in `FlowEngine::run_inner`, so any value supplied by the caller is replaced;
+    /// hosts building the struct by hand write `gate_resolvers: Default::default()`.
+    pub gate_resolvers: Arc<GateResolverRegistry>,
     pub triggered_by_hook: bool,
     /// Schema resolver callback — (schema_name) → OutputSchema.
     /// The host closes over working_dir and repo_path at construction time.
@@ -1662,6 +1667,7 @@ mod tests {
             block_with: vec!["with".to_string()],
             resume_ctx: None,
             default_as_identity: Some("bot".to_string()),
+            gate_resolvers: Default::default(),
             triggered_by_hook: true,
             schema_resolver: None,
             child_runner: Some(Arc::new(DummyChildRunner)),
@@ -1798,6 +1804,7 @@ mod tests {
             block_with: vec![],
             resume_ctx: None,
             default_as_identity: None,
+            gate_resolvers: Default::default(),
             triggered_by_hook: true,
             schema_resolver: None,
             child_runner: None,
