@@ -51,7 +51,8 @@ pub trait GateResolver: Send + Sync {
     /// Decide a waiting gate. The engine calls this synchronously on the executor thread, so
     /// the gate's `timeout_secs` and run cancellation are not checked while a call is in
     /// flight. Implementations must bound their own I/O (for example, a timeout on any
-    /// subprocess or network call) and return an error rather than block indefinitely.
+    /// subprocess or network call) and return an error rather than block indefinitely. Any
+    /// time a call spends blocked is an overshoot of the gate's timeout and of cancellation.
     fn poll(
         &self,
         run_id: &str,

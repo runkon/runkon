@@ -200,6 +200,12 @@ fn poll_resolver(
     }
 }
 
+/// Execute a gate node, blocking until it is approved, rejected, cancelled or timed out.
+///
+/// While waiting, the registered `GateResolver` is polled synchronously on this thread.
+/// `timeout_secs` and run cancellation are checked only between polls, so a resolver call
+/// that blocks overshoots both by however long it runs. The engine does not bound the call;
+/// resolvers must bound their own I/O (see `GateResolver::poll`).
 pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32) -> Result<()> {
     let pos = state.position;
     state.position += 1;
