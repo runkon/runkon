@@ -899,7 +899,10 @@ fn resolver_approval_releases_gate_without_manual_approval() {
     let steps = persistence.get_steps(&run_id).unwrap();
     let gate = steps.iter().find(|s| s.step_name == "checks").unwrap();
     assert_eq!(gate.status, WorkflowStepStatus::Completed);
-    assert_eq!(gate.gate_approved_by.as_deref(), Some("gate_resolver:pr_checks"));
+    assert_eq!(
+        gate.gate_approved_by.as_deref(),
+        Some("gate_resolver:pr_checks")
+    );
     assert_eq!(gate.gate_feedback.as_deref(), Some("checks green"));
 }
 
@@ -916,7 +919,10 @@ fn resolver_rejection_fails_gate() {
     let steps = persistence.get_steps(&run_id).unwrap();
     let gate = steps.iter().find(|s| s.step_name == "checks").unwrap();
     assert_eq!(gate.status, WorkflowStepStatus::Failed);
-    assert_eq!(gate.gate_approved_by.as_deref(), Some("gate_resolver:pr_checks"));
+    assert_eq!(
+        gate.gate_approved_by.as_deref(),
+        Some("gate_resolver:pr_checks")
+    );
     assert_eq!(gate.gate_feedback.as_deref(), Some("checks failed"));
 }
 
