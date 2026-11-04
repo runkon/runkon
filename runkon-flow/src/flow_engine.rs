@@ -2862,18 +2862,31 @@ mod tests {
         );
     }
 
-    /// Resume `alpha` (`do { alpha } while alpha.blocking`, max 2, `on_max_iter`) followed
-    /// by `beta`, with `alpha` completed at iterations `0..seeded` carrying `blocking`
-    /// and, if `fail_next`, a failed row at iteration `seeded`. Returns (alpha runs, beta
-    /// runs, `all_succeeded`, the run's recorded error text). A body error does not make
-    /// `resume` return `Err`; it fails the run and is recorded on it.
-    fn resume_exhausted_do_while(
+    /// Shape of the loop `resume_exhausted_loop` resumes.
+    #[derive(Clone, Copy)]
+    enum LoopShape {
+        /// `do { alpha } while alpha.blocking`, then `beta`.
+        DoWhile,
+        /// `alpha; while alpha.blocking { alpha }`, then `beta`.
+        While,
+    }
+
+    /// Resume the loop described by `shape` (max 2 iterations, `on_max_iter`,
+    /// `stuck_after`) followed by `beta`, with the loop body `alpha` completed at
+    /// iterations `0..seeded` carrying `blocking` and, if `fail_next`, a failed row at
+    /// iteration `seeded`. Returns (alpha runs, beta runs, `all_succeeded`, the run's
+    /// recorded error text). A body error does not make `resume` return `Err`; it fails
+    /// the run and is recorded on it.
+    fn resume_exhausted_loop(
+        shape: LoopShape,
         on_max_iter: crate::dsl::OnMaxIter,
+        stuck_after: Option<u32>,
         seeded: i64,
         fail_next: bool,
         still_broken: bool,
+        varied_history: bool,
     ) -> (usize, usize, bool, String) {
-        use crate::dsl::{DoWhileNode, WorkflowNode};
+        use crate::dsl::{DoWhileNode, WhileNode, WorkflowNode};
         use crate::persistence_memory::InMemoryWorkflowPersistence;
         use crate::status::WorkflowStepStatus::{Completed, Failed};
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2881,15 +2894,36 @@ mod tests {
         let persistence = Arc::new(InMemoryWorkflowPersistence::new());
         let run = make_test_run(&persistence);
         let run_id = run.id.clone();
+        // A `while` is preceded by the `alpha` call that sets its condition.
+        let base = match shape {
+            LoopShape::DoWhile => 0,
+            LoopShape::While => {
+                seed_step_at(
+                    &persistence,
+                    &run.id,
+                    "alpha",
+                    0,
+                    0,
+                    Completed,
+                    r#"["blocking"]"#,
+                    None,
+                );
+                1
+            }
+        };
         for i in 0..seeded {
             seed_step_at(
                 &persistence,
                 &run.id,
                 "alpha",
-                i,
+                base + i,
                 i,
                 Completed,
-                r#"["blocking"]"#,
+                if varied_history && i == 0 {
+                    r#"["blocking","older"]"#
+                } else {
+                    r#"["blocking"]"#
+                },
                 None,
             );
         }
@@ -2898,7 +2932,7 @@ mod tests {
                 &persistence,
                 &run.id,
                 "alpha",
-                seeded,
+                base + seeded,
                 seeded,
                 Failed,
                 "[]",
@@ -2927,20 +2961,34 @@ mod tests {
         state.persistence = persistence.clone();
         state.action_registry = Arc::new(ActionRegistry::new(m, None));
         state.workflow_run_id = run.id;
-        let def = make_def(
-            "wf",
-            vec![
-                WorkflowNode::DoWhile(DoWhileNode {
-                    step: "alpha".to_string(),
-                    marker: "blocking".to_string(),
-                    max_iterations: 2,
-                    stuck_after: None,
-                    on_max_iter,
-                    body: vec![call_node("alpha")],
-                }),
-                call_node("beta"),
-            ],
+        let (step, marker, body) = (
+            "alpha".to_string(),
+            "blocking".to_string(),
+            vec![call_node("alpha")],
         );
+        let looped = match shape {
+            LoopShape::DoWhile => WorkflowNode::DoWhile(DoWhileNode {
+                step,
+                marker,
+                max_iterations: 2,
+                stuck_after,
+                on_max_iter,
+                body,
+            }),
+            LoopShape::While => WorkflowNode::While(WhileNode {
+                step,
+                marker,
+                max_iterations: 2,
+                stuck_after,
+                on_max_iter,
+                body,
+            }),
+        };
+        let nodes = match shape {
+            LoopShape::DoWhile => vec![looped, call_node("beta")],
+            LoopShape::While => vec![call_node("alpha"), looped, call_node("beta")],
+        };
+        let def = make_def("wf", nodes);
         let result = FlowEngineBuilder::new()
             .build()
             .unwrap()
@@ -2957,6 +3005,40 @@ mod tests {
             beta_count.load(Ordering::SeqCst),
             result.all_succeeded,
             recorded,
+        )
+    }
+
+    fn resume_exhausted_do_while(
+        on_max_iter: crate::dsl::OnMaxIter,
+        seeded: i64,
+        fail_next: bool,
+        still_broken: bool,
+    ) -> (usize, usize, bool, String) {
+        resume_exhausted_loop(
+            LoopShape::DoWhile,
+            on_max_iter,
+            None,
+            seeded,
+            fail_next,
+            still_broken,
+            false,
+        )
+    }
+
+    fn resume_exhausted_while(
+        on_max_iter: crate::dsl::OnMaxIter,
+        seeded: i64,
+        fail_next: bool,
+        still_broken: bool,
+    ) -> (usize, usize, bool, String) {
+        resume_exhausted_loop(
+            LoopShape::While,
+            on_max_iter,
+            None,
+            seeded,
+            fail_next,
+            still_broken,
+            false,
         )
     }
 
@@ -3001,6 +3083,90 @@ mod tests {
         assert!(ok);
         assert_eq!(alpha, 0);
         assert_eq!(beta, 1);
+    }
+
+    // #133: the same behaviour for a `while` loop.
+    #[test]
+    fn resume_exhausted_while_gets_fresh_budget_and_completes() {
+        let (alpha, beta, ok, _) =
+            resume_exhausted_while(crate::dsl::OnMaxIter::Fail, 2, false, false);
+        assert!(ok);
+        assert_eq!(alpha, 1, "alpha runs once, at iteration 2");
+        assert_eq!(beta, 1, "the step after the loop runs");
+    }
+
+    #[test]
+    fn resume_exhausted_while_still_broken_fails_after_fresh_budget() {
+        let (alpha, beta, ok, err) =
+            resume_exhausted_while(crate::dsl::OnMaxIter::Fail, 2, false, true);
+        assert!(!ok);
+        assert!(err.contains("reached max_iterations (2)"), "{err}");
+        assert_eq!(alpha, 2);
+        assert_eq!(beta, 0);
+    }
+
+    #[test]
+    fn resume_while_mid_loop_failure_keeps_original_budget() {
+        let (alpha, beta, ok, err) =
+            resume_exhausted_while(crate::dsl::OnMaxIter::Fail, 1, true, true);
+        assert!(!ok);
+        assert!(err.contains("reached max_iterations (2)"), "{err}");
+        assert_eq!(alpha, 1, "only the failed iteration re-runs");
+        assert_eq!(beta, 0);
+    }
+
+    #[test]
+    fn resume_exhausted_while_continue_does_not_reenter_loop() {
+        let (alpha, beta, ok, _) =
+            resume_exhausted_while(crate::dsl::OnMaxIter::Continue, 2, false, false);
+        assert!(ok);
+        assert_eq!(alpha, 0);
+        assert_eq!(beta, 1);
+    }
+
+    // #133: the fresh window starts with no stuck history, so replayed rows never count
+    // toward `stuck_after`; the check still fires on iterations run inside the window.
+    // Replayed rows all carry the marker; with `stuck_after = 3` a stale history would
+    // make the first live iteration look stuck.
+    #[test]
+    fn resume_fresh_budget_ignores_replayed_rows_for_stuck_after() {
+        for shape in [LoopShape::DoWhile, LoopShape::While] {
+            let (alpha, beta, ok, err) = resume_exhausted_loop(
+                shape,
+                crate::dsl::OnMaxIter::Fail,
+                Some(3),
+                2,
+                false,
+                true,
+                false,
+            );
+            assert!(!ok);
+            assert!(err.contains("reached max_iterations (2)"), "{err}");
+            assert!(!err.contains("stuck"), "{err}");
+            assert_eq!(alpha, 2);
+            assert_eq!(beta, 0);
+        }
+    }
+
+    // Replayed marker sets differ from the live one, so stuck fires only after two live
+    // iterations; stale replayed history would fire it after one.
+    #[test]
+    fn resume_fresh_budget_still_detects_stuck_within_window() {
+        for shape in [LoopShape::DoWhile, LoopShape::While] {
+            let (alpha, beta, ok, err) = resume_exhausted_loop(
+                shape,
+                crate::dsl::OnMaxIter::Fail,
+                Some(2),
+                2,
+                false,
+                true,
+                true,
+            );
+            assert!(!ok);
+            assert!(err.contains("stuck after 2 iterations"), "{err}");
+            assert_eq!(alpha, 2);
+            assert_eq!(beta, 0);
+        }
     }
 
     // #108: a fast-forwarded `while` consumes its body's occurrences, so a same-named

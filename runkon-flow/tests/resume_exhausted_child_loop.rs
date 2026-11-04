@@ -53,6 +53,17 @@ impl ActionExecutor for AnalyzeExecutor {
     }
 }
 
+/// The executor list shared by the engine builder and each run's action registry.
+fn executors(broken: &Arc<AtomicBool>, runs: &Arc<AtomicUsize>) -> Vec<Box<dyn ActionExecutor>> {
+    vec![
+        Box::new(AnalyzeExecutor {
+            broken: Arc::clone(broken),
+            runs: Arc::clone(runs),
+        }),
+        Box::new(MockExecutor::new("after")),
+    ]
+}
+
 struct Harness {
     engine: Arc<FlowEngine>,
     persistence: Arc<InMemoryWorkflowPersistence>,
@@ -64,13 +75,7 @@ struct Harness {
 
 impl Harness {
     fn executors(&self) -> Vec<Box<dyn ActionExecutor>> {
-        vec![
-            Box::new(AnalyzeExecutor {
-                broken: Arc::clone(&self.broken),
-                runs: Arc::clone(&self.analyze_runs),
-            }),
-            Box::new(MockExecutor::new("after")),
-        ]
+        executors(&self.broken, &self.analyze_runs)
     }
 
     fn state(&self, run_id: &str, workflow_name: &str) -> ExecutionState {
@@ -165,15 +170,6 @@ fn parent_resumed_after_child_exhausted_loop_reruns_it_and_continues() {
         ],
     );
 
-    let executors = |b: &Arc<AtomicBool>, r: &Arc<AtomicUsize>| -> Vec<Box<dyn ActionExecutor>> {
-        vec![
-            Box::new(AnalyzeExecutor {
-                broken: Arc::clone(b),
-                runs: Arc::clone(r),
-            }),
-            Box::new(MockExecutor::new("after")),
-        ]
-    };
     let engine = Arc::new(
         executors(&broken, &analyze_runs)
             .into_iter()

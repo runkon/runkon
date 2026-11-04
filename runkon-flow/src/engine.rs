@@ -1398,6 +1398,73 @@ pub(crate) fn resume_budget_spent_by_prior_attempt(
     ctx.has_completed_at(&keys, iteration - 1)
 }
 
+/// The parts of a `while` / `do … while` node that budget accounting needs.
+pub(crate) struct LoopSpec<'a> {
+    pub kind: &'a str,
+    pub step: &'a str,
+    pub marker: &'a str,
+    pub max_iterations: u32,
+    pub on_max_iter: &'a crate::dsl::OnMaxIter,
+    pub body: &'a [crate::dsl::WorkflowNode],
+}
+
+/// The current iteration budget window of a `while` / `do … while` loop. It starts at
+/// iteration 0 and, on resume, restarts at the iteration where a prior attempt had
+/// exhausted `max_iterations` (#133).
+pub(crate) struct LoopBudgetWindow {
+    start: u32,
+    executed_at_start: usize,
+}
+
+impl LoopBudgetWindow {
+    pub(crate) fn new(state: &ExecutionState) -> Self {
+        Self {
+            start: 0,
+            executed_at_start: resume_executed_count(state),
+        }
+    }
+
+    /// Iteration number relative to the window start.
+    pub(crate) fn relative(&self, iteration: u32) -> u32 {
+        iteration - self.start
+    }
+
+    /// If the loop's budget was spent entirely by a prior attempt, start a fresh window
+    /// at `iteration` and clear the stuck-detection history. Returns the iteration
+    /// relative to the (possibly new) window.
+    pub(crate) fn rebase_if_spent(
+        &mut self,
+        state: &ExecutionState,
+        node: &LoopSpec<'_>,
+        iteration: u32,
+        prev_marker_sets: &mut VecDeque<HashSet<String>>,
+    ) -> u32 {
+        if *node.on_max_iter == crate::dsl::OnMaxIter::Fail
+            && self.relative(iteration) >= node.max_iterations
+            && resume_budget_spent_by_prior_attempt(
+                state,
+                node.body,
+                iteration,
+                self.executed_at_start,
+            )
+        {
+            tracing::info!(
+                "resume: {} {}.{} exhausted max_iterations ({}) in a prior attempt; \
+                 starting a fresh budget at iteration {}",
+                node.kind,
+                node.step,
+                node.marker,
+                node.max_iterations,
+                iteration
+            );
+            self.start = iteration;
+            self.executed_at_start = resume_executed_count(state);
+            prev_marker_sets.clear();
+        }
+        self.relative(iteration)
+    }
+}
+
 /// Executed-step count of the resume context, 0 when not resuming.
 pub(crate) fn resume_executed_count(state: &ExecutionState) -> usize {
     state.resume_ctx.as_ref().map_or(0, ResumeContext::executed)
