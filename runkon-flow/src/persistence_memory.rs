@@ -138,17 +138,22 @@ impl InMemoryWorkflowPersistence {
         self.store.lock().unwrap().runs.insert(id.to_string(), run);
     }
 
+    /// Test helper: expire the current lease for `run_id` so another engine can resume
+    /// it, as when the previous owner has stopped.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn expire_lease(&self, run_id: &str) {
+        let mut store = self.store.lock().unwrap();
+        if let Some(run) = store.runs.get_mut(run_id) {
+            run.lease_until = Some("1970-01-01T00:00:00Z".to_string());
+        }
+    }
+
     /// Test helper: forcibly expire the current lease for `run_id`, then immediately
     /// steal it with `new_token`. Used to simulate another engine claiming the lease
     /// while the original engine is still running.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn expire_and_steal_lease(&self, run_id: &str, new_token: &str) {
-        {
-            let mut store = self.store.lock().unwrap();
-            if let Some(run) = store.runs.get_mut(run_id) {
-                run.lease_until = Some("1970-01-01T00:00:00Z".to_string());
-            }
-        }
+        self.expire_lease(run_id);
         self.acquire_lease(run_id, new_token, 3600).unwrap();
     }
 }

@@ -92,3 +92,7 @@ required-features = ["test-utils"]
 [[test]]
 name = "child_failure_cause"
 required-features = ["test-utils"]
+
+[[test]]
+name = "resume_exhausted_child_loop"
+required-features = ["test-utils"]

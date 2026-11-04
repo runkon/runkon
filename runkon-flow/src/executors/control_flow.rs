@@ -3,6 +3,7 @@ use std::collections::{HashSet, VecDeque};
 use crate::dsl::{Condition, DoNode, DoWhileNode, IfNode, UnlessNode, WhileNode};
 use crate::engine::{
     check_max_iterations, check_stuck, execute_nodes, execute_single_node, ExecutionState,
+    LoopBudgetWindow, LoopSpec,
 };
 use crate::engine_error::Result;
 use crate::helpers::{advance_resume_past_while_iterations, find_max_completed_while_iteration};
@@ -60,6 +61,7 @@ pub fn execute_while(state: &mut ExecutionState, node: &WhileNode) -> Result<()>
     }
     let mut iteration = start_iteration;
     let mut prev_marker_sets: VecDeque<HashSet<String>> = VecDeque::new();
+    let mut window = LoopBudgetWindow::new(state);
 
     loop {
         // Check condition
@@ -79,9 +81,23 @@ pub fn execute_while(state: &mut ExecutionState, node: &WhileNode) -> Result<()>
             break;
         }
 
+        let relative = window.rebase_if_spent(
+            state,
+            &LoopSpec {
+                kind: "while",
+                step: &node.step,
+                marker: &node.marker,
+                max_iterations: node.max_iterations,
+                on_max_iter: &node.on_max_iter,
+                body: &node.body,
+            },
+            iteration,
+            &mut prev_marker_sets,
+        );
+
         if check_max_iterations(
             state,
-            iteration,
+            relative,
             node.max_iterations,
             &node.on_max_iter,
             &node.step,
@@ -95,7 +111,7 @@ pub fn execute_while(state: &mut ExecutionState, node: &WhileNode) -> Result<()>
             "while {}.{} — iteration {}/{}",
             node.step,
             node.marker,
-            iteration + 1,
+            relative + 1,
             node.max_iterations
         );
 
@@ -129,11 +145,26 @@ pub fn execute_while(state: &mut ExecutionState, node: &WhileNode) -> Result<()>
 pub fn execute_do_while(state: &mut ExecutionState, node: &DoWhileNode) -> Result<()> {
     let mut iteration = 0u32;
     let mut prev_marker_sets: VecDeque<HashSet<String>> = VecDeque::new();
+    let mut window = LoopBudgetWindow::new(state);
 
     loop {
+        let relative = window.rebase_if_spent(
+            state,
+            &LoopSpec {
+                kind: "do",
+                step: &node.step,
+                marker: &node.marker,
+                max_iterations: node.max_iterations,
+                on_max_iter: &node.on_max_iter,
+                body: &node.body,
+            },
+            iteration,
+            &mut prev_marker_sets,
+        );
+
         if check_max_iterations(
             state,
-            iteration,
+            relative,
             node.max_iterations,
             &node.on_max_iter,
             &node.step,
@@ -147,7 +178,7 @@ pub fn execute_do_while(state: &mut ExecutionState, node: &DoWhileNode) -> Resul
             "do {}.{} — iteration {}/{}",
             node.step,
             node.marker,
-            iteration + 1,
+            relative + 1,
             node.max_iterations
         );
 
