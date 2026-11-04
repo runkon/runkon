@@ -163,9 +163,10 @@ fn poll_resolver(
     let actor = format!("{GATE_RESOLVER_ACTOR_PREFIX}:{}", node.gate_type);
     match poll {
         GatePoll::Approved(feedback) => {
-            let recorded = state
-                .persistence
-                .approve_gate(step_id, &actor, feedback.as_deref(), None);
+            let recorded =
+                state
+                    .persistence
+                    .approve_gate(step_id, &actor, feedback.as_deref(), None);
             if let Err(e) = recorded {
                 tracing::warn!("Gate '{}': failed to record approval: {e}", node.name);
                 return None;

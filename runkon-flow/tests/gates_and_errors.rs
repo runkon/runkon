@@ -15,6 +15,7 @@ use runkon_flow::traits::action_executor::ActionOutput;
 use runkon_flow::traits::gate_resolver::{GateParams, GatePoll, GateResolver};
 use runkon_flow::traits::persistence::WorkflowPersistence;
 use runkon_flow::traits::run_context::RunContext;
+use runkon_flow::traits::GateApprovalStore;
 use runkon_flow::types::WorkflowExecConfig;
 use runkon_flow::CancellationReason;
 use runkon_flow::FlowEngineBuilder;
@@ -986,7 +987,11 @@ fn resolver_poll_interval_throttles_polls() {
         .expect("engine build failed");
     let def = make_def("pr-checks-throttle", vec![pr_checks_gate()]);
     let persistence = make_persistence();
-    let mut state = make_state("pr-checks-throttle", Arc::clone(&persistence), HashMap::new());
+    let mut state = make_state(
+        "pr-checks-throttle",
+        Arc::clone(&persistence),
+        HashMap::new(),
+    );
     state.exec_config = WorkflowExecConfig {
         poll_interval: Duration::from_millis(1),
         ..WorkflowExecConfig::default()
