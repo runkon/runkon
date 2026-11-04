@@ -2,8 +2,10 @@ use std::collections::{HashSet, VecDeque};
 
 use crate::dsl::{Condition, DoNode, DoWhileNode, IfNode, UnlessNode, WhileNode};
 use crate::engine::{
-    check_max_iterations, check_stuck, execute_nodes, execute_single_node, ExecutionState,
+    check_max_iterations, check_stuck, execute_nodes, execute_single_node,
+    resume_budget_spent_by_prior_attempt, resume_executed_count, ExecutionState,
 };
+use crate::dsl::OnMaxIter;
 use crate::engine_error::Result;
 use crate::helpers::{advance_resume_past_while_iterations, find_max_completed_while_iteration};
 
@@ -60,6 +62,8 @@ pub fn execute_while(state: &mut ExecutionState, node: &WhileNode) -> Result<()>
     }
     let mut iteration = start_iteration;
     let mut prev_marker_sets: VecDeque<HashSet<String>> = VecDeque::new();
+    let mut window_start = 0u32;
+    let mut executed_at_window_start = resume_executed_count(state);
 
     loop {
         // Check condition
@@ -79,9 +83,31 @@ pub fn execute_while(state: &mut ExecutionState, node: &WhileNode) -> Result<()>
             break;
         }
 
+        if node.on_max_iter == OnMaxIter::Fail
+            && iteration - window_start >= node.max_iterations
+            && resume_budget_spent_by_prior_attempt(
+                state,
+                &node.body,
+                iteration,
+                executed_at_window_start,
+            )
+        {
+            tracing::info!(
+                "resume: while {}.{} exhausted max_iterations ({}) in a prior attempt; \
+                 starting a fresh budget at iteration {}",
+                node.step,
+                node.marker,
+                node.max_iterations,
+                iteration
+            );
+            window_start = iteration;
+            executed_at_window_start = resume_executed_count(state);
+            prev_marker_sets.clear();
+        }
+
         if check_max_iterations(
             state,
-            iteration,
+            iteration - window_start,
             node.max_iterations,
             &node.on_max_iter,
             &node.step,
@@ -95,7 +121,7 @@ pub fn execute_while(state: &mut ExecutionState, node: &WhileNode) -> Result<()>
             "while {}.{} — iteration {}/{}",
             node.step,
             node.marker,
-            iteration + 1,
+            iteration - window_start + 1,
             node.max_iterations
         );
 
@@ -129,11 +155,35 @@ pub fn execute_while(state: &mut ExecutionState, node: &WhileNode) -> Result<()>
 pub fn execute_do_while(state: &mut ExecutionState, node: &DoWhileNode) -> Result<()> {
     let mut iteration = 0u32;
     let mut prev_marker_sets: VecDeque<HashSet<String>> = VecDeque::new();
+    let mut window_start = 0u32;
+    let mut executed_at_window_start = resume_executed_count(state);
 
     loop {
+        if node.on_max_iter == OnMaxIter::Fail
+            && iteration - window_start >= node.max_iterations
+            && resume_budget_spent_by_prior_attempt(
+                state,
+                &node.body,
+                iteration,
+                executed_at_window_start,
+            )
+        {
+            tracing::info!(
+                "resume: do {}.{} exhausted max_iterations ({}) in a prior attempt; \
+                 starting a fresh budget at iteration {}",
+                node.step,
+                node.marker,
+                node.max_iterations,
+                iteration
+            );
+            window_start = iteration;
+            executed_at_window_start = resume_executed_count(state);
+            prev_marker_sets.clear();
+        }
+
         if check_max_iterations(
             state,
-            iteration,
+            iteration - window_start,
             node.max_iterations,
             &node.on_max_iter,
             &node.step,
@@ -147,7 +197,7 @@ pub fn execute_do_while(state: &mut ExecutionState, node: &DoWhileNode) -> Resul
             "do {}.{} — iteration {}/{}",
             node.step,
             node.marker,
-            iteration + 1,
+            iteration - window_start + 1,
             node.max_iterations
         );
 

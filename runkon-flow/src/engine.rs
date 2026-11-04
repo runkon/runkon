@@ -33,6 +33,9 @@ pub struct ResumeContext {
     occurrences: HashMap<String, HashMap<u32, Vec<Option<WorkflowRunStep>>>>,
     /// (name, iteration) -> how many occurrences this resumed run has claimed so far.
     cursors: HashMap<StepKey, usize>,
+    /// How many steps this resumed run has actually executed (claims that found no
+    /// completed row).
+    executed: usize,
 }
 
 impl ResumeContext {
@@ -92,6 +95,7 @@ impl ResumeContext {
         Self {
             occurrences,
             cursors: HashMap::new(),
+            executed: 0,
         }
     }
 
@@ -137,6 +141,9 @@ impl ResumeContext {
     /// if it completed. Always advances, so the n-th execution matches the n-th record.
     pub(crate) fn claim(&mut self, name: &str, iteration: u32) -> Option<WorkflowRunStep> {
         let row = self.next_completed(name, iteration).cloned();
+        if row.is_none() {
+            self.executed += 1;
+        }
         if self
             .occurrences
             .get(name)
@@ -145,6 +152,21 @@ impl ResumeContext {
             self.advance(name, iteration, 1);
         }
         row
+    }
+
+    /// Number of steps this resumed run has executed so far (claims that missed).
+    pub(crate) fn executed(&self) -> usize {
+        self.executed
+    }
+
+    /// True when any of `names` has a completed occurrence at `iteration`.
+    pub(crate) fn has_completed_at(&self, names: &[String], iteration: u32) -> bool {
+        names.iter().any(|n| {
+            self.occurrences
+                .get(n)
+                .and_then(|m| m.get(&iteration))
+                .is_some_and(|slots| slots.iter().any(Option::is_some))
+        })
     }
 
     /// Skip `by` occurrences of `(name, iteration)`, for a fast-forwarded `while` loop.
@@ -1351,6 +1373,34 @@ pub fn check_stuck(
     }
 
     Ok(())
+}
+
+/// On resume, true when a loop that hit its iteration budget did so only through
+/// replayed rows: nothing has executed since `executed_at_window_start` and the
+/// previous iteration has saved body rows. The budget was spent by a prior attempt,
+/// so the caller may start a fresh window of `max_iterations` at `iteration`.
+pub(crate) fn resume_budget_spent_by_prior_attempt(
+    state: &ExecutionState,
+    body: &[crate::dsl::WorkflowNode],
+    iteration: u32,
+    executed_at_window_start: usize,
+) -> bool {
+    let Some(ctx) = state.resume_ctx.as_ref() else {
+        return false;
+    };
+    if iteration == 0 || ctx.executed() != executed_at_window_start {
+        return false;
+    }
+    let keys: Vec<String> = body
+        .iter()
+        .flat_map(crate::helpers::collect_leaf_step_keys)
+        .collect();
+    ctx.has_completed_at(&keys, iteration - 1)
+}
+
+/// Executed-step count of the resume context, 0 when not resuming.
+pub(crate) fn resume_executed_count(state: &ExecutionState) -> usize {
+    state.resume_ctx.as_ref().map_or(0, ResumeContext::executed)
 }
 
 /// Check whether the loop has exceeded `max_iterations`.
