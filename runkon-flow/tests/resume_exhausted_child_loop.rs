@@ -7,9 +7,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use runkon_flow::dsl::{
-    CallWorkflowNode, DoWhileNode, OnMaxIter, WorkflowDef, WorkflowNode,
-};
+use runkon_flow::dsl::{CallWorkflowNode, DoWhileNode, OnMaxIter, WorkflowDef, WorkflowNode};
 use runkon_flow::engine::ExecutionState;
 use runkon_flow::engine::{ChildWorkflowContext, ChildWorkflowInput, ChildWorkflowRunner};
 use runkon_flow::engine_error::{EngineError, Result as EngineResult};

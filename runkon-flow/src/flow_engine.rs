@@ -2865,13 +2865,14 @@ mod tests {
     /// Resume `alpha` (`do { alpha } while alpha.blocking`, max 2, `on_max_iter`) followed
     /// by `beta`, with `alpha` completed at iterations `0..seeded` carrying `blocking`
     /// and, if `fail_next`, a failed row at iteration `seeded`. Returns (alpha runs, beta
-    /// runs, result).
+    /// runs, `all_succeeded`, the run's recorded error text). A body error does not make
+    /// `resume` return `Err`; it fails the run and is recorded on it.
     fn resume_exhausted_do_while(
         on_max_iter: crate::dsl::OnMaxIter,
         seeded: i64,
         fail_next: bool,
         still_broken: bool,
-    ) -> (usize, usize, Result<crate::types::WorkflowResult, EngineError>) {
+    ) -> (usize, usize, bool, String) {
         use crate::dsl::{DoWhileNode, WorkflowNode};
         use crate::persistence_memory::InMemoryWorkflowPersistence;
         use crate::status::WorkflowStepStatus::{Completed, Failed};
@@ -2879,6 +2880,7 @@ mod tests {
 
         let persistence = Arc::new(InMemoryWorkflowPersistence::new());
         let run = make_test_run(&persistence);
+        let run_id = run.id.clone();
         for i in 0..seeded {
             seed_step_at(
                 &persistence,
@@ -2892,7 +2894,16 @@ mod tests {
             );
         }
         if fail_next {
-            seed_step_at(&persistence, &run.id, "alpha", seeded, seeded, Failed, "[]", None);
+            seed_step_at(
+                &persistence,
+                &run.id,
+                "alpha",
+                seeded,
+                seeded,
+                Failed,
+                "[]",
+                None,
+            );
         }
         let alpha_count = Arc::new(AtomicUsize::new(0));
         let beta_count = Arc::new(AtomicUsize::new(0));
@@ -2913,7 +2924,7 @@ mod tests {
             }) as Box<dyn crate::traits::action_executor::ActionExecutor>,
         );
         let mut state = make_bare_state("wf");
-        state.persistence = persistence;
+        state.persistence = persistence.clone();
         state.action_registry = Arc::new(ActionRegistry::new(m, None));
         state.workflow_run_id = run.id;
         let def = make_def(
@@ -2933,11 +2944,19 @@ mod tests {
         let result = FlowEngineBuilder::new()
             .build()
             .unwrap()
-            .resume(&def, &mut state);
+            .resume(&def, &mut state)
+            .unwrap();
+        let stored = persistence.get_run(&run_id).unwrap().unwrap();
+        let recorded = format!(
+            "{} {}",
+            stored.error.unwrap_or_default(),
+            stored.result_summary.unwrap_or_default()
+        );
         (
             alpha_count.load(Ordering::SeqCst),
             beta_count.load(Ordering::SeqCst),
-            result,
+            result.all_succeeded,
+            recorded,
         )
     }
 
@@ -2945,9 +2964,9 @@ mod tests {
     // once the cause is fixed the loop runs again and the steps after it run.
     #[test]
     fn resume_exhausted_do_while_gets_fresh_budget_and_completes() {
-        let (alpha, beta, result) =
+        let (alpha, beta, ok, _) =
             resume_exhausted_do_while(crate::dsl::OnMaxIter::Fail, 2, false, false);
-        assert!(result.unwrap().all_succeeded);
+        assert!(ok);
         assert_eq!(alpha, 1, "alpha runs once, at iteration 2");
         assert_eq!(beta, 1, "the step after the loop runs");
     }
@@ -2955,9 +2974,9 @@ mod tests {
     // The fresh budget is bounded: still broken, it runs max_iterations more times.
     #[test]
     fn resume_exhausted_do_while_still_broken_fails_after_fresh_budget() {
-        let (alpha, beta, result) =
+        let (alpha, beta, ok, err) =
             resume_exhausted_do_while(crate::dsl::OnMaxIter::Fail, 2, false, true);
-        let err = result.map(|_| ()).unwrap_err().to_string();
+        assert!(!ok);
         assert!(err.contains("reached max_iterations (2)"), "{err}");
         assert_eq!(alpha, 2);
         assert_eq!(beta, 0);
@@ -2966,9 +2985,9 @@ mod tests {
     // A failure that was not exhaustion keeps the original budget.
     #[test]
     fn resume_mid_loop_failure_keeps_original_budget() {
-        let (alpha, beta, result) =
+        let (alpha, beta, ok, err) =
             resume_exhausted_do_while(crate::dsl::OnMaxIter::Fail, 1, true, true);
-        let err = result.map(|_| ()).unwrap_err().to_string();
+        assert!(!ok);
         assert!(err.contains("reached max_iterations (2)"), "{err}");
         assert_eq!(alpha, 1, "only the failed iteration re-runs");
         assert_eq!(beta, 0);
@@ -2977,9 +2996,9 @@ mod tests {
     // on_max_iter = continue: the loop is not re-entered on resume.
     #[test]
     fn resume_exhausted_do_while_continue_does_not_reenter_loop() {
-        let (alpha, beta, result) =
+        let (alpha, beta, ok, _) =
             resume_exhausted_do_while(crate::dsl::OnMaxIter::Continue, 2, false, false);
-        assert!(result.unwrap().all_succeeded);
+        assert!(ok);
         assert_eq!(alpha, 0);
         assert_eq!(beta, 1);
     }
