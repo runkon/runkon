@@ -171,10 +171,13 @@ pub fn make_test_execution_state(
 }
 
 /// `WorkflowPersistence` decorator that delegates to `InMemoryWorkflowPersistence`
-/// and lets tests force `is_run_cancelled` to return true at will.
+/// and lets tests force `is_run_cancelled` to return true at will, make the next gate
+/// approve/reject writes fail, or make gate-approval reads fail.
 pub struct CountingPersistence {
     inner: crate::persistence_memory::InMemoryWorkflowPersistence,
     cancelled: std::sync::atomic::AtomicBool,
+    failing_gate_writes: std::sync::atomic::AtomicUsize,
+    failing_gate_reads: std::sync::atomic::AtomicBool,
 }
 
 impl Default for CountingPersistence {
@@ -188,7 +191,28 @@ impl CountingPersistence {
         Self {
             inner: crate::persistence_memory::InMemoryWorkflowPersistence::new(),
             cancelled: std::sync::atomic::AtomicBool::new(false),
+            failing_gate_writes: std::sync::atomic::AtomicUsize::new(0),
+            failing_gate_reads: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+    /// Make the next `n` `approve_gate` / `reject_gate` calls return an error.
+    pub fn fail_next_gate_writes(&self, n: usize) {
+        self.failing_gate_writes
+            .store(n, std::sync::atomic::Ordering::Relaxed);
+    }
+    /// While `v` is true, `get_gate_approval` returns an error.
+    pub fn set_gate_reads_failing(&self, v: bool) {
+        self.failing_gate_reads
+            .store(v, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn take_gate_write_failure(&self) -> bool {
+        self.failing_gate_writes
+            .try_update(
+                std::sync::atomic::Ordering::Relaxed,
+                std::sync::atomic::Ordering::Relaxed,
+                |n| n.checked_sub(1),
+            )
+            .is_ok()
     }
     pub fn set_cancelled(&self, v: bool) {
         self.cancelled
@@ -204,6 +228,14 @@ impl crate::traits::gate_approval_store::GateApprovalStore for CountingPersisten
         crate::traits::gate_approval_store::GateApprovalState,
         crate::engine_error::EngineError,
     > {
+        if self
+            .failing_gate_reads
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(crate::engine_error::EngineError::Workflow(
+                "injected gate read failure".to_string(),
+            ));
+        }
         self.inner.get_gate_approval(step_id)
     }
     fn approve_gate(
@@ -213,6 +245,11 @@ impl crate::traits::gate_approval_store::GateApprovalStore for CountingPersisten
         feedback: Option<&str>,
         selections: Option<&[String]>,
     ) -> Result<(), crate::engine_error::EngineError> {
+        if self.take_gate_write_failure() {
+            return Err(crate::engine_error::EngineError::Workflow(
+                "injected gate write failure".to_string(),
+            ));
+        }
         self.inner
             .approve_gate(step_id, approved_by, feedback, selections)
     }
@@ -222,6 +259,11 @@ impl crate::traits::gate_approval_store::GateApprovalStore for CountingPersisten
         rejected_by: &str,
         feedback: Option<&str>,
     ) -> Result<(), crate::engine_error::EngineError> {
+        if self.take_gate_write_failure() {
+            return Err(crate::engine_error::EngineError::Workflow(
+                "injected gate write failure".to_string(),
+            ));
+        }
         self.inner.reject_gate(step_id, rejected_by, feedback)
     }
 }

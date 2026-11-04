@@ -155,9 +155,17 @@ fn poll_resolver(
         return None;
     }
     // A manual decision recorded since the last read wins over the resolver.
-    if let Ok(s) = state.persistence.get_gate_approval(step_id) {
-        if !matches!(s, GateApprovalState::Pending) {
-            return Some(s);
+    // If that read fails, keep waiting rather than let the resolver override a manual
+    // decision we could not see.
+    match state.persistence.get_gate_approval(step_id) {
+        Ok(GateApprovalState::Pending) => {}
+        Ok(decided) => return Some(decided),
+        Err(e) => {
+            tracing::warn!(
+                "Gate '{}': error re-checking approval state before recording resolver decision: {e}",
+                node.name
+            );
+            return None;
         }
     }
     let actor = format!("{GATE_RESOLVER_ACTOR_PREFIX}:{}", node.gate_type);
@@ -541,6 +549,7 @@ mod tests {
     use crate::test_helpers::{
         make_test_execution_state, CountingPersistence, ForwardSink, VecSink,
     };
+    use crate::traits::gate_approval_store::GateApprovalStore;
     use crate::traits::persistence::{NewRun, WorkflowPersistence};
     use crate::types::StepResult;
 
@@ -669,5 +678,194 @@ mod tests {
             msg.contains("'bad'") && msg.contains("not a string"),
             "{msg}"
         );
+    }
+
+    // ---- resolver polling (#132) ----
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    use crate::engine_error::EngineError;
+    use crate::traits::gate_resolver::GateResolverRegistry;
+    use crate::traits::run_context::RunContext;
+
+    type SeenParams = (
+        String,
+        Option<String>,
+        u32,
+        u64,
+        Option<String>,
+        HashMap<String, String>,
+    );
+    type Seen = Arc<Mutex<Vec<SeenParams>>>;
+
+    /// Resolver whose `poll` runs `on_poll(call_number, params)` and captures each call's params.
+    type OnPoll = Box<dyn Fn(usize, &GateParams) -> GatePoll + Send + Sync>;
+
+    struct HookResolver {
+        polls: Arc<AtomicUsize>,
+        seen: Arc<Mutex<Vec<SeenParams>>>,
+        on_poll: OnPoll,
+    }
+
+    impl GateResolver for HookResolver {
+        fn gate_type(&self) -> &str {
+            "pr_checks"
+        }
+        fn poll(
+            &self,
+            _run_id: &str,
+            params: &GateParams,
+            _ctx: &dyn RunContext,
+        ) -> std::result::Result<GatePoll, EngineError> {
+            let n = self.polls.fetch_add(1, Ordering::SeqCst) + 1;
+            self.seen.lock().unwrap().push((
+                params.step_id.clone(),
+                params.prompt.clone(),
+                params.min_approvals,
+                params.timeout_secs,
+                params.as_identity.clone(),
+                params.options.clone(),
+            ));
+            Ok((self.on_poll)(n, params))
+        }
+    }
+
+    fn install_resolver(
+        state: &mut ExecutionState,
+        on_poll: impl Fn(usize, &GateParams) -> GatePoll + Send + Sync + 'static,
+    ) -> (Arc<AtomicUsize>, Seen) {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let seen: Seen = Arc::default();
+        let mut registry = GateResolverRegistry::new();
+        registry.register(HookResolver {
+            polls: Arc::clone(&polls),
+            seen: Arc::clone(&seen),
+            on_poll: Box::new(on_poll),
+        });
+        state.gate_resolvers = Arc::new(registry);
+        state.exec_config.poll_interval = Duration::from_millis(1);
+        (polls, seen)
+    }
+
+    fn pr_checks_node() -> GateNode {
+        GateNode {
+            gate_type: "pr_checks".into(),
+            ..gate_node(None, 30)
+        }
+    }
+
+    fn gate_step(cp: &CountingPersistence, run_id: &str) -> crate::types::WorkflowRunStep {
+        cp.get_steps(run_id)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.step_name == "approve")
+            .unwrap()
+    }
+
+    #[test]
+    fn manual_decision_wins_over_resolver_decision() {
+        let (mut state, cp, run_id) = make_state(VecSink::new());
+        let cp2 = Arc::clone(&cp);
+        // The resolver's poll lets "alice" approve, then reports Rejected.
+        let (polls, _seen) = install_resolver(&mut state, move |_, params| {
+            cp2.approve_gate(&params.step_id, "alice", None, None)
+                .unwrap();
+            GatePoll::Rejected("checks failed".into())
+        });
+        execute_gate(&mut state, &pr_checks_node(), 0).expect("manual approval wins");
+        assert_eq!(polls.load(Ordering::SeqCst), 1);
+        let step = gate_step(&cp, &run_id);
+        assert_eq!(step.gate_approved_by.as_deref(), Some("alice"));
+        assert_eq!(step.status, WorkflowStepStatus::Completed);
+    }
+
+    #[test]
+    fn failed_approval_write_keeps_waiting_then_releases() {
+        let (mut state, cp, run_id) = make_state(VecSink::new());
+        cp.fail_next_gate_writes(1);
+        let (polls, _seen) = install_resolver(&mut state, |_, _| GatePoll::Approved(None));
+        execute_gate(&mut state, &pr_checks_node(), 0).expect("second poll releases");
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            gate_step(&cp, &run_id).gate_approved_by.as_deref(),
+            Some("gate_resolver:pr_checks")
+        );
+    }
+
+    #[test]
+    fn failed_rejection_write_keeps_waiting_then_rejects() {
+        let (mut state, cp, run_id) = make_state(VecSink::new());
+        cp.fail_next_gate_writes(1);
+        let (polls, _seen) = install_resolver(&mut state, |_, _| {
+            GatePoll::Rejected("checks failed".into())
+        });
+        let err = execute_gate(&mut state, &pr_checks_node(), 0).unwrap_err();
+        assert!(err.to_string().contains("checks failed"), "{err}");
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            gate_step(&cp, &run_id).gate_approved_by.as_deref(),
+            Some("gate_resolver:pr_checks")
+        );
+    }
+
+    #[test]
+    fn unreadable_approval_state_blocks_resolver_decision() {
+        let (mut state, cp, run_id) = make_state(VecSink::new());
+        cp.set_gate_reads_failing(true);
+        let (polls, _seen) = install_resolver(&mut state, |_, _| GatePoll::Approved(None));
+        let node = GateNode {
+            timeout_secs: 1,
+            ..pr_checks_node()
+        };
+        // The resolver keeps approving, but the manual-decision re-check cannot read, so
+        // nothing is recorded and the gate times out.
+        assert!(execute_gate(&mut state, &node, 0).is_err());
+        assert!(polls.load(Ordering::SeqCst) >= 1);
+        cp.set_gate_reads_failing(false);
+        assert_eq!(gate_step(&cp, &run_id).gate_approved_by, None);
+    }
+
+    #[test]
+    fn resolver_receives_gate_params() {
+        // Node-level as_identity wins; options come from the resolved map.
+        let (mut state, _cp, run_id) = make_state(VecSink::new());
+        state.default_as_identity = Some("state-bot".into());
+        with_structured(&mut state, r#"{"field": {"a": "Alpha", "b": "Beta"}}"#);
+        let (_polls, seen) = install_resolver(&mut state, |_, _| GatePoll::Approved(None));
+        let node = GateNode {
+            as_identity: Some("node-bot".into()),
+            min_approvals: 2,
+            options: step_ref("prev.field"),
+            ..pr_checks_node()
+        };
+        execute_gate(&mut state, &node, 0).unwrap();
+        let step_id = _cp_step_id(&state, &run_id);
+        let got = seen.lock().unwrap()[0].clone();
+        assert_eq!(got.0, step_id);
+        assert_eq!(got.1.as_deref(), Some("ship it?"));
+        assert_eq!(got.2, 2);
+        assert_eq!(got.3, 30);
+        assert_eq!(got.4.as_deref(), Some("node-bot"));
+        assert_eq!(got.5.get("a").map(String::as_str), Some("Alpha"));
+        assert_eq!(got.5.get("b").map(String::as_str), Some("Beta"));
+
+        // No node-level identity: falls back to the state default.
+        let (mut state, _cp, _run_id) = make_state(VecSink::new());
+        state.default_as_identity = Some("state-bot".into());
+        let (_polls, seen) = install_resolver(&mut state, |_, _| GatePoll::Approved(None));
+        execute_gate(&mut state, &pr_checks_node(), 0).unwrap();
+        assert_eq!(seen.lock().unwrap()[0].4.as_deref(), Some("state-bot"));
+    }
+
+    fn _cp_step_id(state: &ExecutionState, run_id: &str) -> String {
+        state
+            .persistence
+            .get_steps(run_id)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.step_name == "approve")
+            .unwrap()
+            .id
     }
 }

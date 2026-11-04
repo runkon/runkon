@@ -15,10 +15,8 @@ pub use runkon_flow::traits::action_executor::ActionExecutor;
 use runkon_flow::traits::action_executor::{ActionOutput, ActionParams, ActionRegistry, StepInfo};
 use runkon_flow::traits::item_provider::{FanOutItem, ItemProvider, ProviderInfo};
 use runkon_flow::traits::persistence::{NewRun, WorkflowPersistence};
-use runkon_flow::traits::run_context::NoopRunContext;
 use runkon_flow::traits::run_context::RunContext;
-use runkon_flow::traits::script_env_provider::NoOpScriptEnvProvider;
-use runkon_flow::types::{WorkflowExecConfig, WorkflowResult};
+use runkon_flow::types::WorkflowResult;
 use runkon_flow::CancellationReason;
 use runkon_flow::ItemProviderRegistry;
 
@@ -121,50 +119,13 @@ pub fn make_state(
         })
         .expect("create_run failed");
 
-    ExecutionState {
-        persistence: Arc::clone(&persistence) as Arc<dyn WorkflowPersistence>,
-        action_registry: Arc::new(ActionRegistry::from_executors(named_executors, None)),
-        script_env_provider: Arc::new(NoOpScriptEnvProvider),
-        workflow_run_id: run.id,
-        workflow_name: wf_name.to_string(),
-        run_ctx: Arc::new(NoopRunContext::default())
-            as Arc<dyn runkon_flow::traits::run_context::RunContext>,
-        extra_plugin_dirs: vec![],
-        model: None,
-        exec_config: WorkflowExecConfig::default(),
-        inputs: HashMap::new(),
-        parent_run_id: String::new(),
-        depth: 0,
-        target_label: None,
-        step_results: HashMap::new(),
-        contexts: vec![],
-        position: 0,
-        all_succeeded: true,
-        total_cost: 0.0,
-        total_turns: 0,
-        total_duration_ms: 0,
-        total_input_tokens: 0,
-        total_output_tokens: 0,
-        total_cache_read_input_tokens: 0,
-        total_cache_creation_input_tokens: 0,
-        has_llm_metrics: false,
-        last_gate_feedback: None,
-        block_output: None,
-        block_with: vec![],
-        resume_ctx: None,
-        default_as_identity: None,
-        gate_resolvers: Default::default(),
-        triggered_by_hook: false,
-        schema_resolver: None,
-        child_runner: None,
-        last_heartbeat_at: ExecutionState::new_heartbeat(),
-        registry: Arc::new(ItemProviderRegistry::new()),
-        event_sinks: Arc::from(vec![]),
-        cancellation: CancellationToken::new(),
-        current_execution_id: Arc::new(Mutex::new(None)),
-        owner_token: None,
-        lease_generation: Some(0),
-    }
+    let mut state = runkon_flow::test_helpers::make_test_execution_state(
+        Arc::clone(&persistence) as Arc<dyn WorkflowPersistence>,
+        run.id,
+    );
+    state.action_registry = Arc::new(ActionRegistry::from_executors(named_executors, None));
+    state.workflow_name = wf_name.to_string();
+    state
 }
 
 /// Wrap `make_state` and set `resume_ctx` to signal a workflow resume.

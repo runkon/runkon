@@ -48,6 +48,10 @@ pub struct GateParams {
 
 pub trait GateResolver: Send + Sync {
     fn gate_type(&self) -> &str;
+    /// Decide a waiting gate. The engine calls this synchronously on the executor thread, so
+    /// the gate's `timeout_secs` and run cancellation are not checked while a call is in
+    /// flight. Implementations must bound their own I/O (for example, a timeout on any
+    /// subprocess or network call) and return an error rather than block indefinitely.
     fn poll(
         &self,
         run_id: &str,

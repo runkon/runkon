@@ -1591,58 +1591,17 @@ mod tests {
 
     // Builds a minimal ExecutionState with empty registries for run() tests.
     fn make_bare_state(wf_name: &str) -> crate::engine::ExecutionState {
-        use crate::cancellation::CancellationToken;
-        use crate::engine::ExecutionState;
         use crate::persistence_memory::InMemoryWorkflowPersistence;
-        use crate::traits::run_context::NoopRunContext;
-        use crate::traits::script_env_provider::NoOpScriptEnvProvider;
-        use crate::types::WorkflowExecConfig;
+
         let persistence = InMemoryWorkflowPersistence::new();
         persistence.seed_run("test-run");
-        ExecutionState {
-            persistence: Arc::new(persistence),
-            action_registry: Arc::new(ActionRegistry::new(HashMap::new(), None)),
-            script_env_provider: Arc::new(NoOpScriptEnvProvider),
-            workflow_run_id: "test-run".to_string(),
-            workflow_name: wf_name.to_string(),
-            run_ctx: Arc::new(NoopRunContext::default())
-                as Arc<dyn crate::traits::run_context::RunContext>,
-            extra_plugin_dirs: vec![],
-            model: None,
-            exec_config: WorkflowExecConfig::default(),
-            inputs: HashMap::new(),
-            parent_run_id: String::new(),
-            depth: 0,
-            target_label: None,
-            step_results: HashMap::new(),
-            contexts: vec![],
-            position: 0,
-            all_succeeded: true,
-            total_cost: 0.0,
-            total_turns: 0,
-            total_duration_ms: 0,
-            total_input_tokens: 0,
-            total_output_tokens: 0,
-            total_cache_read_input_tokens: 0,
-            total_cache_creation_input_tokens: 0,
-            has_llm_metrics: false,
-            last_gate_feedback: None,
-            block_output: None,
-            block_with: vec![],
-            resume_ctx: None,
-            default_as_identity: None,
-            gate_resolvers: Default::default(),
-            triggered_by_hook: false,
-            schema_resolver: None,
-            child_runner: None,
-            last_heartbeat_at: ExecutionState::new_heartbeat(),
-            registry: Arc::new(ItemProviderRegistry::new()),
-            event_sinks: Arc::from(vec![]),
-            cancellation: CancellationToken::new(),
-            current_execution_id: Arc::new(std::sync::Mutex::new(None)),
-            owner_token: None,
-            lease_generation: None,
-        }
+        let mut state = crate::test_helpers::make_test_execution_state(
+            Arc::new(persistence),
+            "test-run".to_string(),
+        );
+        state.workflow_name = wf_name.to_string();
+        state.lease_generation = None;
+        state
     }
 
     // AC7a: run() validates against state action registry, not engine registry

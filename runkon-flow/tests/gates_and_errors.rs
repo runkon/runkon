@@ -863,13 +863,43 @@ fn pr_checks_gate() -> WorkflowNode {
     })
 }
 
-fn run_pr_checks(
-    resolver: ScriptedResolver,
-) -> (
+type PrChecksRun = (
     Result<runkon_flow::types::WorkflowResult, EngineError>,
     Arc<runkon_flow::persistence_memory::InMemoryWorkflowPersistence>,
     String,
-) {
+);
+
+/// Approves the run's waiting gate as `actor` after `delay`, from another thread.
+fn spawn_approver_when_waiting(
+    persistence: &Arc<runkon_flow::persistence_memory::InMemoryWorkflowPersistence>,
+    run_id: &str,
+    actor: &'static str,
+    delay: Duration,
+) -> std::thread::JoinHandle<()> {
+    let p = Arc::clone(persistence);
+    let rid = run_id.to_string();
+    std::thread::spawn(move || {
+        for _ in 0..5000 {
+            let steps = p.get_steps(&rid).unwrap_or_default();
+            if let Some(g) = steps
+                .iter()
+                .find(|s| s.status == WorkflowStepStatus::Waiting)
+            {
+                std::thread::sleep(delay);
+                p.approve_gate(&g.id, actor, None, None).unwrap();
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        panic!("gate never reached Waiting");
+    })
+}
+
+/// Run a one-gate `pr_checks` workflow; `approver` optionally approves it by hand.
+fn run_pr_checks_with(
+    resolver: ScriptedResolver,
+    approver: Option<(&'static str, Duration)>,
+) -> PrChecksRun {
     let engine = FlowEngineBuilder::new()
         .gate_resolver(resolver)
         .build()
@@ -882,8 +912,17 @@ fn run_pr_checks(
         ..WorkflowExecConfig::default()
     };
     let run_id = state.workflow_run_id.clone();
+    let handle = approver
+        .map(|(actor, delay)| spawn_approver_when_waiting(&persistence, &run_id, actor, delay));
     let result = engine.run(&def, &mut state);
+    if let Some(h) = handle {
+        h.join().unwrap();
+    }
     (result, persistence, run_id)
+}
+
+fn run_pr_checks(resolver: ScriptedResolver) -> PrChecksRun {
+    run_pr_checks_with(resolver, None)
 }
 
 #[test]
@@ -938,39 +977,9 @@ fn resolver_error_keeps_waiting() {
 #[test]
 fn manual_approval_releases_gate_while_resolver_pending() {
     let (resolver, polls) = ScriptedResolver::new(vec![]);
-    let engine = FlowEngineBuilder::new()
-        .gate_resolver(resolver)
-        .build()
-        .expect("engine build failed");
-    let def = make_def("pr-checks-manual", vec![pr_checks_gate()]);
-    let persistence = make_persistence();
-    let mut state = make_state("pr-checks-manual", Arc::clone(&persistence), HashMap::new());
-    state.exec_config = WorkflowExecConfig {
-        poll_interval: Duration::from_millis(1),
-        ..WorkflowExecConfig::default()
-    };
-    let run_id = state.workflow_run_id.clone();
-
-    let p = Arc::clone(&persistence);
-    let rid = run_id.clone();
-    let approver = std::thread::spawn(move || {
-        for _ in 0..5000 {
-            let steps = p.get_steps(&rid).unwrap_or_default();
-            if let Some(g) = steps
-                .iter()
-                .find(|s| s.status == WorkflowStepStatus::Waiting)
-            {
-                p.approve_gate(&g.id, "alice", None, None).unwrap();
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        panic!("gate never reached Waiting");
-    });
-
-    let result = engine.run(&def, &mut state).expect("run should succeed");
-    approver.join().unwrap();
-    assert!(result.all_succeeded);
+    let (result, persistence, run_id) =
+        run_pr_checks_with(resolver, Some(("alice", Duration::ZERO)));
+    assert!(result.expect("run should succeed").all_succeeded);
     assert!(polls.load(Ordering::SeqCst) >= 1);
     let steps = persistence.get_steps(&run_id).unwrap();
     let gate = steps.iter().find(|s| s.step_name == "checks").unwrap();
@@ -981,43 +990,146 @@ fn manual_approval_releases_gate_while_resolver_pending() {
 fn resolver_poll_interval_throttles_polls() {
     let (mut resolver, polls) = ScriptedResolver::new(vec![]);
     resolver.interval = Some(Duration::from_secs(3600));
+    let (result, _persistence, _run_id) =
+        run_pr_checks_with(resolver, Some(("bob", Duration::from_millis(50))));
+    assert!(result.expect("run should succeed").all_succeeded);
+    assert_eq!(polls.load(Ordering::SeqCst), 1);
+}
+
+// Resume, `run_workflow` and `run_child` each build or reuse an `ExecutionState` outside
+// `FlowEngine::run`; all of them must hand the engine's resolvers to the gate executor.
+
+fn assert_gate_released_by_resolver(
+    persistence: &runkon_flow::persistence_memory::InMemoryWorkflowPersistence,
+    run_id: &str,
+) {
+    let steps = persistence.get_steps(run_id).unwrap();
+    let gate = steps.iter().find(|s| s.step_name == "checks").unwrap();
+    assert_eq!(gate.status, WorkflowStepStatus::Completed);
+    assert_eq!(
+        gate.gate_approved_by.as_deref(),
+        Some("gate_resolver:pr_checks")
+    );
+}
+
+fn approving_engine() -> (runkon_flow::FlowEngine, Arc<AtomicUsize>) {
+    let (resolver, polls) =
+        ScriptedResolver::new(vec![Ok(GatePoll::Pending), Ok(GatePoll::Approved(None))]);
     let engine = FlowEngineBuilder::new()
         .gate_resolver(resolver)
         .build()
         .expect("engine build failed");
-    let def = make_def("pr-checks-throttle", vec![pr_checks_gate()]);
-    let persistence = make_persistence();
-    let mut state = make_state(
-        "pr-checks-throttle",
-        Arc::clone(&persistence),
-        HashMap::new(),
-    );
-    state.exec_config = WorkflowExecConfig {
+    (engine, polls)
+}
+
+fn fast_poll_config() -> WorkflowExecConfig {
+    WorkflowExecConfig {
         poll_interval: Duration::from_millis(1),
         ..WorkflowExecConfig::default()
-    };
+    }
+}
+
+fn new_run(persistence: &runkon_flow::persistence_memory::InMemoryWorkflowPersistence) -> String {
+    use runkon_flow::traits::persistence::NewRun;
+    persistence
+        .create_run(NewRun {
+            workflow_name: "pr-checks".to_string(),
+            parent_run_id: String::new(),
+            dry_run: false,
+            trigger: "test".to_string(),
+            definition_snapshot: None,
+            parent_workflow_run_id: None,
+        })
+        .expect("create_run failed")
+        .id
+}
+
+#[test]
+fn resumed_run_polls_resolver() {
+    let (engine, polls) = approving_engine();
+    let def = make_def("pr-checks", vec![pr_checks_gate()]);
+    let persistence = make_persistence();
+    let mut state = make_state("pr-checks", Arc::clone(&persistence), HashMap::new());
+    state.exec_config = fast_poll_config();
     let run_id = state.workflow_run_id.clone();
-
-    let p = Arc::clone(&persistence);
-    let rid = run_id.clone();
-    let approver = std::thread::spawn(move || {
-        for _ in 0..5000 {
-            let steps = p.get_steps(&rid).unwrap_or_default();
-            if let Some(g) = steps
-                .iter()
-                .find(|s| s.status == WorkflowStepStatus::Waiting)
-            {
-                std::thread::sleep(Duration::from_millis(50));
-                p.approve_gate(&g.id, "bob", None, None).unwrap();
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        panic!("gate never reached Waiting");
-    });
-
-    let result = engine.run(&def, &mut state).expect("run should succeed");
-    approver.join().unwrap();
+    let result = engine
+        .resume(&def, &mut state)
+        .expect("resume should succeed");
     assert!(result.all_succeeded);
-    assert_eq!(polls.load(Ordering::SeqCst), 1);
+    assert_eq!(polls.load(Ordering::SeqCst), 2);
+    assert_gate_released_by_resolver(&persistence, &run_id);
+}
+
+#[test]
+fn run_workflow_polls_resolver() {
+    use runkon_flow::traits::run_context::NoopRunContext;
+    use runkon_flow::traits::script_env_provider::NoOpScriptEnvProvider;
+    use runkon_flow::{ItemProviderRegistry, RunInput};
+    let (engine, polls) = approving_engine();
+    let def = make_def("pr-checks", vec![pr_checks_gate()]);
+    let persistence = make_persistence();
+    let run_id = new_run(&persistence);
+    let mut input = RunInput::new(
+        Arc::clone(&persistence) as Arc<dyn WorkflowPersistence>,
+        run_id.clone(),
+        "pr-checks".to_string(),
+        Arc::new(
+            runkon_flow::traits::action_executor::ActionRegistry::from_executors(
+                HashMap::new(),
+                None,
+            ),
+        ),
+        Arc::new(ItemProviderRegistry::new()),
+        Arc::new(NoOpScriptEnvProvider),
+        Arc::new(NoopRunContext::default()),
+        runkon_flow::cancellation::CancellationToken::new(),
+    );
+    input.exec_config = fast_poll_config();
+    let result = engine
+        .run_workflow(&def, input)
+        .expect("run should succeed");
+    assert!(result.all_succeeded);
+    assert_eq!(polls.load(Ordering::SeqCst), 2);
+    assert_gate_released_by_resolver(&persistence, &run_id);
+}
+
+#[test]
+fn run_child_polls_resolver() {
+    use runkon_flow::engine::ChildWorkflowContext;
+    use runkon_flow::traits::run_context::NoopRunContext;
+    use runkon_flow::traits::script_env_provider::NoOpScriptEnvProvider;
+    use runkon_flow::{ChildRunInput, ItemProviderRegistry};
+    let (engine, polls) = approving_engine();
+    let def = make_def("pr-checks", vec![pr_checks_gate()]);
+    let persistence = make_persistence();
+    let run_id = new_run(&persistence);
+    let input = ChildRunInput::new(
+        run_id.clone(),
+        Arc::clone(&persistence) as Arc<dyn WorkflowPersistence>,
+        Arc::new(
+            runkon_flow::traits::action_executor::ActionRegistry::from_executors(
+                HashMap::new(),
+                None,
+            ),
+        ),
+        Arc::new(ItemProviderRegistry::new()),
+        Arc::new(NoOpScriptEnvProvider),
+        1,
+        runkon_flow::cancellation::CancellationToken::new(),
+    );
+    let parent_ctx = ChildWorkflowContext::new(
+        Arc::new(NoopRunContext::default()),
+        vec![],
+        "parent-run".to_string(),
+        None,
+        fast_poll_config(),
+        HashMap::new(),
+        Arc::from(vec![]),
+    );
+    let result = engine
+        .run_child(&def, input, &parent_ctx)
+        .expect("child run should succeed");
+    assert!(result.all_succeeded);
+    assert_eq!(polls.load(Ordering::SeqCst), 2);
+    assert_gate_released_by_resolver(&persistence, &run_id);
 }
