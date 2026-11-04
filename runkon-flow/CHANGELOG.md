@@ -1,5 +1,24 @@
 # Changelog — runkon-flow
 
+## 0.8.2 — Breaking
+
+- **Fixed:** a waiting gate now polls its registered `GateResolver`. `Approved` and
+  `Rejected` results are recorded with `approve_gate` / `reject_gate` as
+  `gate_resolver:<gate type>` and release or fail the gate like a manual decision. A
+  recorded manual decision still wins. This makes `pr_checks` / `pr_approval` gates resolve
+  on their own, including in resumed and child runs.
+- **Added:** `GateResolver::poll_interval()` (default `None`, meaning the loop's
+  `poll_interval`) to throttle resolver polls, and `GateResolverRegistry::get`.
+- **Changed (breaking):** `ExecutionState` has a new `gate_resolvers` field. Struct literals
+  need `gate_resolvers: Default::default()`; the engine fills it in on every run.
+
+- **Fixed:** resuming a run whose `do … while` or `while` loop (with `on_max_iter = fail`)
+  failed by reaching `max_iterations` now gives the loop a fresh budget of
+  `max_iterations` iterations, continuing from the next iteration, instead of failing
+  again at once. This also applies when the loop is in a `call workflow` child resumed
+  through `ChildWorkflowRunner::resume_child`. Resumes after other failures keep the
+  original budget, and `on_max_iter = continue` loops are unchanged.
+
 ## 0.8.1 — Fixed
 
 - **Fixed:** `SqliteWorkflowPersistence::insert_step` stores `retry_count` 0 for a step
