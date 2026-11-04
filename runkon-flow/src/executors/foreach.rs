@@ -921,17 +921,13 @@ mod tests {
     /// parent's actual values.
     #[test]
     fn from_state_captures_parent_inputs_for_child_workflow_context() {
-        use std::sync::{Arc, Mutex};
+        use std::sync::Arc;
 
-        use crate::cancellation::CancellationToken;
-        use crate::engine::{
-            ChildWorkflowContext, ChildWorkflowInput, ChildWorkflowRunner, ExecutionState,
-        };
+        use crate::engine::{ChildWorkflowContext, ChildWorkflowInput, ChildWorkflowRunner};
         use crate::engine_error::Result;
         use crate::persistence_memory::InMemoryWorkflowPersistence;
-        use crate::traits::run_context::NoopRunContext;
-        use crate::traits::script_env_provider::NoOpScriptEnvProvider;
-        use crate::types::{WorkflowExecConfig, WorkflowResult};
+
+        use crate::types::WorkflowResult;
 
         struct DummyChildRunner;
         impl ChildWorkflowRunner for DummyChildRunner {
@@ -965,52 +961,12 @@ mod tests {
         parent_inputs.insert("repo_id".to_string(), "repo-42".to_string());
         parent_inputs.insert("foo".to_string(), "bar".to_string());
 
-        let parent = ExecutionState {
-            persistence: Arc::new(InMemoryWorkflowPersistence::new()),
-            action_registry: Arc::new(crate::traits::action_executor::ActionRegistry::new(
-                HashMap::new(),
-                None,
-            )),
-            script_env_provider: Arc::new(NoOpScriptEnvProvider),
-            workflow_run_id: "parent-run".into(),
-            workflow_name: "wf".into(),
-            run_ctx: Arc::new(NoopRunContext::default())
-                as Arc<dyn crate::traits::run_context::RunContext>,
-            extra_plugin_dirs: vec![],
-            model: None,
-            exec_config: WorkflowExecConfig::default(),
-            inputs: parent_inputs.clone(),
-            parent_run_id: String::new(),
-            depth: 0,
-            target_label: None,
-            step_results: HashMap::new(),
-            contexts: vec![],
-            position: 0,
-            all_succeeded: true,
-            total_cost: 0.0,
-            total_turns: 0,
-            total_duration_ms: 0,
-            total_input_tokens: 0,
-            total_output_tokens: 0,
-            total_cache_read_input_tokens: 0,
-            total_cache_creation_input_tokens: 0,
-            has_llm_metrics: false,
-            last_gate_feedback: None,
-            block_output: None,
-            block_with: vec![],
-            resume_ctx: None,
-            default_as_identity: None,
-            triggered_by_hook: false,
-            schema_resolver: None,
-            child_runner: None,
-            last_heartbeat_at: ExecutionState::new_heartbeat(),
-            registry: Arc::new(crate::traits::item_provider::ItemProviderRegistry::new()),
-            event_sinks: Arc::from(vec![]),
-            cancellation: CancellationToken::new(),
-            current_execution_id: Arc::new(Mutex::new(None)),
-            owner_token: None,
-            lease_generation: None,
-        };
+        let mut parent = crate::test_helpers::make_test_execution_state(
+            Arc::new(InMemoryWorkflowPersistence::new()),
+            "parent-run".into(),
+        );
+        parent.inputs = parent_inputs.clone();
+        parent.lease_generation = None;
 
         let ctx = super::ForeachParentCtx::from_state(&parent, Arc::new(DummyChildRunner));
 

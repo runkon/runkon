@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::dsl::ApprovalMode;
 use crate::engine_error::EngineError;
@@ -18,7 +19,6 @@ pub enum GatePoll {
 }
 
 /// All gate configuration passed to `GateResolver::poll`.
-#[allow(dead_code)] // fields are available for resolver use; not all are consumed in Phase 1
 pub struct GateParams {
     pub gate_name: String,
     pub prompt: Option<String>,
@@ -48,12 +48,23 @@ pub struct GateParams {
 
 pub trait GateResolver: Send + Sync {
     fn gate_type(&self) -> &str;
+    /// Decide a waiting gate. The engine calls this synchronously on the executor thread, so
+    /// the gate's `timeout_secs` and run cancellation are not checked while a call is in
+    /// flight. Implementations must bound their own I/O (for example, a timeout on any
+    /// subprocess or network call) and return an error rather than block indefinitely. Any
+    /// time a call spends blocked is an overshoot of the gate's timeout and of cancellation.
     fn poll(
         &self,
         run_id: &str,
         params: &GateParams,
         ctx: &dyn RunContext,
     ) -> Result<GatePoll, EngineError>;
+
+    /// Minimum time between `poll` calls for one waiting gate. `None` (the default) uses
+    /// `WorkflowExecConfig::poll_interval`.
+    fn poll_interval(&self) -> Option<Duration> {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -64,7 +75,8 @@ pub trait GateResolver: Send + Sync {
 ///
 /// Mirrors the pattern of `ItemProviderRegistry`. Used by `FlowEngine::validate()`
 /// to check that every `gate <type>` node (excluding `QualityGate`) has a
-/// registered resolver before execution starts.
+/// registered resolver before execution starts, and by the gate executor, which polls
+/// the node's resolver while the gate waits.
 pub struct GateResolverRegistry {
     resolvers: HashMap<String, Arc<dyn GateResolver>>,
 }
@@ -85,6 +97,11 @@ impl GateResolverRegistry {
     /// Returns `true` if a resolver is registered for `gate_type`.
     pub fn has_type(&self, gate_type: &str) -> bool {
         self.resolvers.contains_key(gate_type)
+    }
+
+    /// Returns the resolver registered for `gate_type`, if any.
+    pub fn get(&self, gate_type: &str) -> Option<Arc<dyn GateResolver>> {
+        self.resolvers.get(gate_type).cloned()
     }
 
     /// Returns all registered gate type strings, sorted alphabetically.
@@ -150,6 +167,18 @@ mod tests {
         });
         let types = registry.registered_types();
         assert_eq!(types, vec!["human_approval", "pr_checks"]);
+    }
+
+    #[test]
+    fn get_returns_registered_resolver_and_default_poll_interval() {
+        let mut registry = GateResolverRegistry::new();
+        registry.register(MockResolver {
+            gate_type: "pr_checks",
+        });
+        let r = registry.get("pr_checks").expect("registered");
+        assert_eq!(r.gate_type(), "pr_checks");
+        assert_eq!(r.poll_interval(), None);
+        assert!(registry.get("other").is_none());
     }
 
     #[test]
