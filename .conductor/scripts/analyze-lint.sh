@@ -81,9 +81,13 @@ done
 if [ ${#FAILED_CHECKS[@]} -gt 0 ]; then
   JOINED=$(IFS=','; echo "${FAILED_CHECKS[*]}")
   CONTEXT="Failing checks: ${JOINED}. Rerun each failing check with the exact command below; a broader command (e.g. workspace clippy) can pass where it fails."$'\n\n'"${FAILURE_DETAILS}"
-  echo "<<<FLOW_OUTPUT>>>"
-  jq -cn --arg ctx "$CONTEXT" '{markers: ["has_lint_errors"], context: $ctx}'
-  echo "<<<END_FLOW_OUTPUT>>>"
+  # jq escapes the excerpts. If it is missing or fails, still emit the
+  # marker (with the check names only) so lint failures never pass silently.
+  if ! OUTPUT=$(jq -cn --arg ctx "$CONTEXT" '{markers: ["has_lint_errors"], context: $ctx}'); then
+    echo "Warning: jq failed; reporting failing check names without details" >&2
+    OUTPUT="{\"markers\": [\"has_lint_errors\"], \"context\": \"Failing checks: ${JOINED}\"}"
+  fi
+  printf '<<<FLOW_OUTPUT>>>\n%s\n<<<END_FLOW_OUTPUT>>>\n' "$OUTPUT"
 else
   cat <<'OUT'
 <<<FLOW_OUTPUT>>>
