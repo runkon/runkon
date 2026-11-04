@@ -9,11 +9,12 @@ You are a code quality engineer. Based on the lint analysis, fix the identified 
 Prior step context: {{prior_context}}
 
 Guidelines:
+- Start by reproducing each failing check with the exact `Command:` the prior context gives for it. Don't substitute a broader command: `cargo clippy -p <crate>` builds the crate without the features other workspace members turn on, so it can fail (for example on a test that needs a feature) where `cargo clippy --workspace` passes.
 - Run `cargo fmt --all` to fix formatting issues
 - Apply clippy suggestions where appropriate
 - For complex clippy warnings, use your judgment on the best fix
 - After applying fixes, re-verify with **only** these commands — nothing else:
-  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - each failing check's `Command:` from the prior context
   - `cargo fmt --all --check`
 - Commit all fixes with a descriptive commit message
 

@@ -36,6 +36,15 @@ workflow ticket-to-pr {
       as      = "developer"
     }
     call verify
+
+    // Still failing after the retry: stop before lint-fix and push-and-pr
+    // can open a PR with failing checks (#127).
+    if verify.has_failures {
+      script fail-verify {
+        run = ".conductor/scripts/fail-verify.sh"
+        env = { VERIFY_CONTEXT = "{{prior_context}}" }
+      }
+    }
   }
 
   call workflow lint-fix
