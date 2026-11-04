@@ -123,7 +123,7 @@ fn stop_refresh_thread(stop: &AtomicBool, thread: Option<&std::thread::Thread>) 
 pub struct FlowEngine {
     pub(crate) action_registry: ActionRegistry,
     pub(crate) item_provider_registry: ItemProviderRegistry,
-    pub(crate) gate_resolver_registry: GateResolverRegistry,
+    pub(crate) gate_resolver_registry: Arc<GateResolverRegistry>,
     /// Unused. Only the deprecated `FlowEngineBuilder::script_env_provider()` sets it;
     /// runs take the provider from `RunInput` / `ChildRunInput`. Removed with that method.
     #[allow(dead_code)]
@@ -229,6 +229,7 @@ impl RunInput {
             depth: 0,
             target_label: None,
             default_as_identity: None,
+            gate_resolvers: Default::default(),
             triggered_by_hook: false,
             schema_resolver: None,
             child_runner: None,
@@ -311,6 +312,7 @@ fn make_fresh_execution_state(
         depth,
         target_label,
         default_as_identity,
+        gate_resolvers: Arc::default(),
         triggered_by_hook,
         schema_resolver,
         child_runner,
@@ -383,6 +385,9 @@ impl FlowEngine {
         def: &WorkflowDef,
         state: &mut ExecutionState,
     ) -> crate::engine_error::Result<WorkflowResult> {
+        // Every run path (run, run_child, resume) goes through here, so gates always poll
+        // the engine's resolvers.
+        state.gate_resolvers = Arc::clone(&self.gate_resolver_registry);
         if let Err(validation_errors) = self.validate_with_registries(
             &state.action_registry,
             &state.registry,
@@ -1028,7 +1033,7 @@ impl FlowEngineBuilder {
         Ok(FlowEngine {
             action_registry: ActionRegistry::new(self.named, self.fallback),
             item_provider_registry: self.item_providers,
-            gate_resolver_registry: self.gate_resolvers,
+            gate_resolver_registry: Arc::new(self.gate_resolvers),
             script_env_provider: Arc::from(self.script_env_provider),
             workflow_resolver: self.workflow_resolver.map(Arc::from),
             event_sinks: self.event_sinks,
@@ -1627,6 +1632,7 @@ mod tests {
             block_with: vec![],
             resume_ctx: None,
             default_as_identity: None,
+            gate_resolvers: Default::default(),
             triggered_by_hook: false,
             schema_resolver: None,
             child_runner: None,

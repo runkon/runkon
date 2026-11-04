@@ -7,6 +7,7 @@ use crate::engine::{emit_event, ExecutionState};
 use crate::engine_error::{EngineError, Result};
 use crate::events::EngineEvent;
 use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
+use crate::traits::gate_resolver::{GateParams, GatePoll, GateResolver};
 use crate::traits::persistence::{GateApprovalState, GateOption, GateStepInfo, StepUpdate};
 
 fn resume_run_status(state: &ExecutionState, gate_name: &str, context: &str) {
@@ -80,6 +81,116 @@ fn resolve_gate_options(state: &ExecutionState, node: &GateNode) -> Result<Vec<G
     Ok(options)
 }
 
+/// `approved_by` / `rejected_by` recorded when a `GateResolver` decides a gate:
+/// `gate_resolver:<gate_type>`.
+pub const GATE_RESOLVER_ACTOR_PREFIX: &str = "gate_resolver";
+
+fn finish_approved(
+    state: &mut ExecutionState,
+    node: &GateNode,
+    feedback: Option<String>,
+    selections: Option<Vec<String>>,
+) -> Result<()> {
+    tracing::info!("Gate '{}' approved", node.name);
+    if let Some(ref fb) = feedback {
+        state.last_gate_feedback = Some(fb.clone());
+    }
+    if let Some(sel) = selections {
+        if !sel.is_empty() {
+            // Store gate selection as feedback
+            state.last_gate_feedback = Some(sel.join(", "));
+        }
+    }
+    resume_run_status(state, &node.name, "after approval");
+    emit_event(
+        state,
+        EngineEvent::GateResolved {
+            gate_name: node.name.clone(),
+            approved: true,
+        },
+    );
+    Ok(())
+}
+
+fn finish_rejected(
+    state: &mut ExecutionState,
+    node: &GateNode,
+    feedback: Option<String>,
+) -> Result<()> {
+    tracing::warn!("Gate '{}' rejected", node.name);
+    state.all_succeeded = false;
+    resume_run_status(state, &node.name, "after rejection");
+    emit_event(
+        state,
+        EngineEvent::GateResolved {
+            gate_name: node.name.clone(),
+            approved: false,
+        },
+    );
+    let reason = feedback.unwrap_or_else(|| format!("Gate '{}' rejected", node.name));
+    Err(EngineError::Workflow(reason))
+}
+
+/// Poll the resolver once. Returns the decision to act on (a manual decision that landed
+/// meanwhile, or the resolver's own decision after recording it), or `None` to keep waiting.
+fn poll_resolver(
+    state: &ExecutionState,
+    node: &GateNode,
+    step_id: &str,
+    resolver: &dyn GateResolver,
+    params: &GateParams,
+) -> Option<GateApprovalState> {
+    let poll = match resolver.poll(&state.workflow_run_id, params, &*state.run_ctx) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                "Gate '{}': resolver '{}' poll failed: {e}",
+                node.name,
+                node.gate_type
+            );
+            return None;
+        }
+    };
+    if matches!(poll, GatePoll::Pending) {
+        return None;
+    }
+    // A manual decision recorded since the last read wins over the resolver.
+    if let Ok(s) = state.persistence.get_gate_approval(step_id) {
+        if !matches!(s, GateApprovalState::Pending) {
+            return Some(s);
+        }
+    }
+    let actor = format!("{GATE_RESOLVER_ACTOR_PREFIX}:{}", node.gate_type);
+    match poll {
+        GatePoll::Approved(feedback) => {
+            if let Err(e) = state
+                .persistence
+                .approve_gate(step_id, &actor, feedback.as_deref(), None)
+            {
+                tracing::warn!("Gate '{}': failed to record approval: {e}", node.name);
+                return None;
+            }
+            Some(GateApprovalState::Approved {
+                feedback,
+                selections: None,
+            })
+        }
+        GatePoll::Rejected(reason) => {
+            if let Err(e) = state
+                .persistence
+                .reject_gate(step_id, &actor, Some(&reason))
+            {
+                tracing::warn!("Gate '{}': failed to record rejection: {e}", node.name);
+                return None;
+            }
+            Some(GateApprovalState::Rejected {
+                feedback: Some(reason),
+            })
+        }
+        GatePoll::Pending => None,
+    }
+}
+
 pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32) -> Result<()> {
     let pos = state.position;
     state.position += 1;
@@ -115,6 +226,10 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
 
     // Resolve options first so a bad StepRef fails before any row or event exists.
     let options = resolve_gate_options(state, node)?;
+    let params_options: HashMap<String, String> = options
+        .iter()
+        .map(|o| (o.value.clone(), o.label.clone()))
+        .collect();
     let gate_info = GateStepInfo {
         gate_type: node.gate_type.clone(),
         prompt: node.prompt.clone(),
@@ -146,59 +261,71 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
 
     tracing::info!("Gate '{}' waiting (type = {})", node.name, node.gate_type);
 
-    // Poll/timeout loop — poll via persistence.get_gate_approval()
+    let params = GateParams {
+        gate_name: node.name.clone(),
+        prompt: node.prompt.clone(),
+        min_approvals: node.min_approvals,
+        approval_mode: node.approval_mode.clone(),
+        options: params_options,
+        timeout_secs: node.timeout_secs,
+        as_identity: node
+            .as_identity
+            .clone()
+            .or_else(|| state.default_as_identity.clone()),
+        step_id: step_id.clone(),
+    };
+    let resolver = state.gate_resolvers.get(&node.gate_type);
+    if resolver.is_none() {
+        tracing::debug!(
+            "Gate '{}': no resolver registered for type '{}'; waiting on manual decisions only",
+            node.name,
+            node.gate_type
+        );
+    }
+    let mut last_resolver_poll: Option<std::time::Instant> = None;
+
+    // Poll/timeout loop. A recorded manual decision (persistence.get_gate_approval()) always
+    // wins; otherwise the node's resolver is polled, throttled by its poll interval.
     let start = std::time::Instant::now();
     loop {
         if start.elapsed() > Duration::from_secs(node.timeout_secs) {
             return handle_gate_timeout(state, &step_id, node);
         }
 
-        match state.persistence.get_gate_approval(&step_id) {
-            Ok(GateApprovalState::Approved {
-                feedback,
-                selections,
-            }) => {
-                tracing::info!("Gate '{}' approved", node.name);
-                if let Some(ref fb) = feedback {
-                    state.last_gate_feedback = Some(fb.clone());
-                }
-                if let Some(sel) = selections {
-                    if !sel.is_empty() {
-                        // Store gate selection as feedback
-                        state.last_gate_feedback = Some(sel.join(", "));
-                    }
-                }
-                resume_run_status(state, &node.name, "after approval");
-                emit_event(
-                    state,
-                    EngineEvent::GateResolved {
-                        gate_name: node.name.clone(),
-                        approved: true,
-                    },
-                );
-                return Ok(());
-            }
-            Ok(GateApprovalState::Rejected { feedback }) => {
-                tracing::warn!("Gate '{}' rejected", node.name);
-                state.all_succeeded = false;
-                resume_run_status(state, &node.name, "after rejection");
-                emit_event(
-                    state,
-                    EngineEvent::GateResolved {
-                        gate_name: node.name.clone(),
-                        approved: false,
-                    },
-                );
-                let reason = feedback.unwrap_or_else(|| format!("Gate '{}' rejected", node.name));
-                return Err(EngineError::Workflow(reason));
-            }
-            Ok(GateApprovalState::Pending) => {
-                thread::sleep(state.exec_config.poll_interval);
-            }
+        let mut approval = match state.persistence.get_gate_approval(&step_id) {
+            Ok(s) => s,
             Err(e) => {
                 tracing::warn!("Gate '{}': error checking approval state: {e}", node.name);
-                thread::sleep(state.exec_config.poll_interval);
+                GateApprovalState::Pending
             }
+        };
+
+        if matches!(approval, GateApprovalState::Pending) {
+            if let Some(ref resolver) = resolver {
+                let interval = resolver
+                    .poll_interval()
+                    .unwrap_or(state.exec_config.poll_interval);
+                let due = last_resolver_poll.is_none_or(|t| t.elapsed() >= interval);
+                if due {
+                    last_resolver_poll = Some(std::time::Instant::now());
+                    if let Some(decided) =
+                        poll_resolver(state, node, &step_id, resolver.as_ref(), &params)
+                    {
+                        approval = decided;
+                    }
+                }
+            }
+        }
+
+        match approval {
+            GateApprovalState::Approved {
+                feedback,
+                selections,
+            } => return finish_approved(state, node, feedback, selections),
+            GateApprovalState::Rejected { feedback } => {
+                return finish_rejected(state, node, feedback)
+            }
+            GateApprovalState::Pending => thread::sleep(state.exec_config.poll_interval),
         }
 
         // Check cancellation

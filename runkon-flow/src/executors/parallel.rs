@@ -498,6 +498,7 @@ mod tests {
             block_with: vec![],
             resume_ctx: None,
             default_as_identity: None,
+            gate_resolvers: Default::default(),
             triggered_by_hook: false,
             schema_resolver: None,
             child_runner: None,
