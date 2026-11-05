@@ -113,6 +113,7 @@ pub fn execute_parallel(
         call_schema: Option<crate::output_schema::OutputSchema>,
         effective_with: Vec<String>,
         retries: u32,
+        prior_attempt: Option<crate::extensions::PriorStepAttempt>,
     }
 
     let mut skipped_count = 0u32;
@@ -125,6 +126,9 @@ pub fn execute_parallel(
         let agent_label = agent_ref.label();
         let agent_step_key = agent_ref.step_key();
 
+        // Peek before the skip check: claiming advances the resume cursor.
+        let prior_attempt =
+            crate::engine::peek_prior_failed_attempt(state, &agent_step_key, iteration);
         if super::skip_if_already_completed(state, &agent_step_key, iteration, agent_label) {
             skipped_count += 1;
             continue;
@@ -155,6 +159,7 @@ pub fn execute_parallel(
             call_schema: effective_schema,
             effective_with,
             retries,
+            prior_attempt,
         });
     }
 
@@ -178,6 +183,7 @@ pub fn execute_parallel(
             call_schema,
             effective_with,
             retries,
+            prior_attempt,
         } = call_input;
         let pos = pos_base + i as i64;
         let agent_ref = &node.calls[i];
@@ -237,6 +243,7 @@ pub fn execute_parallel(
             state.default_as_identity.clone(),
             state.extra_plugin_dirs.clone(),
             None,
+            prior_attempt,
         );
 
         dispatch_queue.push(DispatchInput {

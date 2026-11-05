@@ -209,8 +209,12 @@ pub(super) fn build_action_params(
     as_identity: Option<String>,
     plugin_dirs: Vec<String>,
     max_turns: Option<u32>,
+    prior_attempt: Option<crate::extensions::PriorStepAttempt>,
 ) -> crate::traits::action_executor::ActionParams {
     let mut extensions = crate::extensions::Extensions::default();
+    if let Some(prior) = prior_attempt {
+        extensions.insert(prior);
+    }
     if let Some(s) = schema {
         extensions.insert(s);
     }
@@ -395,6 +399,7 @@ mod tests {
             None,
             vec![],
             max_turns,
+            None,
         )
     }
 

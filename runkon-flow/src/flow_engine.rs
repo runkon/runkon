@@ -647,7 +647,9 @@ impl FlowEngine {
                 ))
             })?;
         let ctx = crate::engine::ResumeContext::from_steps(steps);
-        if !ctx.is_empty() {
+        // A run whose only recorded steps failed still resumes when one of them left an
+        // agent run to recover output from (#143).
+        if !ctx.is_empty() || ctx.has_prior_failed() {
             state.resume_ctx = Some(ctx);
         }
         self.run(def, state)
