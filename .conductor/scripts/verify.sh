@@ -158,13 +158,12 @@ ${panics}}"
 fi
 
 # --- cargo fmt -----------------------------------------------------------------
-# runkon's fmt-fix runs after verify, just before push, so unformatted code
-# fails here, as it did with the verify agent. Running fmt-fix before verify
-# (as conductor-ai does) is a separate port.
+# fmt-fix runs just before verify, so a failure here means rustfmt itself
+# couldn't format the code, usually a parse error.
 if cargo fmt --all --check -- --color never > "${logs}/fmt.log" 2>&1; then
   record "cargo fmt" pass "ok"
 else
-  record "cargo fmt" fail "cargo fmt --all --check failed: the code isn't rustfmt-formatted" "$(head -n 30 "${logs}/fmt.log")"
+  record "cargo fmt" fail "cargo fmt --all --check failed after fmt-fix (rustfmt couldn't format the code, usually a parse error)" "$(head -n 30 "${logs}/fmt.log")"
 fi
 
 if [ "${failed}" -eq 0 ]; then

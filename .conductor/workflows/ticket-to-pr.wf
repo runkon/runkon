@@ -54,6 +54,12 @@ workflow ticket-to-pr {
     }
   }
 
+  script fmt-fix-pre-verify {
+    run = ".conductor/scripts/fmt-fix.sh"
+    env = {
+      FMT_FIX_ALLOW_FAILURE = "1"
+    }
+  }
   script verify {
     run = ".conductor/scripts/verify.sh"
     env = { FEATURE_BASE_BRANCH = "{{feature_base_branch}}" }
@@ -63,6 +69,12 @@ workflow ticket-to-pr {
     call implement {
       retries = 1
       as      = "developer"
+    }
+    script fmt-fix-pre-reverify {
+      run = ".conductor/scripts/fmt-fix.sh"
+      env = {
+        FMT_FIX_ALLOW_FAILURE = "1"
+      }
     }
     script verify {
       run = ".conductor/scripts/verify.sh"
