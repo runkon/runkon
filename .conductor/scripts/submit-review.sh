@@ -59,7 +59,7 @@ if [ "${DIFF_FILE_COUNT}" -eq 0 ]; then
 else
   PRIOR_OUTPUT_FILTERED=$(echo "${PRIOR_OUTPUT}" | jq --argjson diff "${DIFF_FILES_JSON}" '
     ((.blocking_findings // []) | length) as $before
-    | .blocking_findings = ((.blocking_findings // []) | map(select(.file as $f | $diff | index($f))))
+    | .blocking_findings = ((.blocking_findings // []) | map(select(((.file // "") == "") or (.file as $f | $diff | index($f)))))
     | .blocking_findings_dropped = ($before - (.blocking_findings | length))
   ')
 
@@ -68,7 +68,7 @@ else
     echo "Dropped ${DROPPED_COUNT} hallucinated off-diff blocking finding(s) from review:"
     echo "${PRIOR_OUTPUT}" | jq -c --argjson diff "${DIFF_FILES_JSON}" '
       .blocking_findings // []
-      | map(select(.file as $f | $diff | index($f) | not))
+      | map(select(((.file // "") != "") and (.file as $f | $diff | index($f) | not)))
       | .[] | {file, line, severity, reviewer, message: (.message // "")}
     '
   fi
@@ -215,18 +215,26 @@ fi
 # ---------------------------------------------------------------------------
 # 5. Build complete review body programmatically
 # ---------------------------------------------------------------------------
-# Derive approval state purely from the post-filter blocking_findings count.
+# Approve only when nothing blocking survives the off-diff filter (step 1b)
+# AND the aggregator didn't block for a reason the filter can't see. A
+# finding with no file (a reviewer with unreadable output, or one that didn't
+# approve but listed nothing) is never dropped as off-diff: it used to be, and
+# an unreadable reviewer then produced an APPROVE (devinrosen/conductor-ai#3299).
 #
-# The aggregator's `.overall_approved` is computed on pre-filter data, so it
-# can be stale: if the off-diff filter (step 1b) drops every blocking finding,
-# the aggregator may still report `overall_approved: false`. Re-evaluating
-# here off the filtered count keeps the review body consistent — no
-# "Changes Requested" without an accompanying findings list.
+# The filter can still legitimately drop every finding (all hallucinated
+# off-diff files); then the aggregator's overall_approved is stale, and the
+# filtered count wins, as before.
 HAS_BLOCKING_CHECK=$(echo "${PRIOR_OUTPUT}" | jq -r 'if (.blocking_findings // [] | length) > 0 then "true" else "false" end')
+DROPPED_ALL=$(echo "${PRIOR_OUTPUT}" | jq -r 'if (.blocking_findings_dropped // 0) > 0 and (.blocking_findings // [] | length) == 0 then "true" else "false" end')
+AGGREGATOR_APPROVED=$(echo "${PRIOR_OUTPUT}" | jq -r 'if .overall_approved == true then "true" else "false" end')
 if [ "${HAS_BLOCKING_CHECK}" = "true" ]; then
   OVERALL_APPROVED="false"
-else
+elif [ "${AGGREGATOR_APPROVED}" = "true" ] || [ "${DROPPED_ALL}" = "true" ]; then
   OVERALL_APPROVED="true"
+else
+  # The aggregator blocked but listed no finding at all: never approve.
+  OVERALL_APPROVED="false"
+  echo "Warning: the aggregator reported overall_approved=false with no blocking findings; not approving." >&2
 fi
 
 if [ "${OVERALL_APPROVED}" = "true" ]; then
