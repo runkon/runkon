@@ -262,8 +262,8 @@ fn execute_call_inner(
             Ok(output) if super::missing_required_output(&output, require_output).is_some() => {
                 // The step requires an output block and the agent ended without one:
                 // fail the attempt with the warning so retries / on_fail apply.
-                let msg = super::missing_required_output(&output, require_output)
-                    .unwrap_or_default();
+                let msg =
+                    super::missing_required_output(&output, require_output).unwrap_or_default();
                 tracing::warn!(
                     "Step '{}' (attempt {}/{}): {msg}",
                     agent_label,

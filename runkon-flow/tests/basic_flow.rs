@@ -395,7 +395,10 @@ impl ActionExecutor for SharedFlaky {
         runkon_flow::traits::action_executor::ActionOutput,
         runkon_flow::engine_error::EngineError,
     > {
-        let n = self.0.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let n = self
+            .0
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.0
             .retry_errors
             .lock()
@@ -508,7 +511,10 @@ fn require_output_with_on_fail_continue_lets_the_run_continue() {
     );
     assert!(ok, "on_fail = continue should let the run succeed");
     assert_eq!(rows(&steps, "warned")[0].status, WorkflowStepStatus::Failed);
-    assert_eq!(rows(&steps, "clean")[0].status, WorkflowStepStatus::Completed);
+    assert_eq!(
+        rows(&steps, "clean")[0].status,
+        WorkflowStepStatus::Completed
+    );
 }
 
 #[test]
@@ -563,7 +569,10 @@ fn parallel_call_require_output_fails_only_that_branch() {
     let warned = rows(&steps, "warned");
     assert_eq!(warned[0].status, WorkflowStepStatus::Failed);
     assert_eq!(warned[0].step_error.as_deref(), Some(OUTPUT_WARNING));
-    assert_eq!(rows(&steps, "clean")[0].status, WorkflowStepStatus::Completed);
+    assert_eq!(
+        rows(&steps, "clean")[0].status,
+        WorkflowStepStatus::Completed
+    );
 }
 
 #[test]
@@ -575,7 +584,10 @@ fn parallel_call_require_output_retries_the_branch() {
         false,
     );
     assert!(ok);
-    assert_eq!(rows(&steps, "flaky")[0].status, WorkflowStepStatus::Completed);
+    assert_eq!(
+        rows(&steps, "flaky")[0].status,
+        WorkflowStepStatus::Completed
+    );
     assert_eq!(flaky.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
 }
 
