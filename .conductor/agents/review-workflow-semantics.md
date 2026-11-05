@@ -21,7 +21,9 @@ Prior step context: {{prior_context}}
 ## Focus
 
 ### Resume
-- A step name repeated within one iteration: scripts, `call`s and `call workflow X`, including in different branches of the same iteration. Report it as a `warning`, and tell the author to give each occurrence a unique name. Explain why: a condition resolves a marker by name to its latest result, so `if = "fmt-fix.x"` is ambiguous, and resume depends on occurrence order.
+- A step name repeated within one iteration: scripts, `call`s and `call workflow X`, including in different branches of the same iteration. Report it as a `warning` when the diff **adds** the repetition (a new step that reuses an existing name, or a copied block). Tell the author to give each occurrence a unique name, and explain why: a condition resolves a marker by name to its latest result, so `if = "fmt-fix.x"` is ambiguous, and resume depends on occurrence order.
+- **Exception: a same-name retry.** This is a supported pattern, not a finding: a step re-run under the same name inside an `if <step>.<failure marker>` block, so that a later condition reads the **retry's** result. The known cases are `verify` and `implement` in ticket-to-pr, and `verify` and `address-reviews` in iterate-pr. The second `if verify.has_failures` is meant to see the retried verify, and `fail-verify.sh` tells the user to resume with `--from-step verify`, so renaming it would break that recovery. Flag such a retry only when a consumer clearly expects the **earlier** occurrence's result, for example a `with`, a `prior_output` read or a condition placed between the two occurrences that should see the first.
+- A repetition the diff only edits in place (both occurrences already existed and keep their names) goes in `off_diff_findings` at most. It is not a blocking finding, even when the edit touches both lines.
 - Steps whose effects (push, PR create, issue or comment write, commit) aren't safe to repeat if the run resumes after the effect but before the step was recorded complete, or aren't safe to skip because an earlier occurrence completed.
 
 ### Markers
