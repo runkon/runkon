@@ -16,6 +16,14 @@ fields:
   risks?:
     type: array
     desc: "Risks or unknowns that should be resolved before implementing"
+  decisions?:
+    type: array
+    desc: "Questions only the user can answer (scope, public API or compatibility, data, user-visible behaviour) that the ticket and its comments don't settle. Omit or leave empty when there are none; the run stops for them."
+    items:
+      question: string
+      default:
+        type: string
+        desc: "What the plan does if the user approves without answering"
   estimated_minutes:
     type: number
     desc: "Estimated total minutes to complete the entire plan, including all tasks"
@@ -23,3 +31,4 @@ fields:
 
 markers:
   has_complex_tasks: "tasks[complexity == high].length > 0"
+  needs_decision: "decisions.length > 0"

@@ -26,6 +26,12 @@ Steps:
    - Any risks or unknowns that should be resolved before implementing
    - An estimated total duration in minutes for the full implementation
 
+## Decisions for the user
+
+Most design choices are yours: make them and record them in the plan. Put a question in `decisions` only when the choice is the user's to make and neither the ticket nor its comments settle it: it changes the ticket's scope, breaks a public API or compatibility the milestone promises, changes or deletes data, or changes behaviour users rely on in a way the ticket doesn't ask for. For each, give the question and the `default` the plan follows if the user approves without answering, and plan the work around that default.
+
+A non-empty `decisions` list stops the run at a gate before `implement`, so don't list routine choices. List the same questions under a "Decisions for the user" heading in `PLAN.md`.
+
 Write the plan to `PLAN.md` in the worktree's git directory, `"$(git rev-parse --git-dir)/PLAN.md"`, not the worktree root. That directory is private to this worktree and outside the working tree, so git never tracks or commits the file, and it stays available to the implement and triage-reviews steps for the rest of the run.
 
 ## Do NOT include verification commands in the plan
