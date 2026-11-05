@@ -1,25 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# BASE_BRANCH is injected by the workflow from the resolve-pr-base step.
-# We refuse to silently fall back to a guess — a wrong base produces a
-# fabricated diff that contaminates the downstream review. See #2736.
-if [ -z "${BASE_BRANCH:-}" ]; then
-  echo "ERROR: BASE_BRANCH env var not set — workflow must run resolve-pr-base first." >&2
-  exit 1
-fi
+# BASE_BRANCH, SCOPE and SINCE are injected by the workflow. BASE_BRANCH comes
+# from the resolve-pr-base step; there is no silent fallback to a guessed base
+# (devinrosen/conductor-ai#2736). An incremental review decides from the commits since the last review.
+# shellcheck source=lib-diff-range.sh
+source "$(dirname "$0")/lib-diff-range.sh"
+resolve_diff_range
 
-# Get changed files relative to the PR base branch
-# A failed diff (for example a missing base ref) must fail the step. Reading it
-# as an empty list would skip every conditional reviewer without any error.
 # -z gives NUL-separated, unquoted names.
 # Command substitution would drop the NULs, so go through a temp file.
 diff_tmp=$(mktemp)
 trap 'rm -f "$diff_tmp"' EXIT
-if ! git diff "origin/${BASE_BRANCH}...HEAD" --name-only -z > "$diff_tmp"; then
-  echo "ERROR: git diff against origin/${BASE_BRANCH} failed." >&2
-  exit 1
-fi
+changed_files_to "$diff_tmp"
 
 # Filter for pipeline files: workflows, scripts, schemas, and agent and prompt
 # briefs.
@@ -46,7 +39,7 @@ emit() {
 
 if [ "$count" -gt 0 ]; then
   file_list=$(IFS=", "; echo "${workflow_files[*]}")
-  emit '["has_workflow_changes"]' "Found ${count} workflow/pipeline file(s) in diff: ${file_list}"
+  emit '["has_workflow_changes"]' "Found ${count} workflow/pipeline file(s) in ${DIFF_DESC}: ${file_list}"
 else
-  emit '[]' "No workflow/pipeline files in diff"
+  emit '[]' "No workflow/pipeline files in ${DIFF_DESC}"
 fi

@@ -16,6 +16,8 @@ Focus exclusively on:
 
 Do NOT flag:
 - Shell scripts (.sh files) — standalone scripts are intentionally self-contained; shared structural patterns (git diff loop, JSON output) are appropriate repetition at that scale
+- A `script`, `call` or `if` block repeated within or across `.wf` workflows, such as `call verify` and its `if verify.has_failures` retry — the workflow language has no include or macro, so each occurrence must be written out
+- Agent briefs (`.conductor/agents/*.md`) and schemas that restate the same rules — each agent reads only its own brief
 
 ## Scope constraint
 
