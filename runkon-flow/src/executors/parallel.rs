@@ -1231,7 +1231,7 @@ mod tests {
                 parent_workflow_run_id: None,
             })
             .unwrap();
-        let mut state = crate::test_helpers::make_test_execution_state(
+        let state = crate::test_helpers::make_test_execution_state(
             Arc::clone(&persistence) as Arc<dyn WorkflowPersistence>,
             run.id.clone(),
         );
