@@ -27,16 +27,24 @@ workflow review-pr {
     }
   }
 
+  script detect-workflow-changes {
+    run = ".conductor/scripts/detect-workflow-changes.sh"
+    env = {
+      BASE_BRANCH = "{{base_branch}}"
+    }
+  }
+
   parallel {
     output    = "review-findings"
     with      = ["review-diff-scope", "off-diff-findings"]
     fail_fast = false
-    call review-architecture    { retries = 1 }
-    call review-dry-abstraction { retries = 1 }
-    call review-security        { retries = 1  if = "detect-file-types.has_code_changes" }
-    call review-performance     { retries = 1  if = "detect-file-types.has_code_changes" }
-    call review-error-handling  { retries = 1  if = "detect-file-types.has_code_changes" }
-    call review-test-coverage   { retries = 1  if = "detect-file-types.has_code_changes" }
+    call review-architecture       { retries = 1 }
+    call review-dry-abstraction    { retries = 1 }
+    call review-security           { retries = 1  if = "detect-file-types.has_code_changes" }
+    call review-performance        { retries = 1  if = "detect-file-types.has_code_changes" }
+    call review-error-handling     { retries = 1  if = "detect-file-types.has_code_changes" }
+    call review-test-coverage      { retries = 1  if = "detect-file-types.has_code_changes" }
+    call review-workflow-semantics { retries = 1  if = "detect-workflow-changes.has_workflow_changes" }
   }
 
   // Replies posted on the PR since the last conductor review, so the

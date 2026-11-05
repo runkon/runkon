@@ -36,6 +36,7 @@ Steps:
      | review-performance       | `enhancement`   |
      | review-error-handling    | `bug`           |
      | review-test-coverage     | `enhancement`   |
+     | review-workflow-semantics | `bug`          |
      Additionally, if the finding has severity `critical`, add `bug` to its labels (if not already present).
      Each finding's `labels` field should be an array of strings (e.g. `["security", "bug"]`).
    - The `fetch-pr-replies` entry and the `resolve-pr-base` / `detect-*` entries are workflow scripts, not reviewers: don't classify them or list them in `reviewed_by`.
