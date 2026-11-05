@@ -20,7 +20,7 @@ use crate::traits::gate_resolver::{GateResolver, GateResolverRegistry};
 use crate::traits::item_provider::{ItemProvider, ItemProviderRegistry};
 use crate::traits::persistence::WorkflowPersistence;
 use crate::traits::run_context::RunContext;
-use crate::traits::script_env_provider::{NoOpScriptEnvProvider, ScriptEnvProvider};
+use crate::traits::script_env_provider::ScriptEnvProvider;
 use crate::traits::workflow_resolver::WorkflowResolver;
 use crate::types::{WorkflowExecConfig, WorkflowResult};
 use crate::workflow_resolver_directory::DirectoryWorkflowResolver;
@@ -120,14 +120,18 @@ fn stop_refresh_thread(stop: &AtomicBool, thread: Option<&std::thread::Thread>) 
 /// The primary harness for running and validating workflows.
 ///
 /// Produced by [`FlowEngineBuilder::build()`].
+///
+/// # Ownership: builder vs `RunInput`
+///
+/// The builder holds engine-wide hooks: gate resolvers, the workflow resolver and
+/// event sinks. Runs take their per-run registries (actions, item providers) and
+/// the script env provider from [`RunInput`] / [`ChildRunInput`]. The actions and
+/// item providers registered on the builder are used only by [`FlowEngine::validate`];
+/// use [`FlowEngine::validate_with`] to pre-flight against a run's own registries.
 pub struct FlowEngine {
     pub(crate) action_registry: ActionRegistry,
     pub(crate) item_provider_registry: ItemProviderRegistry,
     pub(crate) gate_resolver_registry: Arc<GateResolverRegistry>,
-    /// Unused. Only the deprecated `FlowEngineBuilder::script_env_provider()` sets it;
-    /// runs take the provider from `RunInput` / `ChildRunInput`. Removed with that method.
-    #[allow(dead_code)]
-    pub(crate) script_env_provider: Arc<dyn ScriptEnvProvider>,
     pub(crate) workflow_resolver: Option<Arc<dyn WorkflowResolver>>,
     pub(crate) event_sinks: Vec<Arc<dyn EventSink>>,
     /// All per-run cancellation state in a single map so register/deregister
@@ -352,22 +356,16 @@ impl FlowEngine {
     ///
     /// # Registry asymmetry with `run()`
     ///
-    /// This method validates against the **`FlowEngine`'s own registries** (those
-    /// supplied to `FlowEngineBuilder`). `run()`, however, validates against the
-    /// **`ExecutionState`'s registries** at call time. Because the two registry
-    /// sets are independent, a workflow that passes `validate()` may still be
-    /// rejected by `run()` if the `ExecutionState` was built with a different
-    /// set of action executors or item providers. Use `validate()` for static
-    /// analysis (CI lint, pre-flight checks) when you control both the engine
-    /// and execution state; rely on `run()`'s own validation when working with
-    /// externally-supplied `ExecutionState` values.
+    /// This method validates against the **`FlowEngine`'s own registries** (the
+    /// actions and item providers registered on `FlowEngineBuilder`).
+    /// `run_workflow` / `run_child` validate against the registries in
+    /// `RunInput` / `ChildRunInput` instead. Because the two sets are independent,
+    /// a workflow that passes `validate()` may still be rejected by a run whose
+    /// registries differ. Use `validate()` for hosts that register executors on the
+    /// builder (CI lint without a run). To pre-flight against exactly the
+    /// registries a run will use, call [`FlowEngine::validate_with`].
     pub fn validate(&self, def: &WorkflowDef) -> Result<(), Vec<ValidationError>> {
-        self.validate_with_registries(
-            &self.action_registry,
-            &self.item_provider_registry,
-            &self.gate_resolver_registry,
-            def,
-        )
+        self.validate_with(def, &self.action_registry, &self.item_provider_registry)
     }
 
     /// Build the merged event-sink slice: engine-wide sinks followed by per-run `extra` sinks.
@@ -387,12 +385,9 @@ impl FlowEngine {
         // Every run path (run, run_child, resume) goes through here, so gates always poll
         // the engine's resolvers.
         state.gate_resolvers = Arc::clone(&self.gate_resolver_registry);
-        if let Err(validation_errors) = self.validate_with_registries(
-            &state.action_registry,
-            &state.registry,
-            &self.gate_resolver_registry,
-            def,
-        ) {
+        if let Err(validation_errors) =
+            self.validate_with(def, &state.action_registry, &state.registry)
+        {
             let joined = validation_errors
                 .iter()
                 .map(|e| e.to_string())
@@ -724,16 +719,22 @@ impl FlowEngine {
         Ok(())
     }
 
-    /// Inner validation implementation. Accepts explicit registry references so
-    /// both `validate()` (uses builder registries) and `run()` (uses execution
-    /// state registries) can call the same logic without risk of divergence.
-    fn validate_with_registries(
+    /// Validate `def` against the given registries, plus the engine's gate
+    /// resolvers and workflow resolver.
+    ///
+    /// Pass the same registries you give to [`RunInput`] / [`ChildRunInput`] to
+    /// pre-flight exactly what `run_workflow` / `run_child` will check: they run this
+    /// same validation before executing. [`FlowEngine::validate`] calls this with the
+    /// builder's own registries.
+    ///
+    /// Collects all errors before returning.
+    pub fn validate_with(
         &self,
+        def: &WorkflowDef,
         action_registry: &ActionRegistry,
         item_provider_registry: &ItemProviderRegistry,
-        gate_resolver_registry: &GateResolverRegistry,
-        def: &WorkflowDef,
     ) -> Result<(), Vec<ValidationError>> {
+        let gate_resolver_registry: &GateResolverRegistry = &self.gate_resolver_registry;
         let mut errors = Vec::new();
 
         // Cycle / depth detection — only when a workflow resolver is configured.
@@ -924,12 +925,13 @@ fn validate_nodes_impl(
 ///
 /// Register action executors with `.action()` / `.action_fallback()`,
 /// foreach item sources with `.item_provider()`, gate resolvers with
-/// `.gate_resolver()`. The script env provider is per-run state and goes in
-/// [`RunInput`] / [`ChildRunInput`].
+/// `.gate_resolver()`. Actions and item providers registered here serve
+/// [`FlowEngine::validate`] only; runs take their registries, and the script env
+/// provider, from [`RunInput`] / [`ChildRunInput`]. Use [`FlowEngine::validate_with`]
+/// to pre-flight against those.
 pub struct FlowEngineBuilder {
     named: HashMap<String, Box<dyn ActionExecutor>>,
     fallback: Option<Box<dyn ActionExecutor>>,
-    script_env_provider: Box<dyn ScriptEnvProvider>,
     item_providers: ItemProviderRegistry,
     gate_resolvers: GateResolverRegistry,
     workflow_resolver: Option<Box<dyn WorkflowResolver>>,
@@ -941,7 +943,6 @@ impl FlowEngineBuilder {
         Self {
             named: HashMap::new(),
             fallback: None,
-            script_env_provider: Box::new(NoOpScriptEnvProvider),
             item_providers: ItemProviderRegistry::new(),
             gate_resolvers: GateResolverRegistry::new(),
             workflow_resolver: None,
@@ -984,20 +985,6 @@ impl FlowEngineBuilder {
         self
     }
 
-    /// Set the script env provider. Defaults to `NoOpScriptEnvProvider`.
-    ///
-    /// Ignored: runs never read it. Script steps get their provider from
-    /// [`RunInput::script_env_provider`] or [`ChildRunInput::script_env_provider`].
-    /// Will be removed in the next breaking release.
-    #[deprecated(
-        since = "0.7.1-alpha",
-        note = "ignored: pass the provider in RunInput.script_env_provider / ChildRunInput.script_env_provider"
-    )]
-    pub fn script_env_provider(mut self, provider: Box<dyn ScriptEnvProvider>) -> Self {
-        self.script_env_provider = provider;
-        self
-    }
-
     /// Convenience: register a `DirectoryWorkflowResolver` rooted at `path`.
     ///
     /// `FlowEngine::validate()` will read `<path>/<name>.wf` on each `call workflow`
@@ -1035,7 +1022,6 @@ impl FlowEngineBuilder {
             action_registry: ActionRegistry::new(self.named, self.fallback),
             item_provider_registry: self.item_providers,
             gate_resolver_registry: Arc::new(self.gate_resolvers),
-            script_env_provider: Arc::from(self.script_env_provider),
             workflow_resolver: self.workflow_resolver.map(Arc::from),
             event_sinks: self.event_sinks,
             active_runs: Mutex::new(HashMap::new()),
@@ -1309,6 +1295,76 @@ mod tests {
             .unwrap()
             .action_fallback(Box::new(BetaExecutor));
         assert!(result.is_err(), "second action_fallback should return Err");
+    }
+
+    // --- validate_with() ---
+
+    #[test]
+    fn validate_with_uses_given_registries_not_builder_ones() {
+        let def = make_def("wf", vec![call_node("alpha")]);
+        let engine = FlowEngineBuilder::new().build().unwrap();
+        assert!(
+            engine.validate(&def).is_err(),
+            "builder has no 'alpha' executor"
+        );
+
+        let registry = ActionRegistry::from_executors(
+            [(
+                "alpha".to_string(),
+                Box::new(AlphaExecutor) as Box<dyn ActionExecutor>,
+            )]
+            .into_iter()
+            .collect::<HashMap<_, _>>(),
+            None,
+        );
+        assert!(
+            engine
+                .validate_with(&def, &registry, &ItemProviderRegistry::new())
+                .is_ok(),
+            "validate_with must use the passed action registry"
+        );
+    }
+
+    #[test]
+    fn validate_with_reports_missing_item_provider() {
+        let def = make_def("wf", vec![foreach_node("items", "tickets")]);
+        let engine = FlowEngineBuilder::new()
+            .item_provider(TicketsProvider)
+            .build()
+            .unwrap();
+        assert!(engine.validate(&def).is_ok());
+
+        let errors = engine
+            .validate_with(
+                &def,
+                &ActionRegistry::new(HashMap::new(), None),
+                &ItemProviderRegistry::new(),
+            )
+            .unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.message.contains("tickets")),
+            "error should mention the missing provider; got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn validate_with_uses_engine_gate_resolvers() {
+        let def = make_def("wf", vec![gate_node("approval", "human_approval")]);
+        let engine = FlowEngineBuilder::new().build().unwrap();
+
+        let errors = engine
+            .validate_with(
+                &def,
+                &ActionRegistry::new(HashMap::new(), None),
+                &ItemProviderRegistry::new(),
+            )
+            .unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.message.contains("human_approval")),
+            "error should mention the missing gate type; got: {:?}",
+            errors
+        );
     }
 
     // --- validate() acceptance criteria ---
