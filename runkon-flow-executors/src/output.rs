@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use runkon_flow::constants::metadata_keys;
 use runkon_flow::helpers::{
-    find_block_start, find_flow_output_block, find_output_block_marker, fix_backslash_escapes,
-    flow_output_block_line, parse_flow_output, strip_trailing_commas,
+    find_block_start, find_flow_output_block, find_flow_output_block_with_line,
+    find_output_block_marker, fix_backslash_escapes, parse_flow_output, strip_trailing_commas,
 };
 use runkon_flow::output_schema::{ArrayItems, FieldDef, FieldType, OutputSchema};
 
@@ -62,10 +62,9 @@ pub fn parse_structured_output(
     text: &str,
     schema: &OutputSchema,
 ) -> Result<StructuredOutput, OutputError> {
-    let cleaned = extract_output_block(text).ok_or(OutputError::Missing)?;
-    // `extract_output_block` found a complete block, so its line is always known.
-    let block_line = flow_output_block_line(text).unwrap_or(1);
+    let (block_line, block) = find_flow_output_block_with_line(text).ok_or(OutputError::Missing)?;
 
+    let cleaned = strip_code_fences(block);
     let cleaned = strip_trailing_commas(&cleaned);
     let cleaned = fix_backslash_escapes(&cleaned);
 

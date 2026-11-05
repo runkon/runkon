@@ -72,9 +72,8 @@ impl ClaudeAgentExecutor {
 
     /// Run the agent step.
     ///
-    /// A FLOW_OUTPUT parse or validation failure is returned as
-    /// [`AgentError::Output`], which hosts can match on; every other failure is
-    /// [`AgentError::Other`]. `Display` text is the same as the old `String` error.
+    /// Output failures are returned as [`AgentError::Output`]; see
+    /// [`AgentError`].
     pub fn execute(
         &self,
         ctx: &ClaudeAgentContext,

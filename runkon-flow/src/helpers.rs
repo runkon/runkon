@@ -79,12 +79,18 @@ fn find_flow_output_span(text: &str) -> Option<(usize, &str)> {
     Some((marker_pos, text[start..end].trim()))
 }
 
-/// The 1-based line of `text` on which the block returned by
-/// [`find_flow_output_block`] begins (the line of its `<<<FLOW_OUTPUT>>>`
-/// marker), or `None` when there is no complete block.
+/// The block [`find_flow_output_block`] returns together with the 1-based line
+/// of `text` on which it begins (the line of its `<<<FLOW_OUTPUT>>>` marker),
+/// from a single lookup. `None` when there is no complete block.
+pub fn find_flow_output_block_with_line(text: &str) -> Option<(usize, &str)> {
+    let (marker_pos, block) = find_flow_output_span(text)?;
+    Some((text[..marker_pos].matches('\n').count() + 1, block))
+}
+
+/// The 1-based line on which the block returned by [`find_flow_output_block`]
+/// begins, or `None` when there is no complete block.
 pub fn flow_output_block_line(text: &str) -> Option<usize> {
-    let (marker_pos, _) = find_flow_output_span(text)?;
-    Some(text[..marker_pos].matches('\n').count() + 1)
+    find_flow_output_block_with_line(text).map(|(line, _)| line)
 }
 
 /// Extract markers and context from a `<<<FLOW_OUTPUT>>> … <<<END_FLOW_OUTPUT>>>`
