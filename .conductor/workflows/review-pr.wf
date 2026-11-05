@@ -51,9 +51,8 @@ workflow review-pr {
     call review-workflow-semantics { retries = 1  if = "detect-workflow-changes.has_workflow_changes" }
   }
 
-  // Replies posted on the PR since the last conductor review, so the
-  // aggregator can set aside findings that were already answered
-  // (devinrosen/conductor-ai#3050).
+  // Replies posted on the PR since the last conductor review, so findings
+  // that were already answered can be set aside (devinrosen/conductor-ai#3050).
   script fetch-pr-replies {
     run = ".conductor/scripts/fetch-pr-replies.sh"
     env = {
@@ -61,7 +60,20 @@ workflow review-pr {
     }
   }
 
-  call review-aggregator { output = "review-aggregator" retries = 1 }
+  // Deciding whether a reply answers a finding is the only judgment left in
+  // aggregation, so the agent runs only when there are replies (#152).
+  if fetch-pr-replies.has_replies {
+    call review-reply-check { output = "review-reply-check" retries = 1 }
+  }
+
+  // Deterministic: approval, blocking and off-diff findings and labels come
+  // from the reviewers' outputs, with no model call (#152).
+  script review-aggregator {
+    run = ".conductor/scripts/aggregate-reviews.sh"
+    env = {
+      PRIOR_CONTEXTS = "{{prior_contexts}}"
+    }
+  }
   script submit-review {
     run = ".conductor/scripts/submit-review.sh"
     as  = "reviewer"
