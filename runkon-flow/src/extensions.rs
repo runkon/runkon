@@ -77,6 +77,7 @@ pub struct RunFailureCause {
 /// output or session instead of starting over. DSL retries (`attempt > 0`) and fresh runs
 /// never carry it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PriorStepAttempt {
     pub child_run_id: String,
     pub step_error: Option<String>,

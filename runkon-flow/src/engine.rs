@@ -141,19 +141,28 @@ impl ResumeContext {
 
     /// True when no recorded occurrence completed.
     pub fn is_empty(&self) -> bool {
-        !self
-            .occurrences
-            .values()
-            .flat_map(|m| m.values())
-            .any(|slots| slots.iter().any(Occurrence::is_completed))
+        !self.any_occurrence(Occurrence::is_completed)
     }
 
     /// True when any recorded occurrence failed and left a `child_run_id` to recover from.
     pub(crate) fn has_prior_failed(&self) -> bool {
+        self.any_occurrence(|o| o.last_failed.is_some())
+    }
+
+    /// True when `pred` holds for any recorded occurrence of any step.
+    fn any_occurrence(&self, pred: impl Fn(&Occurrence) -> bool) -> bool {
         self.occurrences
             .values()
             .flat_map(|m| m.values())
-            .any(|slots| slots.iter().any(|o| o.last_failed.is_some()))
+            .any(|slots| slots.iter().any(&pred))
+    }
+
+    /// The next unclaimed occurrence of `(name, iteration)`.
+    fn next_slot(&self, name: &str, iteration: u32) -> Option<&Occurrence> {
+        self.occurrences
+            .get(name)?
+            .get(&iteration)?
+            .get(self.cursor(name, iteration))
     }
 
     fn cursor(&self, name: &str, iteration: u32) -> usize {
@@ -165,12 +174,7 @@ impl ResumeContext {
 
     /// The completed row for the next unclaimed occurrence, without claiming it.
     pub(crate) fn next_completed(&self, name: &str, iteration: u32) -> Option<&WorkflowRunStep> {
-        self.occurrences
-            .get(name)?
-            .get(&iteration)?
-            .get(self.cursor(name, iteration))?
-            .completed
-            .as_ref()
+        self.next_slot(name, iteration)?.completed.as_ref()
     }
 
     /// The failed attempt of the next unclaimed occurrence (one that did not complete
@@ -180,12 +184,7 @@ impl ResumeContext {
         name: &str,
         iteration: u32,
     ) -> Option<&PriorStepAttempt> {
-        self.occurrences
-            .get(name)?
-            .get(&iteration)?
-            .get(self.cursor(name, iteration))?
-            .last_failed
-            .as_ref()
+        self.next_slot(name, iteration)?.last_failed.as_ref()
     }
 
     /// Claim the next occurrence of `(name, iteration)`, returning its completed row

@@ -57,6 +57,13 @@ pub fn record_correction_attempts(metadata: &mut HashMap<String, String>, attemp
     }
 }
 
+/// Record the prior run whose output was reused in step metadata, when one was.
+pub fn record_recovery(metadata: &mut HashMap<String, String>, recovered_from: Option<String>) {
+    if let Some(prior) = recovered_from {
+        metadata.insert(metadata_keys::OUTPUT_RECOVERED_FROM_RUN.to_string(), prior);
+    }
+}
+
 fn spawn_and_poll(
     runtime: &dyn AgentRuntime,
     request: &RuntimeRequest,

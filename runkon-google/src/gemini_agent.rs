@@ -9,7 +9,7 @@ use runkon_runtimes::{RunEventSink, RunStatus, RunTracker, RuntimeRequest, Runti
 
 use runkon_flow_executors::agent_loader::{self, BuildPromptParams};
 use runkon_flow_executors::correction::{
-    record_correction_attempts, run_agent_resuming_prior, AgentRunOutcome,
+    record_correction_attempts, record_recovery, run_agent_resuming_prior, AgentRunOutcome,
 };
 use runkon_flow_executors::output::record_flow_output_warning;
 use runkon_flow_executors::AgentError;
@@ -181,11 +181,7 @@ impl GeminiAgentExecutor {
         } = run_agent_resuming_prior(
             &*runtime,
             request,
-            if params.dry_run {
-                None
-            } else {
-                params.prior_run_id
-            },
+            params.prior_run_id.filter(|_| !params.dry_run),
             ctx.shutdown.as_ref(),
             ctx.step_timeout,
             params.schema,
@@ -223,9 +219,7 @@ impl GeminiAgentExecutor {
                 );
             }
             record_correction_attempts(&mut metadata, correction_attempts);
-            if let Some(prior) = recovered_from {
-                metadata.insert(metadata_keys::OUTPUT_RECOVERED_FROM_RUN.to_string(), prior);
-            }
+            record_recovery(&mut metadata, recovered_from);
             record_flow_output_warning(
                 &mut metadata,
                 completed.result_text.as_deref(),
