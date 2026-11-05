@@ -105,12 +105,16 @@ if ! result=$(jq -c '
   # Only a reply from someone with write access to the repo (owner, member,
   # collaborator) or from an app installed on it (a Bot, such as the pipeline
   # posting triage pushback) can set a finding aside; anyone can comment on a
-  # public PR.
+  # public PR. The answered_by from the agent is not trusted on its own: it reads
+  # untrusted reply text too, so an injected comment could make it name a
+  # trusted author. A finding is set aside only when that trusted author
+  # actually posted a reply about the file of the finding: an inline comment on it,
+  # or a reply whose body names it (triage pushback includes <file>:<line>).
   | ([ $all[] | select(.step == "fetch-pr-replies") ] | last // null
      | if . == null then [] else ((parsed // {}) | .replies // []) end
      | [ .[]? | objects
          | select(((.author_association // "") | IN("OWNER", "MEMBER", "COLLABORATOR")) or .author_type == "Bot")
-         | .author ] | unique) as $trusted
+         | {author: ((.author // "") | tostring), path: ((.path // "") | tostring), body: ((.body // "") | tostring)} ]) as $trusted_replies
   # review-reply-check names the reviewer by step name; accept the display name too.
   | [ $blocking_all[] | . as $b
       | ([ reviewers | to_entries[] | select(.value.name == $b.reviewer) | .key ] | first // "") as $b_step
@@ -118,7 +122,9 @@ if ! result=$(jq -c '
            | select(((.reviewer // "") | IN($b.reviewer, $b_step)) and ((.file // "") | tostring) == $b.file
                     and (((.line // 0) | tonumber? // 0)) == $b.line) ] | first) as $a
       | if $a != null and $b.reviewer != "Security" and $b.severity != "critical"
-           and ((($a.answered_by // "") | tostring) | IN($trusted[]))
+           and $b.file != ""
+           and ((($a.answered_by // "") | tostring) as $who
+                | any($trusted_replies[]; .author == $who and (.path == $b.file or (.body | contains($b.file)))))
         then $b + {answered: true, answered_by: (($a.answered_by // "") | tostring), reply: (($a.reply // "") | tostring)}
         else $b + {answered: false} end
     ] as $marked
