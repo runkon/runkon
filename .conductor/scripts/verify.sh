@@ -4,7 +4,7 @@
 # Replaces the verify agent (port of devinrosen/conductor-ai#3265). Maps the
 # changed files to crates, then runs:
 #   cargo build
-#   cargo nextest run -p <crate> --no-fail-fast, with each crate's test features
+#   cargo nextest run -p <crate> --no-fail-fast --no-tests=pass, with each crate's test features
 #   cargo clippy -p <crate> --all-targets --all-features -- -D warnings (as CI does)
 #   cargo fmt --all --check
 # A root Cargo.toml or Cargo.lock change checks every crate. Only .rs files,
@@ -128,7 +128,7 @@ if [ "${failed}" -eq 0 ]; then
     [ -n "${f}" ] && features=(--features "${f}")
     log="${logs}/nextest-${crate}.log"
     nextest_status=0
-    cargo nextest run -p "${crate}" --no-fail-fast "${features[@]+"${features[@]}"}" > "${log}" 2>&1 || nextest_status=$?
+    cargo nextest run -p "${crate}" --no-fail-fast --no-tests=pass "${features[@]+"${features[@]}"}" > "${log}" 2>&1 || nextest_status=$?
     summary=$(grep -E '^\s*Summary \[' "${log}" | tail -n 1 | sed -E 's/^[[:space:]]*Summary \[[^]]*\][[:space:]]*//')
     if [ "${nextest_status}" -eq 0 ]; then
       record "cargo nextest -p ${crate}" pass "${summary:-passed}"
