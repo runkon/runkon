@@ -1090,10 +1090,9 @@ mod tests {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
                 while std::time::Instant::now() < deadline {
                     let steps = self.persistence.get_steps(&self.run_id)?;
-                    if let Some(fast) = steps
-                        .into_iter()
-                        .find(|s| s.step_name == "fast" && s.status == WorkflowStepStatus::Completed)
-                    {
+                    if let Some(fast) = steps.into_iter().find(|s| {
+                        s.step_name == "fast" && s.status == WorkflowStepStatus::Completed
+                    }) {
                         // Simulate the host recovery pass against the fast row.
                         self.persistence.bulk_recover_steps(
                             &[(
@@ -1138,7 +1137,10 @@ mod tests {
 
         let snapshot = Arc::new(Mutex::new(None));
         let mut named = HashMap::new();
-        named.insert("fast".to_string(), Box::new(FastExec) as Box<dyn ActionExecutor>);
+        named.insert(
+            "fast".to_string(),
+            Box::new(FastExec) as Box<dyn ActionExecutor>,
+        );
         named.insert(
             "slow".to_string(),
             Box::new(SlowExec {

@@ -1662,7 +1662,15 @@ mod tests {
         let _ = run_id;
     }
 
-    fn step_outputs(p: &SqliteWorkflowPersistence) -> (String, Option<String>, Option<String>, Option<String>, Option<String>) {
+    fn step_outputs(
+        p: &SqliteWorkflowPersistence,
+    ) -> (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) {
         p.lock()
             .unwrap()
             .query_row(
@@ -1674,7 +1682,11 @@ mod tests {
             .unwrap()
     }
 
-    fn completed_with_outputs(ctx: &str, markers: &str, so: &str) -> crate::traits::persistence::StepUpdate {
+    fn completed_with_outputs(
+        ctx: &str,
+        markers: &str,
+        so: &str,
+    ) -> crate::traits::persistence::StepUpdate {
         use crate::status::WorkflowStepStatus;
         crate::traits::persistence::StepUpdate {
             generation: 1,
@@ -1694,12 +1706,19 @@ mod tests {
         use crate::status::WorkflowStepStatus;
         let (p, _run_id, step_id) = make_step_db();
         p.bulk_recover_steps(
-            &[(step_id.clone(), WorkflowStepStatus::Completed, Some("recovered".into()))],
+            &[(
+                step_id.clone(),
+                WorkflowStepStatus::Completed,
+                Some("recovered".into()),
+            )],
             "2026-01-01T00:00:00Z",
         )
         .unwrap();
-        p.update_step(&step_id, completed_with_outputs("ctx", "[\"m\"]", "{\"a\":1}"))
-            .unwrap();
+        p.update_step(
+            &step_id,
+            completed_with_outputs("ctx", "[\"m\"]", "{\"a\":1}"),
+        )
+        .unwrap();
         let (status, result_text, ctx, markers, so) = step_outputs(&p);
         assert_eq!(status, "completed");
         assert_eq!(result_text.as_deref(), Some("recovered"));
@@ -1711,10 +1730,16 @@ mod tests {
     #[test]
     fn update_step_completed_does_not_overwrite_existing_outputs() {
         let (p, _run_id, step_id) = make_step_db();
-        p.update_step(&step_id, completed_with_outputs("A", "[\"a\"]", "{\"a\":1}"))
-            .unwrap();
-        p.update_step(&step_id, completed_with_outputs("B", "[\"b\"]", "{\"b\":2}"))
-            .unwrap();
+        p.update_step(
+            &step_id,
+            completed_with_outputs("A", "[\"a\"]", "{\"a\":1}"),
+        )
+        .unwrap();
+        p.update_step(
+            &step_id,
+            completed_with_outputs("B", "[\"b\"]", "{\"b\":2}"),
+        )
+        .unwrap();
         let (_, _, ctx, markers, so) = step_outputs(&p);
         assert_eq!(ctx.as_deref(), Some("A"));
         assert_eq!(markers.as_deref(), Some("[\"a\"]"));
@@ -1726,7 +1751,11 @@ mod tests {
         use crate::status::WorkflowStepStatus;
         let (p, _run_id, step_id) = make_step_db();
         p.bulk_recover_steps(
-            &[(step_id.clone(), WorkflowStepStatus::Failed, Some("lost".into()))],
+            &[(
+                step_id.clone(),
+                WorkflowStepStatus::Failed,
+                Some("lost".into()),
+            )],
             "2026-01-01T00:00:00Z",
         )
         .unwrap();
