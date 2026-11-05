@@ -43,6 +43,12 @@ workflow iterate-pr {
           as = "developer"
         }
 
+        script fmt-fix-pre-verify {
+          run = ".conductor/scripts/fmt-fix.sh"
+          env = {
+            FMT_FIX_ALLOW_FAILURE = "1"
+          }
+        }
         script verify {
           run = ".conductor/scripts/verify.sh"
           env = { FEATURE_BASE_BRANCH = "{{feature_base_branch}}" }
@@ -52,6 +58,12 @@ workflow iterate-pr {
           call address-reviews {
             retries = 1
             as      = "developer"
+          }
+          script fmt-fix-pre-reverify {
+            run = ".conductor/scripts/fmt-fix.sh"
+            env = {
+              FMT_FIX_ALLOW_FAILURE = "1"
+            }
           }
           script verify {
             run = ".conductor/scripts/verify.sh"
