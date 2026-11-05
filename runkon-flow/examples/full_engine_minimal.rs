@@ -7,6 +7,10 @@
 //! it is a test-only persistence backend. A real deployment would supply a
 //! `SqliteWorkflowPersistence` or a custom `WorkflowPersistence` impl instead.
 //!
+//! `EchoExecutor` is registered once, in the per-run `ActionRegistry`. The same
+//! registries are used to pre-flight the workflow with `FlowEngine::validate_with`
+//! and then passed to `RunInput`, so validation matches what the run checks.
+//!
 //! Run with:
 //!   cargo run --example full_engine_minimal -p runkon-flow --features test-utils
 
@@ -53,11 +57,8 @@ impl ActionExecutor for EchoExecutor {
 }
 
 fn main() {
-    // 1. Build the engine with EchoExecutor registered under the name "echo".
-    let engine = FlowEngineBuilder::new()
-        .action(Box::new(EchoExecutor))
-        .build()
-        .expect("engine build failed");
+    // 1. Build the engine. Executors are per-run state, so none are registered here.
+    let engine = FlowEngineBuilder::new().build().expect("engine build failed");
 
     // 2. Parse a 2-step workflow that calls "echo" twice.
     let dsl = r#"workflow two-step {
@@ -71,7 +72,24 @@ fn main() {
     let def = runkon_flow::dsl::parse_workflow_str(dsl, "full_engine_minimal.wf")
         .expect("DSL parse failed");
 
-    // 3. Create in-memory persistence and register a run record.
+    // 3. Build the per-run registries, registering EchoExecutor under the name "echo".
+    let action_registry = Arc::new(ActionRegistry::from_executors(
+        [(
+            "echo".to_string(),
+            Box::new(EchoExecutor) as Box<dyn ActionExecutor>,
+        )]
+        .into_iter()
+        .collect::<HashMap<_, _>>(),
+        None,
+    ));
+    let item_providers = Arc::new(ItemProviderRegistry::new());
+
+    // 4. Pre-flight: validate against the same registries the run will use.
+    engine
+        .validate_with(&def, &action_registry, &item_providers)
+        .expect("workflow failed validation");
+
+    // 5. Create in-memory persistence and register a run record.
     let persistence = Arc::new(InMemoryWorkflowPersistence::new());
     let run = (persistence.as_ref() as &dyn WorkflowPersistence)
         .create_run(NewRun {
@@ -84,18 +102,7 @@ fn main() {
         })
         .expect("create_run failed");
 
-    // 4. Build a per-run ActionRegistry with the EchoExecutor.
-    let action_registry = Arc::new(ActionRegistry::from_executors(
-        [(
-            "echo".to_string(),
-            Box::new(EchoExecutor) as Box<dyn ActionExecutor>,
-        )]
-        .into_iter()
-        .collect::<HashMap<_, _>>(),
-        None,
-    ));
-
-    // 5. Run the workflow via the production entry point — no test_helpers needed.
+    // 6. Run the workflow via the production entry point — no test_helpers needed.
     let result = engine
         .run_workflow(
             &def,
@@ -104,7 +111,7 @@ fn main() {
                 run.id,
                 "two-step".into(),
                 action_registry,
-                Arc::new(ItemProviderRegistry::new()),
+                item_providers,
                 Arc::new(NoOpScriptEnvProvider),
                 Arc::new(NoopRunContext::default()),
                 CancellationToken::new(),
