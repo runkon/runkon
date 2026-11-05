@@ -10,6 +10,71 @@ use crate::traits::persistence::StepUpdate;
 use crate::traits::run_context::RunContext;
 use crate::types::{StepResult, StepSuccess};
 
+struct ParallelCallResult {
+    agent_name: String,
+    step_id: String,
+    agent_step_key: String,
+    result: std::result::Result<ActionOutput, EngineError>,
+    attempt: u32,
+}
+
+/// Persist one finished branch and fold it into the block's tallies.
+fn save_branch_result(
+    state: &mut ExecutionState,
+    pr: ParallelCallResult,
+    iteration: u32,
+    merged_markers: &mut Vec<String>,
+    successes: &mut u32,
+    failures: &mut u32,
+) -> Result<()> {
+    match pr.result {
+        Ok(output) => {
+            let markers_json = crate::helpers::serialize_or_empty_array(
+                &output.markers,
+                &format!("parallel: '{}'", pr.agent_name),
+            );
+            let context = output.context.clone().unwrap_or_default();
+
+            super::persist_completed_action_step(
+                state,
+                &pr.step_id,
+                &pr.agent_name,
+                &output,
+                context.clone(),
+                markers_json,
+                pr.attempt,
+            )?;
+
+            tracing::info!("parallel: '{}' completed", pr.agent_name);
+
+            *successes += 1;
+            merged_markers.extend(output.markers.iter().cloned());
+
+            record_step_success(
+                state,
+                pr.agent_step_key.clone(),
+                StepSuccess::from_action_output(
+                    &output,
+                    pr.agent_name.clone(),
+                    context,
+                    iteration,
+                    None,
+                ),
+            );
+        }
+        Err(e) => {
+            tracing::warn!("parallel: '{}' failed: {e}", pr.agent_name);
+            let generation = state.expect_lease_generation();
+            state.persistence.update_step(
+                &pr.step_id,
+                StepUpdate::failed(generation, e.to_string(), pr.attempt),
+            )?;
+            *failures += 1;
+        }
+    }
+    Ok(())
+}
+
 pub fn execute_parallel(
     state: &mut ExecutionState,
     node: &ParallelNode,
@@ -31,14 +96,6 @@ pub fn execute_parallel(
         .as_deref()
         .map(|name| resolve_schema(state, name))
         .transpose()?;
-
-    struct ParallelCallResult {
-        agent_name: String,
-        step_id: String,
-        agent_step_key: String,
-        result: std::result::Result<ActionOutput, EngineError>,
-        attempt: u32,
-    }
 
     struct DispatchInput {
         step_id: String,
@@ -272,24 +329,52 @@ pub fn execute_parallel(
     drop(completion_tx);
 
     // Collect results as threads complete, triggering fail_fast cancellation as needed.
+    // Each branch is persisted the moment its result arrives, not after the slowest
+    // sibling finishes. Until a branch's row is terminal it stays `running` with a
+    // `child_run_id` pointing at a finished agent run, which a host recovery pass
+    // (e.g. conductor's `recover_stuck_steps`) mistakes for a crashed step and
+    // completes with NULL outputs. #150.
     // The timeout-based recv lets us tick the heartbeat and poll for cross-process
     // cancellation while waiting on long-running agents — without it the engine
     // sits silent here for the full duration of the slowest branch and the
     // watchdog reaper races us after >60 s. #2731.
-    let mut results: Vec<ParallelCallResult> = Vec::new();
+    let mut merged_markers: Vec<String> = Vec::new();
+    let mut successes = 0u32;
+    let mut failures = 0u32;
+    let mut results_count = 0u32;
     loop {
         match completion_rx.recv_timeout(std::time::Duration::from_millis(500)) {
             Ok((step_id, agent_name, agent_step_key, result, attempt)) => {
-                let failed = result.is_err();
-                results.push(ParallelCallResult {
+                results_count += 1;
+                let pr = ParallelCallResult {
                     agent_name,
                     step_id,
                     agent_step_key,
                     result,
                     attempt,
-                });
+                };
+                let failed = pr.result.is_err();
                 if failed && node.fail_fast {
                     scope_token.cancel(CancellationReason::FailFast);
+                }
+                let saved = save_branch_result(
+                    state,
+                    pr,
+                    iteration,
+                    &mut merged_markers,
+                    &mut successes,
+                    &mut failures,
+                );
+                if let Err(e) = saved {
+                    // Siblings may still be running: stop them from starting retries.
+                    let reason = match &e {
+                        EngineError::Cancelled(CancellationReason::LeaseLost) => {
+                            CancellationReason::LeaseLost
+                        }
+                        _ => CancellationReason::EngineShutdown,
+                    };
+                    scope_token.cancel(reason);
+                    return Err(e);
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
@@ -297,7 +382,7 @@ pub fn execute_parallel(
                 // Poll for external cancel. Best-effort: on external cancel,
                 // propagate to scope_token so worker threads see it via their
                 // pre-dispatch check; keep draining the rest of the channel so
-                // in-flight workers' results land in `results`.
+                // in-flight workers' results are still persisted.
                 if state.check_cancellation_throttled().is_err() {
                     scope_token.cancel(CancellationReason::UserRequested(None));
                 }
@@ -305,63 +390,9 @@ pub fn execute_parallel(
         }
     }
 
-    // Process results
-    let mut merged_markers: Vec<String> = Vec::new();
-    let mut successes = 0u32;
-    let mut failures = 0u32;
-
-    let results_count = results.len();
-    for pr in results {
-        match pr.result {
-            Ok(output) => {
-                let markers_json = crate::helpers::serialize_or_empty_array(
-                    &output.markers,
-                    &format!("parallel: '{}'", pr.agent_name),
-                );
-                let context = output.context.clone().unwrap_or_default();
-
-                super::persist_completed_action_step(
-                    state,
-                    &pr.step_id,
-                    &pr.agent_name,
-                    &output,
-                    context.clone(),
-                    markers_json,
-                    pr.attempt,
-                )?;
-
-                tracing::info!("parallel: '{}' completed", pr.agent_name,);
-
-                successes += 1;
-                merged_markers.extend(output.markers.iter().cloned());
-
-                record_step_success(
-                    state,
-                    pr.agent_step_key.clone(),
-                    StepSuccess::from_action_output(
-                        &output,
-                        pr.agent_name.clone(),
-                        context,
-                        iteration,
-                        None,
-                    ),
-                );
-            }
-            Err(e) => {
-                tracing::warn!("parallel: '{}' failed: {e}", pr.agent_name);
-                let generation = state.expect_lease_generation();
-                state.persistence.update_step(
-                    &pr.step_id,
-                    StepUpdate::failed(generation, e.to_string(), pr.attempt),
-                )?;
-                failures += 1;
-            }
-        }
-    }
-
     // Apply min_success policy (skipped-on-resume agents count as successes)
     let effective_successes = successes + skipped_count;
-    let total_agents = results_count as u32 + skipped_count;
+    let total_agents = results_count + skipped_count;
     let min_required = node.min_success.unwrap_or(total_agents);
     tracing::info!(
         "parallel: {successes} succeeded, {failures} failed, {skipped_count} skipped out of {total_agents} agents",
@@ -1006,5 +1037,157 @@ mod tests {
             "step should be Failed after all retries exhausted; got {:?}",
             steps[0].status
         );
+    }
+
+    /// #150: a branch's row must be saved when it finishes, not after the slowest sibling,
+    /// so a host recovery pass running mid-block cannot null its outputs.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn parallel_persists_fast_branch_while_slow_sibling_runs_sqlite() {
+        use crate::persistence_sqlite::{create_canonical_schema, SqliteWorkflowPersistence};
+        use crate::types::WorkflowRunStep;
+        use std::sync::Mutex;
+
+        struct FastExec;
+        impl ActionExecutor for FastExec {
+            fn name(&self) -> &str {
+                "fast"
+            }
+            fn execute(
+                &self,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &crate::traits::action_executor::StepInfo,
+                _params: &ActionParams,
+            ) -> Result<ActionOutput, EngineError> {
+                Ok(ActionOutput {
+                    markers: vec!["found".to_string()],
+                    context: Some("fast context".to_string()),
+                    result_text: None,
+                    structured_output: Some("{\"findings\":[]}".to_string()),
+                    metadata: HashMap::new(),
+                    child_run_id: None,
+                })
+            }
+        }
+
+        struct SlowExec {
+            persistence: Arc<SqliteWorkflowPersistence>,
+            run_id: String,
+            snapshot: Arc<Mutex<Option<WorkflowRunStep>>>,
+        }
+        impl ActionExecutor for SlowExec {
+            fn name(&self) -> &str {
+                "slow"
+            }
+            fn execute(
+                &self,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &crate::traits::action_executor::StepInfo,
+                _params: &ActionParams,
+            ) -> Result<ActionOutput, EngineError> {
+                // Wait (bounded, so a regression fails instead of hanging) until the
+                // fast branch's row is completed while this branch is still running.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while std::time::Instant::now() < deadline {
+                    let steps = self.persistence.get_steps(&self.run_id)?;
+                    if let Some(fast) = steps
+                        .into_iter()
+                        .find(|s| s.step_name == "fast" && s.status == WorkflowStepStatus::Completed)
+                    {
+                        // Simulate the host recovery pass against the fast row.
+                        self.persistence.bulk_recover_steps(
+                            &[(
+                                fast.id.clone(),
+                                WorkflowStepStatus::Completed,
+                                Some("recovered".to_string()),
+                            )],
+                            &chrono::Utc::now().to_rfc3339(),
+                        )?;
+                        *self.snapshot.lock().unwrap() = Some(fast);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Ok(ActionOutput {
+                    markers: vec![],
+                    context: Some("slow context".to_string()),
+                    result_text: None,
+                    structured_output: None,
+                    metadata: HashMap::new(),
+                    child_run_id: None,
+                })
+            }
+        }
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        create_canonical_schema(&conn).unwrap();
+        let persistence = Arc::new(SqliteWorkflowPersistence::from_shared_connection(Arc::new(
+            Mutex::new(conn),
+        )));
+        let run = persistence
+            .create_run(crate::traits::persistence::NewRun {
+                workflow_name: "wf".to_string(),
+                parent_run_id: String::new(),
+                dry_run: false,
+                trigger: "manual".to_string(),
+                definition_snapshot: None,
+                parent_workflow_run_id: None,
+            })
+            .unwrap();
+        let run_id = run.id;
+
+        let snapshot = Arc::new(Mutex::new(None));
+        let mut named = HashMap::new();
+        named.insert("fast".to_string(), Box::new(FastExec) as Box<dyn ActionExecutor>);
+        named.insert(
+            "slow".to_string(),
+            Box::new(SlowExec {
+                persistence: Arc::clone(&persistence),
+                run_id: run_id.clone(),
+                snapshot: Arc::clone(&snapshot),
+            }) as Box<dyn ActionExecutor>,
+        );
+        let registry = crate::traits::action_executor::ActionRegistry::new(named, None);
+
+        let mut state = crate::test_helpers::make_test_execution_state(
+            Arc::clone(&persistence) as Arc<dyn WorkflowPersistence>,
+            run_id.clone(),
+        );
+        state.action_registry = Arc::new(registry);
+
+        let node = ParallelNode {
+            fail_fast: false,
+            min_success: None,
+            calls: vec![
+                AgentRef::Name("fast".to_string()),
+                AgentRef::Name("slow".to_string()),
+            ],
+            output: None,
+            call_outputs: HashMap::new(),
+            with: vec![],
+            call_with: HashMap::new(),
+            call_if: HashMap::new(),
+            call_retries: HashMap::new(),
+        };
+
+        execute_parallel(&mut state, &node, 0).unwrap();
+
+        let snap = snapshot
+            .lock()
+            .unwrap()
+            .take()
+            .expect("fast row must be completed while the slow sibling is still running");
+        assert_eq!(snap.context_out.as_deref(), Some("fast context"));
+        assert_eq!(snap.markers_out.as_deref(), Some("[\"found\"]"));
+        assert!(snap.structured_output.is_some());
+
+        let steps = persistence.get_steps(&run_id).unwrap();
+        let fast = steps.iter().find(|s| s.step_name == "fast").unwrap();
+        assert_eq!(fast.status, WorkflowStepStatus::Completed);
+        assert_eq!(fast.context_out.as_deref(), Some("fast context"));
+        assert_eq!(fast.markers_out.as_deref(), Some("[\"found\"]"));
+        assert!(fast.structured_output.is_some());
+        let slow = steps.iter().find(|s| s.step_name == "slow").unwrap();
+        assert_eq!(slow.status, WorkflowStepStatus::Completed);
     }
 }

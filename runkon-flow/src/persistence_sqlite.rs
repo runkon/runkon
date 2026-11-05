@@ -64,6 +64,22 @@ static SQL_CHECK_TERMINAL: std::sync::LazyLock<String> = std::sync::LazyLock::ne
     )
 });
 
+/// Precomputed SQL for the output backfill in `update_step`. Fills output columns on a
+/// `completed` row only when all three are NULL (the signature of `bulk_recover_steps`);
+/// never touches status, `result_text`, `ended_at` or `step_error`.
+static SQL_BACKFILL_OUTPUTS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    "UPDATE workflow_run_steps SET \
+     context_out = COALESCE(context_out, :context_out), \
+     markers_out = COALESCE(markers_out, :markers_out), \
+     structured_output = COALESCE(structured_output, :structured_output) \
+     WHERE id = :id \
+     AND (SELECT generation FROM workflow_runs \
+          WHERE id = workflow_run_steps.workflow_run_id) = :generation \
+     AND status = 'completed' \
+     AND context_out IS NULL AND markers_out IS NULL AND structured_output IS NULL"
+        .to_string()
+});
+
 // ---------------------------------------------------------------------------
 // Row mappers (rusqlite::Row → runkon-flow type)
 // ---------------------------------------------------------------------------
@@ -403,6 +419,10 @@ impl SqliteWorkflowPersistence {
     /// chunked CASE-based UPDATE in a savepoint so the bulk write is atomic;
     /// the `status NOT IN (terminal statuses)` predicate guards against
     /// overwriting already-terminal rows.
+    ///
+    /// This sets `context_out`, `markers_out` and `structured_output` to NULL, so it
+    /// must not be run against the steps of a live executor. If the engine's terminal
+    /// write loses that race, `update_step` backfills the outputs on a `completed` row.
     pub fn bulk_recover_steps(
         &self,
         items: &[(String, WorkflowStepStatus, Option<String>)],
@@ -800,10 +820,46 @@ impl WorkflowPersistence for SqliteWorkflowPersistence {
                     .map_err(db_err)?
                     .is_some();
                 if already_terminal {
-                    tracing::debug!(
-                        step_id = %step_id,
-                        "update_step: step already terminal, skipping overwrite"
-                    );
+                    let has_outputs = update.context_out.is_some()
+                        || update.markers_out.is_some()
+                        || update.structured_output.is_some();
+                    if !has_outputs {
+                        tracing::debug!(
+                            step_id = %step_id,
+                            "update_step: step already terminal, skipping overwrite"
+                        );
+                        return Ok(());
+                    }
+                    let filled = if update.status == WorkflowStepStatus::Completed {
+                        conn.execute(
+                            &SQL_BACKFILL_OUTPUTS,
+                            named_params![
+                                ":context_out": update.context_out,
+                                ":markers_out": update.markers_out,
+                                ":structured_output": update.structured_output,
+                                ":id": step_id,
+                                ":generation": update.generation,
+                            ],
+                        )
+                        .map_err(db_err)?
+                    } else {
+                        0
+                    };
+                    if filled > 0 {
+                        tracing::warn!(
+                            step_id = %step_id,
+                            "update_step: step was already terminal with NULL outputs \
+                             (likely a host recovery pass); filled in outputs from the \
+                             engine's write"
+                        );
+                    } else {
+                        tracing::warn!(
+                            step_id = %step_id,
+                            status = %update.status,
+                            "update_step: step already terminal; dropped a terminal write \
+                             that carried outputs"
+                        );
+                    }
                     return Ok(());
                 }
                 return Err(EngineError::Cancelled(CancellationReason::LeaseLost));
@@ -1604,6 +1660,81 @@ mod tests {
 
         // run_id is read by other tests; suppress the unused warning.
         let _ = run_id;
+    }
+
+    fn step_outputs(p: &SqliteWorkflowPersistence) -> (String, Option<String>, Option<String>, Option<String>, Option<String>) {
+        p.lock()
+            .unwrap()
+            .query_row(
+                "SELECT status, result_text, context_out, markers_out, structured_output \
+                 FROM workflow_run_steps WHERE id = 'step-1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .unwrap()
+    }
+
+    fn completed_with_outputs(ctx: &str, markers: &str, so: &str) -> crate::traits::persistence::StepUpdate {
+        use crate::status::WorkflowStepStatus;
+        crate::traits::persistence::StepUpdate {
+            generation: 1,
+            status: WorkflowStepStatus::Completed,
+            child_run_id: None,
+            result_text: Some("engine".to_string()),
+            context_out: Some(ctx.to_string()),
+            markers_out: Some(markers.to_string()),
+            retry_count: None,
+            structured_output: Some(so.to_string()),
+            step_error: None,
+        }
+    }
+
+    #[test]
+    fn update_step_completed_backfills_outputs_after_bulk_recover() {
+        use crate::status::WorkflowStepStatus;
+        let (p, _run_id, step_id) = make_step_db();
+        p.bulk_recover_steps(
+            &[(step_id.clone(), WorkflowStepStatus::Completed, Some("recovered".into()))],
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+        p.update_step(&step_id, completed_with_outputs("ctx", "[\"m\"]", "{\"a\":1}"))
+            .unwrap();
+        let (status, result_text, ctx, markers, so) = step_outputs(&p);
+        assert_eq!(status, "completed");
+        assert_eq!(result_text.as_deref(), Some("recovered"));
+        assert_eq!(ctx.as_deref(), Some("ctx"));
+        assert_eq!(markers.as_deref(), Some("[\"m\"]"));
+        assert_eq!(so.as_deref(), Some("{\"a\":1}"));
+    }
+
+    #[test]
+    fn update_step_completed_does_not_overwrite_existing_outputs() {
+        let (p, _run_id, step_id) = make_step_db();
+        p.update_step(&step_id, completed_with_outputs("A", "[\"a\"]", "{\"a\":1}"))
+            .unwrap();
+        p.update_step(&step_id, completed_with_outputs("B", "[\"b\"]", "{\"b\":2}"))
+            .unwrap();
+        let (_, _, ctx, markers, so) = step_outputs(&p);
+        assert_eq!(ctx.as_deref(), Some("A"));
+        assert_eq!(markers.as_deref(), Some("[\"a\"]"));
+        assert_eq!(so.as_deref(), Some("{\"a\":1}"));
+    }
+
+    #[test]
+    fn update_step_completed_no_backfill_when_recovered_as_failed() {
+        use crate::status::WorkflowStepStatus;
+        let (p, _run_id, step_id) = make_step_db();
+        p.bulk_recover_steps(
+            &[(step_id.clone(), WorkflowStepStatus::Failed, Some("lost".into()))],
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+        p.update_step(&step_id, completed_with_outputs("ctx", "[\"m\"]", "{}"))
+            .unwrap();
+        let (status, _, ctx, markers, so) = step_outputs(&p);
+        assert_eq!(status, "failed");
+        assert!(ctx.is_none() && markers.is_none() && so.is_none());
     }
 
     #[test]
