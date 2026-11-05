@@ -1197,4 +1197,241 @@ mod tests {
         let slow = steps.iter().find(|s| s.step_name == "slow").unwrap();
         assert_eq!(slow.status, WorkflowStepStatus::Completed);
     }
+
+    #[cfg(feature = "sqlite")]
+    fn make_sqlite_state(
+        registry: crate::traits::action_executor::ActionRegistry,
+    ) -> (
+        Arc<crate::persistence_sqlite::SqliteWorkflowPersistence>,
+        Arc<std::sync::Mutex<rusqlite::Connection>>,
+        String,
+        ExecutionState,
+    ) {
+        use crate::persistence_sqlite::{create_canonical_schema, SqliteWorkflowPersistence};
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        create_canonical_schema(&conn).unwrap();
+        // See parallel_persists_fast_branch_while_slow_sibling_runs_sqlite.
+        conn.execute_batch("PRAGMA ignore_check_constraints = ON;")
+            .unwrap();
+        let shared = Arc::new(std::sync::Mutex::new(conn));
+        let persistence = Arc::new(SqliteWorkflowPersistence::from_shared_connection(
+            Arc::clone(&shared),
+        ));
+        let run = persistence
+            .create_run(crate::traits::persistence::NewRun {
+                workflow_name: "wf".to_string(),
+                parent_run_id: String::new(),
+                dry_run: false,
+                trigger: "manual".to_string(),
+                definition_snapshot: None,
+                parent_workflow_run_id: None,
+            })
+            .unwrap();
+        let mut state = crate::test_helpers::make_test_execution_state(
+            Arc::clone(&persistence) as Arc<dyn WorkflowPersistence>,
+            run.id.clone(),
+        );
+        state.action_registry = Arc::new(registry);
+        (persistence, shared, run.id, state)
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn two_branch_node(first: &str, second: &str) -> ParallelNode {
+        ParallelNode {
+            fail_fast: false,
+            min_success: None,
+            calls: vec![
+                AgentRef::Name(first.to_string()),
+                AgentRef::Name(second.to_string()),
+            ],
+            output: None,
+            call_outputs: HashMap::new(),
+            with: vec![],
+            call_with: HashMap::new(),
+            call_if: HashMap::new(),
+            call_retries: HashMap::new(),
+        }
+    }
+
+    /// A persist failure in the collection loop (here: the lease generation moved on
+    /// while the branch ran) must abort the block with `LeaseLost` while a sibling is
+    /// still running.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn parallel_persist_failure_returns_lease_lost_while_sibling_runs_sqlite() {
+        use crate::cancellation_reason::CancellationReason;
+        struct StealLeaseExec {
+            conn: Arc<std::sync::Mutex<rusqlite::Connection>>,
+        }
+        impl ActionExecutor for StealLeaseExec {
+            fn name(&self) -> &str {
+                "steal"
+            }
+            fn execute(
+                &self,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &crate::traits::action_executor::StepInfo,
+                _params: &ActionParams,
+            ) -> Result<ActionOutput, EngineError> {
+                self.conn
+                    .lock()
+                    .unwrap()
+                    .execute("UPDATE workflow_runs SET generation = generation + 100", [])
+                    .unwrap();
+                Ok(ActionOutput {
+                    markers: vec![],
+                    context: Some("c".to_string()),
+                    result_text: None,
+                    structured_output: None,
+                    metadata: HashMap::new(),
+                    child_run_id: None,
+                })
+            }
+        }
+        struct SleepExec;
+        impl ActionExecutor for SleepExec {
+            fn name(&self) -> &str {
+                "sleepy"
+            }
+            fn execute(
+                &self,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &crate::traits::action_executor::StepInfo,
+                _params: &ActionParams,
+            ) -> Result<ActionOutput, EngineError> {
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                Ok(ActionOutput {
+                    markers: vec![],
+                    context: None,
+                    result_text: None,
+                    structured_output: None,
+                    metadata: HashMap::new(),
+                    child_run_id: None,
+                })
+            }
+        }
+
+        // Build state first so the stealing executor can hold the persistence handle.
+        let (_persistence, conn, _run_id, mut state) = make_sqlite_state(
+            crate::traits::action_executor::ActionRegistry::new(HashMap::new(), None),
+        );
+        let mut named = HashMap::new();
+        named.insert(
+            "steal".to_string(),
+            Box::new(StealLeaseExec {
+                conn: Arc::clone(&conn),
+            }) as Box<dyn ActionExecutor>,
+        );
+        named.insert(
+            "sleepy".to_string(),
+            Box::new(SleepExec) as Box<dyn ActionExecutor>,
+        );
+        state.action_registry = Arc::new(crate::traits::action_executor::ActionRegistry::new(
+            named, None,
+        ));
+
+        let started = std::time::Instant::now();
+        let result = execute_parallel(&mut state, &two_branch_node("steal", "sleepy"), 0);
+        assert!(
+            matches!(
+                result,
+                Err(EngineError::Cancelled(CancellationReason::LeaseLost))
+            ),
+            "expected LeaseLost, got {result:?}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(1400),
+            "block must return before the slow sibling finishes"
+        );
+    }
+
+    /// A branch that fails mid-block has its row saved as `failed` before the slow
+    /// sibling finishes.
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn parallel_persists_failed_branch_while_slow_sibling_runs_sqlite() {
+        use crate::persistence_sqlite::SqliteWorkflowPersistence;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct FailExec;
+        impl ActionExecutor for FailExec {
+            fn name(&self) -> &str {
+                "failing"
+            }
+            fn execute(
+                &self,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &crate::traits::action_executor::StepInfo,
+                _params: &ActionParams,
+            ) -> Result<ActionOutput, EngineError> {
+                Err(EngineError::Workflow("boom".to_string()))
+            }
+        }
+        struct WatchExec {
+            persistence: Arc<SqliteWorkflowPersistence>,
+            run_id: std::sync::Mutex<String>,
+            saw_failed: Arc<AtomicBool>,
+        }
+        impl ActionExecutor for WatchExec {
+            fn name(&self) -> &str {
+                "watch"
+            }
+            fn execute(
+                &self,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &crate::traits::action_executor::StepInfo,
+                _params: &ActionParams,
+            ) -> Result<ActionOutput, EngineError> {
+                let run_id = self.run_id.lock().unwrap().clone();
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                while std::time::Instant::now() < deadline {
+                    let steps = self.persistence.get_steps(&run_id)?;
+                    if steps
+                        .iter()
+                        .any(|s| s.step_name == "failing" && s.status == WorkflowStepStatus::Failed)
+                    {
+                        self.saw_failed.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Ok(ActionOutput {
+                    markers: vec![],
+                    context: None,
+                    result_text: None,
+                    structured_output: None,
+                    metadata: HashMap::new(),
+                    child_run_id: None,
+                })
+            }
+        }
+
+        let (persistence, _conn, run_id, mut state) = make_sqlite_state(
+            crate::traits::action_executor::ActionRegistry::new(HashMap::new(), None),
+        );
+        let saw_failed = Arc::new(AtomicBool::new(false));
+        let mut named = HashMap::new();
+        named.insert(
+            "failing".to_string(),
+            Box::new(FailExec) as Box<dyn ActionExecutor>,
+        );
+        named.insert(
+            "watch".to_string(),
+            Box::new(WatchExec {
+                persistence: Arc::clone(&persistence),
+                run_id: std::sync::Mutex::new(run_id.clone()),
+                saw_failed: Arc::clone(&saw_failed),
+            }) as Box<dyn ActionExecutor>,
+        );
+        state.action_registry = Arc::new(crate::traits::action_executor::ActionRegistry::new(
+            named, None,
+        ));
+
+        execute_parallel(&mut state, &two_branch_node("failing", "watch"), 0).ok();
+
+        assert!(
+            saw_failed.load(Ordering::SeqCst),
+            "failed row must be persisted while the slow sibling is still running"
+        );
+    }
 }

@@ -36,6 +36,11 @@ static STEP_COLUMNS_WITH_PREFIX: std::sync::LazyLock<String> = std::sync::LazyLo
         .join(", ")
 });
 
+/// Lease fence shared by the terminal update, the already-terminal check and the output
+/// backfill: the write only applies while the run's generation matches the caller's.
+const GENERATION_FENCE_SQL: &str = "(SELECT generation FROM workflow_runs \
+     WHERE id = workflow_run_steps.workflow_run_id) = :generation";
+
 /// Precomputed SQL for the terminal-status UPDATE in `update_step`. Allocated once so
 /// the hot-path call site carries no per-invocation heap cost.
 static SQL_UPDATE_TERMINAL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
@@ -47,8 +52,7 @@ static SQL_UPDATE_TERMINAL: std::sync::LazyLock<String> = std::sync::LazyLock::n
          retry_count = COALESCE(:retry_count, retry_count), \
          structured_output = :structured_output, step_error = :step_error \
          WHERE id = :id \
-         AND (SELECT generation FROM workflow_runs \
-              WHERE id = workflow_run_steps.workflow_run_id) = :generation \
+         AND {GENERATION_FENCE_SQL} \
          AND status NOT IN ({TERMINAL_STATUSES_SQL})"
     )
 });
@@ -58,8 +62,7 @@ static SQL_CHECK_TERMINAL: std::sync::LazyLock<String> = std::sync::LazyLock::ne
     format!(
         "SELECT 1 FROM workflow_run_steps \
          WHERE id = :id \
-         AND (SELECT generation FROM workflow_runs \
-              WHERE id = workflow_run_steps.workflow_run_id) = :generation \
+         AND {GENERATION_FENCE_SQL} \
          AND status IN ({TERMINAL_STATUSES_SQL})"
     )
 });
@@ -68,16 +71,16 @@ static SQL_CHECK_TERMINAL: std::sync::LazyLock<String> = std::sync::LazyLock::ne
 /// `completed` row only when all three are NULL (the signature of `bulk_recover_steps`);
 /// never touches status, `result_text`, `ended_at` or `step_error`.
 static SQL_BACKFILL_OUTPUTS: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-    "UPDATE workflow_run_steps SET \
-     context_out = COALESCE(context_out, :context_out), \
-     markers_out = COALESCE(markers_out, :markers_out), \
-     structured_output = COALESCE(structured_output, :structured_output) \
-     WHERE id = :id \
-     AND (SELECT generation FROM workflow_runs \
-          WHERE id = workflow_run_steps.workflow_run_id) = :generation \
-     AND status = 'completed' \
-     AND context_out IS NULL AND markers_out IS NULL AND structured_output IS NULL"
-        .to_string()
+    format!(
+        "UPDATE workflow_run_steps SET \
+         context_out = COALESCE(context_out, :context_out), \
+         markers_out = COALESCE(markers_out, :markers_out), \
+         structured_output = COALESCE(structured_output, :structured_output) \
+         WHERE id = :id \
+         AND {GENERATION_FENCE_SQL} \
+         AND status = 'completed' \
+         AND context_out IS NULL AND markers_out IS NULL AND structured_output IS NULL"
+    )
 });
 
 // ---------------------------------------------------------------------------
@@ -1763,6 +1766,86 @@ mod tests {
             .unwrap();
         let (status, _, ctx, markers, so) = step_outputs(&p);
         assert_eq!(status, "failed");
+        assert!(ctx.is_none() && markers.is_none() && so.is_none());
+    }
+
+    #[test]
+    fn update_step_terminal_without_outputs_on_terminal_row_is_noop() {
+        use crate::status::WorkflowStepStatus;
+        let (p, _run_id, step_id) = make_step_db();
+        p.bulk_recover_steps(
+            &[(
+                step_id.clone(),
+                WorkflowStepStatus::Completed,
+                Some("recovered".into()),
+            )],
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+        let mut u = completed_with_outputs("", "", "");
+        u.context_out = None;
+        u.markers_out = None;
+        u.structured_output = None;
+        p.update_step(&step_id, u).unwrap();
+        let (status, result_text, ctx, markers, so) = step_outputs(&p);
+        assert_eq!(status, "completed");
+        assert_eq!(result_text.as_deref(), Some("recovered"));
+        assert!(ctx.is_none() && markers.is_none() && so.is_none());
+    }
+
+    #[test]
+    fn update_step_completed_no_backfill_when_outputs_partially_set() {
+        use crate::status::WorkflowStepStatus;
+        let (p, _run_id, step_id) = make_step_db();
+        p.bulk_recover_steps(
+            &[(
+                step_id.clone(),
+                WorkflowStepStatus::Completed,
+                Some("recovered".into()),
+            )],
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+        p.lock()
+            .unwrap()
+            .execute(
+                "UPDATE workflow_run_steps SET context_out = 'existing' WHERE id = ?",
+                rusqlite::params![step_id],
+            )
+            .unwrap();
+        p.update_step(&step_id, completed_with_outputs("ctx", "[\"m\"]", "{}"))
+            .unwrap();
+        let (_, _, ctx, markers, so) = step_outputs(&p);
+        assert_eq!(ctx.as_deref(), Some("existing"));
+        assert!(markers.is_none() && so.is_none());
+    }
+
+    #[test]
+    fn update_step_completed_stale_generation_does_not_backfill() {
+        use crate::cancellation_reason::CancellationReason;
+        use crate::engine_error::EngineError;
+        use crate::status::WorkflowStepStatus;
+        let (p, _run_id, step_id) = make_step_db();
+        p.bulk_recover_steps(
+            &[(
+                step_id.clone(),
+                WorkflowStepStatus::Completed,
+                Some("recovered".into()),
+            )],
+            "2026-01-01T00:00:00Z",
+        )
+        .unwrap();
+        let mut u = completed_with_outputs("ctx", "[\"m\"]", "{}");
+        u.generation = 0;
+        let result = p.update_step(&step_id, u);
+        assert!(
+            matches!(
+                result,
+                Err(EngineError::Cancelled(CancellationReason::LeaseLost))
+            ),
+            "got {result:?}"
+        );
+        let (_, _, ctx, markers, so) = step_outputs(&p);
         assert!(ctx.is_none() && markers.is_none() && so.is_none());
     }
 
