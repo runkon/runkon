@@ -23,9 +23,35 @@ workflow ticket-to-pr {
 
   call plan { output = "task-plan" }
 
+  // A plan that needs the user's call stops here instead of implementing a
+  // default nobody chose (#153). The answer reaches implement as gate_feedback.
+  if plan.needs_decision {
+    script show-plan-decisions {
+      run = ".conductor/scripts/show-plan-decisions.sh"
+      env = { PRIOR_OUTPUT = "{{prior_output}}" }
+    }
+    gate human_plan_decisions {
+      prompt     = "The plan has decisions for you; the questions and the plan's defaults are in the show-plan-decisions step. Approve with your answers as feedback (approving without feedback keeps the defaults), or reject to stop the run."
+      timeout    = "72h"
+      on_timeout = fail
+    }
+  }
+
   call implement {
     retries = 2
     as      = "developer"
+  }
+
+  // implement can drop part of the plan without saying so, and verify checks
+  // only that what was written builds and passes (#153). check-plan compares
+  // the plan's tasks and tests with the diff; anything missing goes to a
+  // dedicated agent before verify, so its work is verified too.
+  call check-plan { output = "plan-check" }
+  if check-plan.plan_incomplete {
+    call complete-plan {
+      retries = 1
+      as      = "developer"
+    }
   }
 
   script verify {

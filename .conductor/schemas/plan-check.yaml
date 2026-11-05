@@ -1,0 +1,18 @@
+fields:
+  complete:
+    type: boolean
+    desc: "true when every planned task and listed test is in the diff, or the implement summary explains a deliberate change of plan"
+  missing:
+    type: array
+    desc: "Planned work not found in the diff. Empty when complete."
+    items:
+      task_id: string
+      what:
+        type: string
+        desc: "What is missing, specific enough to implement: the file, function or test the plan named"
+  context:
+    type: string
+    desc: "One or two sentences: COMPLETE, or what is missing"
+
+markers:
+  plan_incomplete: "complete == false"

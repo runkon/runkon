@@ -10,6 +10,14 @@ The ticket is: {{ticket_id}}
 
 Prior step context: {{prior_context}}
 
+{{#if gate_feedback}}
+The user answered the plan's open decisions at the gate:
+
+{{gate_feedback}}
+
+These answers override the defaults in `PLAN.md`. Record them under the plan's "Decisions for the user" heading before you start, and implement accordingly.
+{{/if}}
+
 Steps:
 1. Read `PLAN.md` thoroughly before writing any code.
 2. Implement all changes described in the plan, following the existing code style and conventions.
