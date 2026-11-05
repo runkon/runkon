@@ -12,6 +12,7 @@ use runkon_flow_executors::correction::{
     record_correction_attempts, run_agent_with_output_correction, AgentRunOutcome,
 };
 use runkon_flow_executors::output::record_flow_output_warning;
+use runkon_flow_executors::AgentError;
 
 use crate::gemini_api::GeminiApiCallExecutor;
 
@@ -63,11 +64,15 @@ impl GeminiAgentExecutor {
         }
     }
 
+    /// Run the agent step.
+    ///
+    /// Output failures are returned as [`AgentError::Output`]; see
+    /// [`AgentError`].
     pub fn execute(
         &self,
         ctx: &GeminiAgentContext,
         params: &GeminiAgentParams<'_>,
-    ) -> Result<ActionOutput, String> {
+    ) -> Result<ActionOutput, AgentError> {
         let working_dir = ctx.working_dir.to_str().ok_or_else(|| {
             format!(
                 "working_dir '{}' contains invalid UTF-8",
@@ -226,7 +231,7 @@ impl GeminiAgentExecutor {
                     params.name, completed.status
                 )
             });
-            Err(detail)
+            Err(detail.into())
         }
     }
 }
@@ -409,7 +414,7 @@ mod tests {
         // Model resolved successfully from runtime config; any Err must not be "no model resolved".
         if let Err(ref e) = result {
             assert!(
-                !e.contains("no model resolved"),
+                !e.to_string().contains("no model resolved"),
                 "model resolution should succeed via runtime default_model, got: {e}"
             );
         }
@@ -441,7 +446,7 @@ mod tests {
         // Model resolved from frontmatter; any Err must not be "no model resolved".
         if let Err(ref e) = result {
             assert!(
-                !e.contains("no model resolved"),
+                !e.to_string().contains("no model resolved"),
                 "model resolution should succeed via agent frontmatter model, got: {e}"
             );
         }
@@ -470,11 +475,11 @@ mod tests {
 
         let err = result.expect_err("expected Err when no model and no runtime default");
         assert!(
-            err.contains("no model resolved"),
+            err.to_string().contains("no model resolved"),
             "error should mention 'no model resolved', got: {err}"
         );
         assert!(
-            err.contains("test-agent"),
+            err.to_string().contains("test-agent"),
             "error should name the agent, got: {err}"
         );
     }
@@ -749,7 +754,7 @@ mod tests {
         );
         let err = result.unwrap_err();
         assert!(
-            err.contains("contains invalid UTF-8"),
+            err.to_string().contains("contains invalid UTF-8"),
             "error should mention invalid UTF-8, got: {err}"
         );
     }
