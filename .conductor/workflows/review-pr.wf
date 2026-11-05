@@ -24,6 +24,8 @@ workflow review-pr {
     run = ".conductor/scripts/detect-file-types.sh"
     env = {
       BASE_BRANCH = "{{base_branch}}"
+      SCOPE       = "{{scope}}"
+      SINCE       = "{{since}}"
     }
   }
 
@@ -31,6 +33,8 @@ workflow review-pr {
     run = ".conductor/scripts/detect-workflow-changes.sh"
     env = {
       BASE_BRANCH = "{{base_branch}}"
+      SCOPE       = "{{scope}}"
+      SINCE       = "{{since}}"
     }
   }
 
