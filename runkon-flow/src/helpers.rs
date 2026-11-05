@@ -1030,6 +1030,7 @@ mod tests {
             call_with: Default::default(),
             call_if: Default::default(),
             call_retries: Default::default(),
+            call_require_output: Default::default(),
         });
         let keys = collect_leaf_step_keys(&node);
         assert_eq!(keys, vec!["agent_a".to_string(), "agent_b".to_string()]);
@@ -1154,6 +1155,7 @@ mod tests {
             plugin_dirs: vec![],
             timeout: None,
             max_turns: None,
+            require_output: None,
         });
         let keys = collect_leaf_step_keys(&node);
         assert_eq!(keys, vec!["plan".to_string()]);

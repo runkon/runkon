@@ -16,6 +16,7 @@ pub use parser::parse_duration_str;
 pub(crate) use parser::parse_workflow_file;
 pub use parser::parse_workflow_str;
 pub use script_utils::{default_skills_dir, make_script_resolver, resolve_script_path};
+pub(crate) use types::effective_require_output;
 #[allow(unused_imports)]
 pub use types::QualityGateConfig;
 pub use types::{
