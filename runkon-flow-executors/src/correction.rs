@@ -295,6 +295,32 @@ mod tests {
     use runkon_runtimes::runtime::private::Seal;
     use std::sync::Mutex;
 
+    #[test]
+    fn record_recovery_inserts_prior_run_when_some() {
+        let mut metadata = HashMap::new();
+        record_recovery(&mut metadata, Some("run-1".to_string()));
+        assert_eq!(
+            metadata.get(metadata_keys::OUTPUT_RECOVERED_FROM_RUN),
+            Some(&"run-1".to_string())
+        );
+    }
+
+    #[test]
+    fn record_recovery_leaves_metadata_empty_when_none() {
+        let mut metadata = HashMap::new();
+        record_recovery(&mut metadata, None);
+        assert!(metadata.is_empty());
+    }
+
+    #[test]
+    fn record_recovery_preserves_existing_metadata() {
+        let mut metadata = HashMap::new();
+        metadata.insert("existing".to_string(), "value".to_string());
+        record_recovery(&mut metadata, Some("run-2".to_string()));
+        assert_eq!(metadata.get("existing"), Some(&"value".to_string()));
+        assert_eq!(metadata.len(), 2);
+    }
+
     // Not `test_support::ScriptedRuntime`: these tests assert on the prompt of
     // each spawn and script `PollError` results, which the shared runtime
     // (it records only `resume_session_id` and replays `RunHandle`s) cannot.
