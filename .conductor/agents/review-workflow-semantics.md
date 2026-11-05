@@ -11,7 +11,8 @@ Prior step context: {{prior_context}}
 
 - **Conditions:** `if` and `unless` take only `step.marker` or a bare boolean input name. There is no `&&`, `||`, `!` or comparison. `unless` is the inverse of `if`.
 - **Marker lookup:** a condition reads the **latest** result stored under that step **name**, whatever its iteration. In a loop iteration where the step was skipped (by its own `if`/`unless`, or because its branch wasn't taken), the condition still sees the previous iteration's markers. A step that has never run reads as false.
-- **Resume:** completed steps are saved by `(name, iteration)`. Since runkon 0.7.2 the n-th occurrence of a name matches the n-th saved row, so a repeated name no longer skips the wrong step on resume. Conditions, `{{prior_output}}` and `prior_contexts` still see only the latest occurrence of a name, so a repeated name stays ambiguous.
+- **Resume:** completed steps are saved by `(name, iteration)`. Since runkon 0.7.2 the n-th occurrence of a name matches the n-th saved row, so a repeated name no longer skips the wrong step on resume. A repeated name is still ambiguous for conditions (which read only its latest result) and for resume ordering.
+- **Step outputs:** the `prior_output` template variable (written with double braces in a `.wf` file) is the structured output of the most recent completed step, whatever its name; it is not a lookup by name. `prior_contexts` lists every completed step in run order, repeated names included (the engine appends each one and never dedupes, also when contexts are replayed on resume). A script that picks `first` or `last` over the entries for a name therefore sees every occurrence, such as a verify-loopback fix-up after the original `implement`.
 - **FLOW_OUTPUT parsing:** the **last** block in stdout wins. `<<<FLOW_OUTPUT>>>` must start a line and be followed by `{`, `[` or a code fence on the next line. `<<<END_FLOW_OUTPUT>>>` must start a line. The one-line form `<<<FLOW_OUTPUT>>> {...}` with no end marker is not parsed. Invalid JSON yields no markers; it is logged, not failed. Text interpolated into a heredoc's JSON (`"context": "$var"`) breaks on quotes and newlines; build it with `jq -n --arg`.
 - **Schema-derived markers:** the `markers:` section of a `.conductor/schemas/*.yaml` derives markers from fields (for example `has_review_issues: "approved == false"`). Renaming or removing a field silently stops its marker firing.
 - **Gates:** `timeout` and `on_timeout` (`fail` by default, or `continue`). In a dry run, human gates are auto-approved and automated gates are skipped.
@@ -20,7 +21,7 @@ Prior step context: {{prior_context}}
 ## Focus
 
 ### Resume
-- A step name repeated within one iteration: scripts, `call`s and `call workflow X`, including in different branches of the same iteration. Report it as a `warning`, and tell the author to give each occurrence a unique name. Explain why: markers and `{{prior_output}}` resolve by name, so `if = "fmt-fix.x"` is ambiguous, and resume depends on occurrence order.
+- A step name repeated within one iteration: scripts, `call`s and `call workflow X`, including in different branches of the same iteration. Report it as a `warning`, and tell the author to give each occurrence a unique name. Explain why: a condition resolves a marker by name to its latest result, so `if = "fmt-fix.x"` is ambiguous, and resume depends on occurrence order.
 - Steps whose effects (push, PR create, issue or comment write, commit) aren't safe to repeat if the run resumes after the effect but before the step was recorded complete, or aren't safe to skip because an earlier occurrence completed.
 
 ### Markers
