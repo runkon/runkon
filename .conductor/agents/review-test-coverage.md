@@ -19,6 +19,7 @@ Do NOT flag:
 - UI rendering code where testing is impractical
 - Trivial one-liners with no logic to test (≤ 5 lines, no branching)
 - Simple delegation/wrapper functions with no logic of their own
+- Missing tests for `.conductor/scripts/*.sh`. These scripts have no test harness; they count as code so security and error-handling review them, not test coverage
 
 ## Scope constraint
 

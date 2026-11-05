@@ -15,6 +15,13 @@ Focus exclusively on:
 - Unsafe deserialization of external data (JSON from GitHub API, config files)
 - SQL injection in SQLite queries (verify parameterized queries are used consistently)
 
+## Shell scripts (`.conductor/scripts/*.sh`)
+
+These scripts run `gh` and `git` for every workflow run, some with the reviewer identity (`as = "reviewer"`). Also check:
+- Unquoted expansions, `eval`, and untrusted text (PR titles and bodies, comments, agent output) passed into `gh` arguments, `--jq` filters or shell commands
+- Tokens or `GH_TOKEN` echoed or logged
+- Scripts that write to GitHub with an identity broader than they need
+
 ## Scope constraint
 
 Only read files that appear directly in the diff, plus their immediate imports/callers (one hop max). Do NOT perform codebase-wide grep sweeps for security patterns.
