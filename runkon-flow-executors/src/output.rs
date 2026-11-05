@@ -786,7 +786,10 @@ mod tests {
         let err = parse_structured_output("no block here", &schema).unwrap_err();
         assert_eq!(err, OutputError::Missing);
         assert_eq!(err.block_line(), None);
-        assert!(err.to_string().contains("No <<<FLOW_OUTPUT>>>"), "got: {err}");
+        assert!(
+            err.to_string().contains("No <<<FLOW_OUTPUT>>>"),
+            "got: {err}"
+        );
     }
 
     #[test]

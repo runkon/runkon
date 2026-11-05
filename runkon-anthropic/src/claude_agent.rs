@@ -987,7 +987,8 @@ mod tests {
             "{err:?}"
         );
         assert!(
-            err.to_string().starts_with("structured output validation: "),
+            err.to_string()
+                .starts_with("structured output validation: "),
             "{err}"
         );
     }
