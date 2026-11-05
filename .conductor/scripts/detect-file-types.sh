@@ -9,12 +9,29 @@ if [ -z "${BASE_BRANCH:-}" ]; then
   exit 1
 fi
 
-changed_files=$(git diff "origin/${BASE_BRANCH}...HEAD" --name-only 2>/dev/null || true)
+# A failed diff (for example a missing base ref) must fail the step. Reading it
+# as an empty list would skip every conditional reviewer without any error.
+# -z gives NUL-separated, unquoted names.
+# Command substitution would drop the NULs, so go through a temp file.
+diff_tmp=$(mktemp)
+trap 'rm -f "$diff_tmp"' EXIT
+if ! git diff "origin/${BASE_BRANCH}...HEAD" --name-only -z > "$diff_tmp"; then
+  echo "ERROR: git diff against origin/${BASE_BRANCH} failed." >&2
+  exit 1
+fi
 
-# Filter for code files, excluding .conductor/, docs/, .github/, and root-level *.md
+# Filter for code files, excluding .conductor/, docs/, .github/, and root-level *.md.
+# Shell scripts under .conductor/scripts/ count as code, so the security and
+# error-handling reviewers cover them.
 code_files=()
-while IFS= read -r file; do
+while IFS= read -r -d '' file; do
   [[ -z "$file" ]] && continue
+
+  # Pipeline shell scripts run gh and git, so they count as code
+  if [[ "$file" == .conductor/scripts/*.sh ]]; then
+    code_files+=("$file")
+    continue
+  fi
 
   # Exclude specific directories and root-level .md files
   [[ "$file" == .conductor/* ]] && continue
@@ -28,21 +45,22 @@ while IFS= read -r file; do
       code_files+=("$file")
       ;;
   esac
-done <<< "$changed_files"
+done < "$diff_tmp"
 
 count=${#code_files[@]}
 
+# jq escapes every character in the file names; a hand-built JSON string would
+# be invalid for names with quotes or backslashes and the engine would drop the
+# markers without any error.
+emit() {
+  echo "<<<FLOW_OUTPUT>>>"
+  jq -cn --argjson markers "$1" --arg ctx "$2" '{markers: $markers, context: $ctx}'
+  echo "<<<END_FLOW_OUTPUT>>>"
+}
+
 if [ "$count" -gt 0 ]; then
   file_list=$(IFS=", "; echo "${code_files[*]}")
-  cat <<EOF
-<<<FLOW_OUTPUT>>>
-{"markers": ["has_code_changes"], "context": "Found ${count} code file(s) in diff: ${file_list}"}
-<<<END_FLOW_OUTPUT>>>
-EOF
+  emit '["has_code_changes"]' "Found ${count} code file(s) in diff: ${file_list}"
 else
-  cat <<'EOF'
-<<<FLOW_OUTPUT>>>
-{"markers": [], "context": "No code files in diff"}
-<<<END_FLOW_OUTPUT>>>
-EOF
+  emit '[]' "No code files in diff"
 fi
