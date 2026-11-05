@@ -58,7 +58,9 @@ impl ActionExecutor for EchoExecutor {
 
 fn main() {
     // 1. Build the engine. Executors are per-run state, so none are registered here.
-    let engine = FlowEngineBuilder::new().build().expect("engine build failed");
+    let engine = FlowEngineBuilder::new()
+        .build()
+        .expect("engine build failed");
 
     // 2. Parse a 2-step workflow that calls "echo" twice.
     let dsl = r#"workflow two-step {
