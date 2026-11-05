@@ -43,14 +43,20 @@ workflow iterate-pr {
           as = "developer"
         }
 
-        call verify
+        script verify {
+          run = ".conductor/scripts/verify.sh"
+          env = { FEATURE_BASE_BRANCH = "{{feature_base_branch}}" }
+        }
 
         if verify.has_failures {
           call address-reviews {
             retries = 1
             as      = "developer"
           }
-          call verify
+          script verify {
+            run = ".conductor/scripts/verify.sh"
+            env = { FEATURE_BASE_BRANCH = "{{feature_base_branch}}" }
+          }
         }
 
         script fmt-fix {

@@ -13,7 +13,7 @@ Prior step context: {{prior_context}}
 Steps:
 1. Read `PLAN.md` thoroughly before writing any code.
 2. Implement all changes described in the plan, following the existing code style and conventions.
-3. Write a brief FLOW_OUTPUT summarizing which crates and files you modified, so the verify step can scope its test commands:
+3. Write a brief FLOW_OUTPUT summarizing which crates and files you modified (verify finds the changed crates from the diff itself; this summary is for the record):
    ```
    <<<FLOW_OUTPUT>>>
    {"markers": [], "context": "Modified: runkon-flow/src/engine.rs, runkon-flow/src/dsl/parser.rs (crates: runkon-flow)"}
@@ -40,4 +40,4 @@ Example `runkon-flow/changelog.d/123.md`:
 
 ## Do NOT verify your own work
 
-**Do NOT run `cargo build`, `cargo test`, `cargo nextest`, `cargo clippy`, or `cargo fmt`.** A separate `verify` step (runs automatically after you commit) handles all verification, keeping cargo's voluminous output out of your context window. The verify step will loop back to you with a structured failure summary if anything fails — that is where you fix issues, not preemptively here. If `PLAN.md` lists cargo commands as "definition of done", ignore them; verify owns that work now.
+**Do NOT run `cargo build`, `cargo test`, `cargo nextest`, `cargo clippy`, or `cargo fmt`.** A separate `verify` step (runs automatically after you commit) runs the build, tests, clippy and fmt as a script, keeping cargo's output out of your context window. The verify step will loop back to you with a structured failure summary if anything fails — that is where you fix issues, not preemptively here. If `PLAN.md` lists cargo commands as "definition of done", ignore them; verify owns that work now.
