@@ -34,6 +34,9 @@ pub struct ClaudeAgentContext {
     pub runtimes: std::collections::HashMap<String, runkon_runtimes::config::RuntimeConfig>,
     /// Default runtime name applied when agent frontmatter omits `runtime:`.
     pub default_runtime: Option<String>,
+    /// Root directory (relative to the worktree and repo) under which agents and
+    /// prompt snippets are searched. See [`runkon_flow_executors::ConfigDir`].
+    pub config_dir: runkon_flow_executors::ConfigDir,
     /// Per-invocation runtime override. When `Some`, the executor resolves and
     /// validates against this runtime instead of `agent_def.runtime`. Used by
     /// the host (e.g. when a workflow's model picker explicitly selects a
@@ -98,6 +101,7 @@ impl ClaudeAgentExecutor {
             dry_run: params.dry_run,
             schema: params.schema,
             default_runtime: ctx.default_runtime.as_deref(),
+            config_dir: &ctx.config_dir,
         };
 
         let (agent_def, prompt) = agent_loader::load_agent_and_build_prompt(
@@ -384,6 +388,7 @@ mod tests {
             event_sink: Arc::new(runkon_runtimes::NoopEventSink),
             runtimes: std::collections::HashMap::new(),
             default_runtime: None,
+            config_dir: runkon_flow_executors::ConfigDir::new(".conductor").unwrap(),
             runtime_override: None,
         }
     }
@@ -583,6 +588,7 @@ mod tests {
             event_sink: Arc::new(runkon_runtimes::NoopEventSink),
             runtimes: std::collections::HashMap::new(),
             default_runtime: None,
+            config_dir: runkon_flow_executors::ConfigDir::new(".conductor").unwrap(),
             runtime_override: None,
         };
         let params = ClaudeAgentParams {
