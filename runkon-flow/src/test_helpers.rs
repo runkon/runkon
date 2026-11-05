@@ -97,6 +97,7 @@ pub fn call_node(agent: &str) -> WorkflowNode {
         plugin_dirs: vec![],
         timeout: None,
         max_turns: None,
+        require_output: None,
     })
 }
 

@@ -78,6 +78,18 @@ impl KvValue {
         }
     }
 
+    fn into_bool(self) -> std::result::Result<bool, String> {
+        match self {
+            Self::Quoted(s) | Self::Bare(s) => match s.as_str() {
+                "true" => Ok(true),
+                "false" => Ok(false),
+                _ => Err(format!("invalid boolean `{s}`: expected true or false")),
+            },
+            Self::Array(_) => Err("expected true or false, found an array".to_string()),
+            Self::Map(_) => Err("expected true or false, found a map".to_string()),
+        }
+    }
+
     fn into_u32(self) -> std::result::Result<u32, String> {
         match self {
             Self::Quoted(s) | Self::Bare(s) => {
@@ -417,6 +429,7 @@ impl Parser {
         let mut plugin_dirs = Vec::new();
         let mut timeout = None;
         let mut max_turns = None;
+        let mut require_output = None;
 
         if self.peek() == &Token::LBrace {
             self.advance();
@@ -440,6 +453,12 @@ impl Parser {
             if let Some(mt) = kvs.remove("max_turns") {
                 max_turns = Some(mt.into_u32()?);
             }
+            if let Some(ro) = kvs.remove("require_output") {
+                require_output = Some(
+                    ro.into_bool()
+                        .map_err(|e| format!("call: invalid require_output: {e}"))?,
+                );
+            }
         }
 
         Ok(CallNode {
@@ -452,6 +471,7 @@ impl Parser {
             plugin_dirs,
             timeout,
             max_turns,
+            require_output,
         })
     }
 
@@ -671,6 +691,7 @@ impl Parser {
         let mut call_with: HashMap<String, Vec<String>> = HashMap::new();
         let mut call_if: HashMap<String, (String, String)> = HashMap::new();
         let mut call_retries: HashMap<String, u32> = HashMap::new();
+        let mut call_require_output: HashMap<String, bool> = HashMap::new();
         while self.peek() == &Token::Call {
             self.advance();
             let agent = self.expect_agent_ref()?;
@@ -700,7 +721,13 @@ impl Parser {
                         .as_str()
                         .parse::<u32>()
                         .map_err(|e| format!("parallel call {idx}: invalid retries: {e}"))?;
-                    call_retries.insert(idx, r);
+                    call_retries.insert(idx.clone(), r);
+                }
+                if let Some(v) = call_kvs.remove("require_output") {
+                    let b = v
+                        .into_bool()
+                        .map_err(|e| format!("parallel call {idx}: invalid require_output: {e}"))?;
+                    call_require_output.insert(idx, b);
                 }
             }
             calls.push(agent);
@@ -721,6 +748,7 @@ impl Parser {
             call_with,
             call_if,
             call_retries,
+            call_require_output,
         })
     }
 
@@ -866,6 +894,13 @@ impl Parser {
 
         let mut kvs = self.parse_kvs()?;
         self.expect(&Token::RBrace)?;
+
+        if kvs.contains_key("require_output") {
+            return Err(format!(
+                "script '{name}': require_output is not allowed on a script step; a script \
+                 sets its own markers and fails when its FLOW_OUTPUT block can't be parsed"
+            ));
+        }
 
         let run = kvs
             .remove("run")
@@ -1351,6 +1386,73 @@ workflow wf {
         let src = "my_wf { call plan }";
         let result = parse_workflow_str(src, "bad.wf");
         assert!(result.is_err());
+    }
+
+    fn require_output_of(src: &str) -> Option<bool> {
+        let def = parse_workflow_str(src, "t.wf").unwrap();
+        match &def.body[0] {
+            WorkflowNode::Call(c) => c.require_output,
+            other => panic!("expected Call node, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_call_require_output_true_false_and_absent() {
+        let t = "workflow wf { call verify { require_output = true } }";
+        let f = "workflow wf { call verify { require_output = false } }";
+        let a = "workflow wf { call verify { retries = 1 } }";
+        assert_eq!(require_output_of(t), Some(true));
+        assert_eq!(require_output_of(f), Some(false));
+        assert_eq!(require_output_of(a), None);
+    }
+
+    #[test]
+    fn parse_call_require_output_rejects_non_boolean() {
+        let src = "workflow wf { call verify { require_output = maybe } }";
+        let err = parse_workflow_str(src, "t.wf").unwrap_err().to_string();
+        assert!(err.contains("require_output"), "{err}");
+        let src = r#"workflow wf { call verify { require_output = ["a"] } }"#;
+        let err = parse_workflow_str(src, "t.wf").unwrap_err().to_string();
+        assert!(err.contains("require_output"), "{err}");
+    }
+
+    #[test]
+    fn parse_parallel_call_require_output() {
+        let src = r#"
+workflow wf {
+    parallel {
+        call a { require_output = false }
+        call b { require_output = true }
+        call c
+    }
+}
+"#;
+        let def = parse_workflow_str(src, "t.wf").unwrap();
+        match &def.body[0] {
+            WorkflowNode::Parallel(p) => {
+                assert_eq!(p.call_require_output.get("0"), Some(&false));
+                assert_eq!(p.call_require_output.get("1"), Some(&true));
+                assert_eq!(p.call_require_output.get("2"), None);
+            }
+            other => panic!("expected Parallel node, got {other:?}"),
+        }
+        let bad = "workflow wf { parallel { call a { require_output = 3 } } }";
+        let err = parse_workflow_str(bad, "t.wf").unwrap_err().to_string();
+        assert!(err.contains("require_output"), "{err}");
+    }
+
+    #[test]
+    fn parse_script_rejects_require_output() {
+        let src = r#"
+workflow wf {
+    script lint {
+        run = "./lint.sh"
+        require_output = true
+    }
+}
+"#;
+        let err = parse_workflow_str(src, "t.wf").unwrap_err().to_string();
+        assert!(err.contains("require_output"), "{err}");
     }
 
     #[test]

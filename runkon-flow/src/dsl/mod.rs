@@ -18,6 +18,7 @@ pub use parser::parse_workflow_str;
 pub use script_utils::{default_skills_dir, make_script_resolver, resolve_script_path};
 #[allow(unused_imports)]
 pub use types::QualityGateConfig;
+pub(crate) use types::effective_require_output;
 pub use types::{
     collect_agent_names, collect_workflow_refs, AgentRef, AlwaysNode, ApprovalMode, CallNode,
     CallWorkflowNode, Condition, DoNode, DoWhileNode, ForEachNode, GateNode, GateOptions, IfNode,

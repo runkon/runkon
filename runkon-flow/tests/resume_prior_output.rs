@@ -233,6 +233,7 @@ fn parallel_branch_gets_prior_attempt_on_resume() {
             call_with: Default::default(),
             call_if: Default::default(),
             call_retries: Default::default(),
+            call_require_output: Default::default(),
         })],
     );
     let result = resume(

@@ -377,6 +377,11 @@ pub struct CallNode {
     /// `None` defers to `DEFAULT_MAX_TURNS` applied by the executor.
     #[serde(default)]
     pub max_turns: Option<u32>,
+    /// Fail the step when the agent ends without a parseable `<<<FLOW_OUTPUT>>>`
+    /// block (the executor reports `OUTPUT_WARNING`). `None` defers to the default:
+    /// `true` when an output schema is in effect for the step, `false` otherwise.
+    #[serde(default)]
+    pub require_output: Option<bool>,
 }
 
 /// A sub-workflow invocation node.
@@ -478,6 +483,16 @@ pub struct ParallelNode {
     /// Per-call retry counts keyed by index (as string) in `calls`. 0 = no retries.
     #[serde(default)]
     pub call_retries: HashMap<String, u32>,
+    /// Per-call `require_output` overrides keyed by index (as string) in `calls`.
+    /// Calls without an entry default to whether an output schema is in effect.
+    #[serde(default)]
+    pub call_require_output: HashMap<String, bool>,
+}
+
+/// Resolve whether a step must produce an output block: an explicit setting wins,
+/// otherwise it is required exactly when an output schema is in effect.
+pub(crate) fn effective_require_output(explicit: Option<bool>, has_schema: bool) -> bool {
+    explicit.unwrap_or(has_schema)
 }
 
 fn default_true() -> bool {
@@ -786,6 +801,7 @@ mod tests {
             plugin_dirs: vec![],
             timeout: None,
             max_turns: None,
+            require_output: None,
         })
     }
 
@@ -800,6 +816,7 @@ mod tests {
             plugin_dirs: vec![],
             timeout: None,
             max_turns: None,
+            require_output: None,
         })
     }
 
@@ -814,6 +831,7 @@ mod tests {
             plugin_dirs: vec![],
             timeout: None,
             max_turns: None,
+            require_output: None,
         })
     }
 
@@ -828,6 +846,7 @@ mod tests {
             as_identity: None,
             timeout: None,
             max_turns: None,
+            require_output: None,
         })
     }
 
@@ -842,6 +861,7 @@ mod tests {
             plugin_dirs: vec![],
             timeout: None,
             max_turns: None,
+            require_output: None,
         })
     }
 
@@ -1007,6 +1027,7 @@ mod tests {
             call_with: HashMap::new(),
             call_if: HashMap::new(),
             call_retries: HashMap::new(),
+            call_require_output: Default::default(),
         });
         let nodes = vec![parallel];
         assert_eq!(count_nodes(&nodes), 3); // 1 parallel node + 2 calls
@@ -1053,6 +1074,7 @@ mod tests {
             call_with: HashMap::new(),
             call_if: HashMap::new(),
             call_retries: HashMap::new(),
+            call_require_output: Default::default(),
         });
         let refs = collect_agent_names(&[parallel]);
         let names: Vec<&str> = refs.iter().map(|r| r.label()).collect();

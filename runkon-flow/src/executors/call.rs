@@ -64,6 +64,9 @@ fn execute_call_inner(
         .map(|name| resolve_schema(state, name))
         .transpose()?;
 
+    let require_output =
+        crate::dsl::effective_require_output(node.require_output, schema.is_some());
+
     // Retry loop
     let max_attempts = 1 + node.retries;
     let mut last_error = String::new();
@@ -256,6 +259,30 @@ fn execute_call_inner(
         }
 
         match dispatch_result {
+            Ok(output) if super::missing_required_output(&output, require_output).is_some() => {
+                // The step requires an output block and the agent ended without one:
+                // fail the attempt with the warning so retries / on_fail apply.
+                let msg = super::missing_required_output(&output, require_output)
+                    .unwrap_or_default();
+                tracing::warn!(
+                    "Step '{}' (attempt {}/{}): {msg}",
+                    agent_label,
+                    attempt + 1,
+                    max_attempts,
+                );
+                let generation = state.expect_lease_generation();
+                state.persistence.update_step(
+                    &step_id,
+                    StepUpdate::failed_with_child(
+                        generation,
+                        msg.clone(),
+                        attempt,
+                        output.child_run_id.clone(),
+                    ),
+                )?;
+                last_error = msg;
+                continue;
+            }
             Ok(output) => {
                 tracing::info!(
                     "Step '{}' completed: markers={:?}",
@@ -401,6 +428,7 @@ mod tests {
             as_identity: None,
             plugin_dirs: vec![],
             max_turns: None,
+            require_output: None,
         };
 
         execute_call(&mut state, &node, 0).unwrap();

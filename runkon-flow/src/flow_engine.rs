@@ -2071,6 +2071,7 @@ mod tests {
             call_with: HashMap::new(),
             call_if: HashMap::new(),
             call_retries: HashMap::new(),
+            call_require_output: Default::default(),
         });
 
         let def = make_def("wf", vec![parallel]);
@@ -2150,6 +2151,7 @@ mod tests {
             plugin_dirs: vec![],
             timeout: Some("10ms".to_string()),
             max_turns: None,
+            require_output: None,
         });
 
         let def = make_def("wf", vec![timed_out_call]);
