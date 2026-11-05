@@ -36,7 +36,8 @@ model: gemini-2.5-pro
 You are a helpful assistant. Answer the user's question concisely.
 ```
 
-Save as e.g. `.conductor/agents/my-gemini-proxy-agent.md`.
+Save as e.g. `.runkon/agents/my-gemini-proxy-agent.md`. (`.runkon` is the default `ConfigDir`; a host
+that configures another root, such as conductor's `.conductor`, uses that instead.)
 
 ## Sample workflow
 
