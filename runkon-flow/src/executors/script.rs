@@ -704,11 +704,14 @@ mod tests {
         }
     }
 
-    /// Run `script` with one input, `ticket_id = "T-1"`, and return the step's context.
+    /// Run `script` with one input, `rk_env_probe = "T-1"`, and return the step's context.
+    ///
+    /// The key is one no host sets: script steps inherit the parent environment,
+    /// and a test run inside a conductor workflow already has `CONDUCTOR_RK_ENV_PROBE`.
     fn run_with_ticket_input(state: &mut ExecutionState, run_id: &str, script: &str) -> String {
         state
             .inputs
-            .insert("ticket_id".to_string(), "T-1".to_string());
+            .insert("rk_env_probe".to_string(), "T-1".to_string());
         execute_script(state, &make_node("env_prefix", script), 0).unwrap();
         let steps = state.persistence.get_steps(run_id).unwrap();
         assert_eq!(steps[0].status, WorkflowStepStatus::Completed);
@@ -716,7 +719,7 @@ mod tests {
     }
 
     const PRINT_BOTH_PREFIXES: &str =
-        "echo \"flow=${FLOW_TICKET_ID:-unset} conductor=${CONDUCTOR_TICKET_ID:-unset}\"";
+        "echo \"flow=${FLOW_RK_ENV_PROBE:-unset} conductor=${CONDUCTOR_RK_ENV_PROBE:-unset}\"";
 
     /// With the default provider, inputs use the neutral `FLOW_` prefix only.
     #[test]
@@ -738,7 +741,7 @@ mod tests {
     }
 
     /// An invalid prefix fails the step without running the script, rather than
-    /// injecting a variable the host didn't intend (`PATH=` + `TICKET_ID`).
+    /// injecting a variable the host didn't intend (`PATH=` + `RK_ENV_PROBE`).
     #[test]
     fn invalid_prefix_fails_the_step_without_running_it() {
         let (persistence, run_id) = make_persistence();
@@ -746,7 +749,7 @@ mod tests {
         state.script_env_provider = Arc::new(PrefixProvider("PATH="));
         state
             .inputs
-            .insert("ticket_id".to_string(), "T-1".to_string());
+            .insert("rk_env_probe".to_string(), "T-1".to_string());
         // With fail_fast (the default) the failed step also fails the call.
         let res = execute_script(&mut state, &make_node("env_prefix", "echo ran"), 0);
         assert!(res.is_err(), "fail_fast should surface the step failure");
@@ -773,9 +776,12 @@ mod tests {
         state
             .inputs
             .insert("path".to_string(), "/nonexistent".to_string());
-        let ctx =
-            run_with_ticket_input(&mut state, &run_id, "echo \"ticket=$TICKET_ID path=$PATH\"");
-        assert!(ctx.contains("ticket=T-1"), "context: {ctx:?}");
+        let ctx = run_with_ticket_input(
+            &mut state,
+            &run_id,
+            "echo \"probe=$RK_ENV_PROBE path=$PATH\"",
+        );
+        assert!(ctx.contains("probe=T-1"), "context: {ctx:?}");
         assert!(!ctx.contains("path=/nonexistent"), "context: {ctx:?}");
     }
 
