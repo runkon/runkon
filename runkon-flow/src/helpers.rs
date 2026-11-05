@@ -459,8 +459,8 @@ pub(crate) fn advance_resume_past_while_iterations(
 #[cfg(test)]
 mod parse_tests {
     use super::{
-        find_block_start, find_flow_output_block, find_output_block_marker, flow_output_block_line,
-        parse_flow_output,
+        find_block_start, find_flow_output_block, find_flow_output_block_with_line,
+        find_output_block_marker, flow_output_block_line, parse_flow_output,
     };
 
     #[test]
@@ -508,6 +508,60 @@ mod parse_tests {
             None
         );
         assert_eq!(flow_output_block_line("no block"), None);
+    }
+
+    #[test]
+    fn with_line_marker_on_first_line() {
+        let text = "<<<FLOW_OUTPUT>>>\n{\"markers\": []}\n<<<END_FLOW_OUTPUT>>>\n";
+        assert_eq!(
+            find_flow_output_block_with_line(text),
+            Some((1, "{\"markers\": []}"))
+        );
+    }
+
+    #[test]
+    fn with_line_after_n_lines_of_prose() {
+        for n in 1..=4usize {
+            let text = format!(
+                "{}<<<FLOW_OUTPUT>>>\n{{}}\n<<<END_FLOW_OUTPUT>>>\n",
+                "prose\n".repeat(n)
+            );
+            assert_eq!(find_flow_output_block_with_line(&text), Some((n + 1, "{}")));
+        }
+    }
+
+    #[test]
+    fn with_line_block_in_code_fence() {
+        let text = concat!(
+            "intro\n",
+            "<<<FLOW_OUTPUT>>>\n",
+            "```json\n{\"markers\": []}\n```\n",
+            "<<<END_FLOW_OUTPUT>>>\n",
+        );
+        let (line, block) = find_flow_output_block_with_line(text).unwrap();
+        assert_eq!(line, 2);
+        assert!(block.starts_with("```json") && block.ends_with("```"));
+    }
+
+    #[test]
+    fn with_line_none_without_complete_block() {
+        assert_eq!(find_flow_output_block_with_line("no block"), None);
+        assert_eq!(
+            find_flow_output_block_with_line("x\n<<<FLOW_OUTPUT>>>\n{}\n"),
+            None
+        );
+        assert_eq!(
+            find_flow_output_block_with_line("<<<END_FLOW_OUTPUT>>>\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn with_line_agrees_with_block_and_line_helpers() {
+        let text = "a\nb\n<<<FLOW_OUTPUT>>>\n{\"markers\": [\"x\"]}\n<<<END_FLOW_OUTPUT>>>\n";
+        let (line, block) = find_flow_output_block_with_line(text).unwrap();
+        assert_eq!(Some(line), flow_output_block_line(text));
+        assert_eq!(Some(block), find_flow_output_block(text));
     }
 
     #[test]
