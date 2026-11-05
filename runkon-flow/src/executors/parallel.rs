@@ -1039,6 +1039,22 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "sqlite")]
+    fn ok_output(
+        markers: Vec<String>,
+        context: Option<String>,
+        structured_output: Option<String>,
+    ) -> ActionOutput {
+        ActionOutput {
+            markers,
+            context,
+            result_text: None,
+            structured_output,
+            metadata: HashMap::new(),
+            child_run_id: None,
+        }
+    }
+
     /// #150: a branch's row must be saved when it finishes, not after the slowest sibling,
     /// so a host recovery pass running mid-block cannot null its outputs.
     #[cfg(feature = "sqlite")]
@@ -1059,14 +1075,11 @@ mod tests {
                 _info: &crate::traits::action_executor::StepInfo,
                 _params: &ActionParams,
             ) -> Result<ActionOutput, EngineError> {
-                Ok(ActionOutput {
-                    markers: vec!["found".to_string()],
-                    context: Some("fast context".to_string()),
-                    result_text: None,
-                    structured_output: Some("{\"findings\":[]}".to_string()),
-                    metadata: HashMap::new(),
-                    child_run_id: None,
-                })
+                Ok(ok_output(
+                    vec!["found".to_string()],
+                    Some("fast context".to_string()),
+                    Some("{\"findings\":[]}".to_string()),
+                ))
             }
         }
 
@@ -1107,14 +1120,7 @@ mod tests {
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                Ok(ActionOutput {
-                    markers: vec![],
-                    context: Some("slow context".to_string()),
-                    result_text: None,
-                    structured_output: None,
-                    metadata: HashMap::new(),
-                    child_run_id: None,
-                })
+                Ok(ok_output(vec![], Some("slow context".to_string()), None))
             }
         }
 
@@ -1199,9 +1205,7 @@ mod tests {
     }
 
     #[cfg(feature = "sqlite")]
-    fn make_sqlite_state(
-        registry: crate::traits::action_executor::ActionRegistry,
-    ) -> (
+    fn make_sqlite_state() -> (
         Arc<crate::persistence_sqlite::SqliteWorkflowPersistence>,
         Arc<std::sync::Mutex<rusqlite::Connection>>,
         String,
@@ -1231,7 +1235,6 @@ mod tests {
             Arc::clone(&persistence) as Arc<dyn WorkflowPersistence>,
             run.id.clone(),
         );
-        state.action_registry = Arc::new(registry);
         (persistence, shared, run.id, state)
     }
 
@@ -1260,6 +1263,7 @@ mod tests {
     #[test]
     fn parallel_persist_failure_returns_lease_lost_while_sibling_runs_sqlite() {
         use crate::cancellation_reason::CancellationReason;
+        use std::sync::atomic::Ordering;
         struct StealLeaseExec {
             conn: Arc<std::sync::Mutex<rusqlite::Connection>>,
         }
@@ -1278,18 +1282,17 @@ mod tests {
                     .unwrap()
                     .execute("UPDATE workflow_runs SET generation = generation + 100", [])
                     .unwrap();
-                Ok(ActionOutput {
-                    markers: vec![],
-                    context: Some("c".to_string()),
-                    result_text: None,
-                    structured_output: None,
-                    metadata: HashMap::new(),
-                    child_run_id: None,
-                })
+                Ok(ok_output(vec![], Some("c".to_string()), None))
             }
         }
-        struct SleepExec;
-        impl ActionExecutor for SleepExec {
+        /// Fails its first attempt after a delay and has one retry budgeted. The retry
+        /// only runs if the scope token is still live, so `attempts == 1` proves the
+        /// sibling observed the cancellation.
+        struct FlakySiblingExec {
+            attempts: Arc<std::sync::atomic::AtomicUsize>,
+            first_attempt_done: Arc<std::sync::atomic::AtomicBool>,
+        }
+        impl ActionExecutor for FlakySiblingExec {
             fn name(&self) -> &str {
                 "sleepy"
             }
@@ -1299,22 +1302,18 @@ mod tests {
                 _info: &crate::traits::action_executor::StepInfo,
                 _params: &ActionParams,
             ) -> Result<ActionOutput, EngineError> {
-                std::thread::sleep(std::time::Duration::from_millis(1500));
-                Ok(ActionOutput {
-                    markers: vec![],
-                    context: None,
-                    result_text: None,
-                    structured_output: None,
-                    metadata: HashMap::new(),
-                    child_run_id: None,
-                })
+                use std::sync::atomic::Ordering;
+                self.attempts.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                self.first_attempt_done.store(true, Ordering::SeqCst);
+                Err(EngineError::Workflow("flaky".to_string()))
             }
         }
 
         // Build state first so the stealing executor can hold the persistence handle.
-        let (_persistence, conn, _run_id, mut state) = make_sqlite_state(
-            crate::traits::action_executor::ActionRegistry::new(HashMap::new(), None),
-        );
+        let (_persistence, conn, _run_id, mut state) = make_sqlite_state();
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let first_attempt_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let mut named = HashMap::new();
         named.insert(
             "steal".to_string(),
@@ -1324,14 +1323,19 @@ mod tests {
         );
         named.insert(
             "sleepy".to_string(),
-            Box::new(SleepExec) as Box<dyn ActionExecutor>,
+            Box::new(FlakySiblingExec {
+                attempts: Arc::clone(&attempts),
+                first_attempt_done: Arc::clone(&first_attempt_done),
+            }) as Box<dyn ActionExecutor>,
         );
         state.action_registry = Arc::new(crate::traits::action_executor::ActionRegistry::new(
             named, None,
         ));
 
+        let mut node = two_branch_node("steal", "sleepy");
+        node.call_retries.insert("1".to_string(), 1);
         let started = std::time::Instant::now();
-        let result = execute_parallel(&mut state, &two_branch_node("steal", "sleepy"), 0);
+        let result = execute_parallel(&mut state, &node, 0);
         assert!(
             matches!(
                 result,
@@ -1339,9 +1343,21 @@ mod tests {
             ),
             "expected LeaseLost, got {result:?}"
         );
-        assert!(
-            started.elapsed() < std::time::Duration::from_millis(1400),
-            "block must return before the slow sibling finishes"
+        // Backstop only: the block must not have waited for the sibling.
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+
+        // Let the sibling's first attempt finish, then give its worker thread time to
+        // reach the pre-attempt scope-token check before the retry would start.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !first_attempt_done.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(first_attempt_done.load(Ordering::SeqCst));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            1,
+            "sibling must see the cancelled scope token and skip its retry"
         );
     }
 
@@ -1395,20 +1411,11 @@ mod tests {
                     }
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                Ok(ActionOutput {
-                    markers: vec![],
-                    context: None,
-                    result_text: None,
-                    structured_output: None,
-                    metadata: HashMap::new(),
-                    child_run_id: None,
-                })
+                Ok(ok_output(vec![], None, None))
             }
         }
 
-        let (persistence, _conn, run_id, mut state) = make_sqlite_state(
-            crate::traits::action_executor::ActionRegistry::new(HashMap::new(), None),
-        );
+        let (persistence, _conn, run_id, mut state) = make_sqlite_state();
         let saw_failed = Arc::new(AtomicBool::new(false));
         let mut named = HashMap::new();
         named.insert(

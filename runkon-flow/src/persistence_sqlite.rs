@@ -1704,10 +1704,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn update_step_completed_backfills_outputs_after_bulk_recover() {
+    /// A step row that `bulk_recover_steps` already marked `completed` with NULL outputs.
+    fn make_recovered_step_db() -> (SqliteWorkflowPersistence, String, String) {
         use crate::status::WorkflowStepStatus;
-        let (p, _run_id, step_id) = make_step_db();
+        let (p, run_id, step_id) = make_step_db();
         p.bulk_recover_steps(
             &[(
                 step_id.clone(),
@@ -1717,6 +1717,12 @@ mod tests {
             "2026-01-01T00:00:00Z",
         )
         .unwrap();
+        (p, run_id, step_id)
+    }
+
+    #[test]
+    fn update_step_completed_backfills_outputs_after_bulk_recover() {
+        let (p, _run_id, step_id) = make_recovered_step_db();
         p.update_step(
             &step_id,
             completed_with_outputs("ctx", "[\"m\"]", "{\"a\":1}"),
@@ -1771,17 +1777,7 @@ mod tests {
 
     #[test]
     fn update_step_terminal_without_outputs_on_terminal_row_is_noop() {
-        use crate::status::WorkflowStepStatus;
-        let (p, _run_id, step_id) = make_step_db();
-        p.bulk_recover_steps(
-            &[(
-                step_id.clone(),
-                WorkflowStepStatus::Completed,
-                Some("recovered".into()),
-            )],
-            "2026-01-01T00:00:00Z",
-        )
-        .unwrap();
+        let (p, _run_id, step_id) = make_recovered_step_db();
         let mut u = completed_with_outputs("", "", "");
         u.context_out = None;
         u.markers_out = None;
@@ -1795,17 +1791,7 @@ mod tests {
 
     #[test]
     fn update_step_completed_no_backfill_when_outputs_partially_set() {
-        use crate::status::WorkflowStepStatus;
-        let (p, _run_id, step_id) = make_step_db();
-        p.bulk_recover_steps(
-            &[(
-                step_id.clone(),
-                WorkflowStepStatus::Completed,
-                Some("recovered".into()),
-            )],
-            "2026-01-01T00:00:00Z",
-        )
-        .unwrap();
+        let (p, _run_id, step_id) = make_recovered_step_db();
         p.lock()
             .unwrap()
             .execute(
@@ -1824,17 +1810,7 @@ mod tests {
     fn update_step_completed_stale_generation_does_not_backfill() {
         use crate::cancellation_reason::CancellationReason;
         use crate::engine_error::EngineError;
-        use crate::status::WorkflowStepStatus;
-        let (p, _run_id, step_id) = make_step_db();
-        p.bulk_recover_steps(
-            &[(
-                step_id.clone(),
-                WorkflowStepStatus::Completed,
-                Some("recovered".into()),
-            )],
-            "2026-01-01T00:00:00Z",
-        )
-        .unwrap();
+        let (p, _run_id, step_id) = make_recovered_step_db();
         let mut u = completed_with_outputs("ctx", "[\"m\"]", "{}");
         u.generation = 0;
         let result = p.update_step(&step_id, u);
