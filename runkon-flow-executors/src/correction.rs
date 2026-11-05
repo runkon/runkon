@@ -15,6 +15,7 @@ use runkon_flow::output_schema::OutputSchema;
 use runkon_runtimes::{AgentRuntime, PollError, RunHandle, RunStatus, RuntimeRequest};
 
 use crate::agent_loader::generate_prompt_instructions;
+use crate::error::AgentError;
 use crate::output::interpret_agent_output;
 
 /// Maximum number of correction runs after the initial attempt.
@@ -104,7 +105,7 @@ pub fn run_agent_with_output_correction(
     shutdown: Option<&Arc<AtomicBool>>,
     step_timeout: Duration,
     schema: Option<&OutputSchema>,
-) -> Result<AgentRunOutcome, String> {
+) -> Result<AgentRunOutcome, AgentError> {
     let mut run = spawn_and_poll(runtime, &request, shutdown, step_timeout)?;
     let mut attempts: u32 = 0;
 
@@ -120,25 +121,39 @@ pub fn run_agent_with_output_correction(
                     correction_attempts: attempts,
                 });
             }
-            Err(e) => {
+            Err(error) => {
                 let (Some(schema), Some(session_id)) = (schema, run.session_id.clone()) else {
-                    return Err(e);
+                    return Err(AgentError::Output {
+                        error,
+                        correction_attempts: 0,
+                    });
                 };
                 if attempts >= MAX_OUTPUT_CORRECTION_ATTEMPTS {
-                    return Err(format!(
-                        "{e} (after {attempts} output correction attempt(s))"
-                    ));
+                    return Err(AgentError::Output {
+                        error,
+                        correction_attempts: attempts,
+                    });
                 }
                 attempts += 1;
-                request.prompt = output_correction_prompt(&e, schema);
+                // The text a failed attempt reports, and the prompt quotes, is the
+                // output failure as a step would show it.
+                let original = AgentError::Output {
+                    error,
+                    correction_attempts: 0,
+                };
+                request.prompt = output_correction_prompt(&original.to_string(), schema);
                 request.resume_session_id = Some(session_id);
-                let next = spawn_and_poll(runtime, &request, shutdown, step_timeout)
-                    .map_err(|ce| format!("output correction failed: {ce}; original error: {e}"))?;
+                let next =
+                    spawn_and_poll(runtime, &request, shutdown, step_timeout).map_err(|ce| {
+                        AgentError::Other(format!(
+                            "output correction failed: {ce}; original error: {original}"
+                        ))
+                    })?;
                 if next.status != RunStatus::Completed {
-                    return Err(format!(
-                        "output correction run ended with status {:?}; original error: {e}",
+                    return Err(AgentError::Other(format!(
+                        "output correction run ended with status {:?}; original error: {original}",
                         next.status
-                    ));
+                    )));
                 }
                 // The resumed run overwrites the host's row, so carry the earlier
                 // attempts' metrics forward into the new handle.
@@ -250,7 +265,10 @@ mod tests {
         }
     }
 
-    fn run(rt: &ScriptedRuntime, schema: Option<&OutputSchema>) -> Result<AgentRunOutcome, String> {
+    fn run(
+        rt: &ScriptedRuntime,
+        schema: Option<&OutputSchema>,
+    ) -> Result<AgentRunOutcome, AgentError> {
         run_agent_with_output_correction(rt, request(), None, Duration::from_secs(1), schema)
     }
 
@@ -283,6 +301,17 @@ mod tests {
         let s = schema();
         let err = run(&rt, Some(&s)).unwrap_err();
         assert!(
+            matches!(
+                err,
+                AgentError::Output {
+                    correction_attempts: 2,
+                    error: crate::error::OutputError::Validation { .. },
+                }
+            ),
+            "{err:?}"
+        );
+        let err = err.to_string();
+        assert!(
             err.contains("after 2 output correction attempt(s)"),
             "{err}"
         );
@@ -295,6 +324,17 @@ mod tests {
         let rt = ScriptedRuntime::new(vec![Ok(handle(BAD, None, 0.1, 1))]);
         let s = schema();
         let err = run(&rt, Some(&s)).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AgentError::Output {
+                    correction_attempts: 0,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        let err = err.to_string();
         assert!(err.starts_with("structured output validation: "), "{err}");
         assert!(!err.contains("correction"), "{err}");
         assert_eq!(rt.spawns().len(), 1);
@@ -327,6 +367,8 @@ mod tests {
         let rt = ScriptedRuntime::new(vec![Ok(handle(BAD, Some("s"), 0.1, 1)), Ok(failed)]);
         let s = schema();
         let err = run(&rt, Some(&s)).unwrap_err();
+        assert!(matches!(err, AgentError::Other(_)), "{err:?}");
+        let err = err.to_string();
         assert!(err.contains("Failed"), "{err}");
         assert!(err.contains("Missing required field: 'id'"), "{err}");
     }
@@ -348,6 +390,8 @@ mod tests {
         ]);
         let s = schema();
         let err = run(&rt, Some(&s)).unwrap_err();
+        assert!(matches!(err, AgentError::Other(_)), "{err:?}");
+        let err = err.to_string();
         assert!(err.contains("boom"), "{err}");
         assert!(err.contains("Missing required field: 'id'"), "{err}");
     }
