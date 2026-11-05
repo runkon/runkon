@@ -181,7 +181,16 @@ fn validate_path_within_either_base(path: &Path, base1: &str, base2: &str) -> Re
         .map(|_| ())
 }
 
-fn find_agent_path(bases: &[&str], subdir: &Path, filename: &str) -> Option<PathBuf> {
+fn workflow_subdir(config_dir: &ConfigDir, workflow: &str, kind: &str) -> PathBuf {
+    config_dir
+        .as_path()
+        .join("workflows")
+        .join(workflow)
+        .join(kind)
+}
+
+/// First existing `<base>/<subdir>/<filename>`, trying each base in order.
+fn find_in_bases(bases: &[&str], subdir: &Path, filename: &str) -> Option<PathBuf> {
     bases.iter().find_map(|base| {
         let path = PathBuf::from(base).join(subdir).join(filename);
         path.is_file().then_some(path)
@@ -210,37 +219,22 @@ pub fn load_agent(
 ) -> Result<AgentDef, String> {
     let filename = format!("{name}.md");
     let bases = [working_dir, repo_path];
-    let mut searched: Vec<PathBuf> = Vec::new();
 
-    // 1. Workflow-local override (worktree, then repo)
+    // Tiers in priority order (each tried in the worktree, then the repo). The
+    // not-found listing is derived from this same list, so it cannot drift.
+    let mut tiers: Vec<PathBuf> = Vec::new();
     if let Some(wf_name) = workflow_name {
-        let subdir = config_dir
-            .as_path()
-            .join("workflows")
-            .join(wf_name)
-            .join("agents");
-        if let Some(path) = find_agent_path(&bases, &subdir, &filename) {
+        tiers.push(workflow_subdir(config_dir, wf_name, "agents"));
+    }
+    tiers.push(config_dir.as_path().join("agents"));
+    tiers.push(PathBuf::from(".claude/agents"));
+
+    for subdir in &tiers {
+        if let Some(path) = find_in_bases(&bases, subdir, &filename) {
             validate_path_within_either_base(&path, working_dir, repo_path)?;
             return parse_agent_file(&path, default_runtime);
         }
-        searched.push(subdir);
     }
-
-    // 2. Shared agents (worktree, then repo)
-    let shared = config_dir.as_path().join("agents");
-    if let Some(path) = find_agent_path(&bases, &shared, &filename) {
-        validate_path_within_either_base(&path, working_dir, repo_path)?;
-        return parse_agent_file(&path, default_runtime);
-    }
-    searched.push(shared);
-
-    // 3. Claude Code agents fallback (worktree, then repo)
-    let claude = PathBuf::from(".claude/agents");
-    if let Some(path) = find_agent_path(&bases, &claude, &filename) {
-        validate_path_within_either_base(&path, working_dir, repo_path)?;
-        return parse_agent_file(&path, default_runtime);
-    }
-    searched.push(claude);
 
     // 4. Extra plugin directories (lowest priority)
     for dir in plugin_dirs {
@@ -257,7 +251,7 @@ pub fn load_agent(
         .collect();
     Err(format!(
         "Agent '{name}' not found. {}",
-        searched_listing(&bases, &searched, &filename, &plugin_paths)
+        searched_listing(&bases, &tiers, &filename, &plugin_paths)
     ))
 }
 
@@ -300,13 +294,6 @@ fn validate_name_segment(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn find_snippet_path(bases: &[&str], subdir: &Path, filename: &str) -> Option<PathBuf> {
-    bases.iter().find_map(|base| {
-        let path = PathBuf::from(base).join(subdir).join(filename);
-        path.is_file().then_some(path)
-    })
-}
-
 fn load_snippet_by_name(
     working_dir: &str,
     repo_path: &str,
@@ -321,35 +308,24 @@ fn load_snippet_by_name(
 
     let filename = format!("{name}.md");
     let bases = [working_dir, repo_path];
-    let mut searched: Vec<PathBuf> = Vec::new();
 
-    // 1. Workflow-local override
+    let mut tiers: Vec<PathBuf> = Vec::new();
     if let Some(wf_name) = workflow_name {
-        let subdir = config_dir
-            .as_path()
-            .join("workflows")
-            .join(wf_name)
-            .join("prompts");
-        if let Some(path) = find_snippet_path(&bases, &subdir, &filename) {
+        tiers.push(workflow_subdir(config_dir, wf_name, "prompts"));
+    }
+    tiers.push(config_dir.as_path().join("prompts"));
+
+    for subdir in &tiers {
+        if let Some(path) = find_in_bases(&bases, subdir, &filename) {
             return fs::read_to_string(&path)
                 .map(|s| s.trim().to_string())
                 .map_err(|e| format!("Failed to read snippet {}: {e}", path.display()));
         }
-        searched.push(subdir);
     }
-
-    // 2. Shared prompts
-    let shared = config_dir.as_path().join("prompts");
-    if let Some(path) = find_snippet_path(&bases, &shared, &filename) {
-        return fs::read_to_string(&path)
-            .map(|s| s.trim().to_string())
-            .map_err(|e| format!("Failed to read snippet {}: {e}", path.display()));
-    }
-    searched.push(shared);
 
     Err(format!(
         "Prompt snippet '{name}' not found. {}",
-        searched_listing(&bases, &searched, &filename, &[])
+        searched_listing(&bases, &tiers, &filename, &[])
     ))
 }
 
