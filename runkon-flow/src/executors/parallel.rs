@@ -11,8 +11,8 @@ use crate::traits::run_context::RunContext;
 use crate::types::{StepResult, StepSuccess};
 
 /// A branch failure caused by a missing required output block. This is the single
-/// owner of the warning text and child run id; the branch's `result` error is only a
-/// placeholder that marks the branch as failed and is never read for its text.
+/// owner of the warning text and child run id; the branch's `result` error carries a
+/// copy of the warning only so other consumers of the Err see the reason.
 struct MissingOutput {
     /// The warning, persisted verbatim as the step's error.
     warning: String,
@@ -75,7 +75,15 @@ fn save_branch_result(
             );
         }
         Err(e) => {
-            tracing::warn!("parallel: '{}' failed: {e}", pr.agent_name);
+            match &pr.missing_output {
+                Some(m) => tracing::warn!(
+                    "parallel: '{}' failed: {} (child_run_id={:?})",
+                    pr.agent_name,
+                    m.warning,
+                    m.child_run_id
+                ),
+                None => tracing::warn!("parallel: '{}' failed: {e}", pr.agent_name),
+            }
             let generation = state.expect_lease_generation();
             let update = match pr.missing_output {
                 // The warning is persisted verbatim, without the error's Display prefix.
@@ -346,14 +354,15 @@ pub fn execute_parallel(
                     {
                         // Required output block missing: treat the attempt as failed so
                         // per-call retries and fail_fast / min_success apply.
-                        last_error = warning.clone();
-                        missing_output = Some(MissingOutput {
+                        let m = MissingOutput {
                             warning,
                             child_run_id: output.child_run_id.clone(),
-                        });
-                        result = Err(EngineError::Workflow(
-                            "required output block missing".into(),
-                        ));
+                        };
+                        // The branch Err carries the real warning so any consumer that
+                        // formats it sees the reason; last_error derives from the same value.
+                        last_error = m.warning.clone();
+                        result = Err(EngineError::Workflow(m.warning.clone()));
+                        missing_output = Some(m);
                         continue;
                     }
                 }
