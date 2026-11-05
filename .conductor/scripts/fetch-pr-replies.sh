@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # fetch-pr-replies.sh — collect PR replies posted since the last conductor review
-# Called as a script step before review-aggregator. Env vars: PR_NUMBER
+# Called as a script step before review-reply-check and review-aggregator.
+# Env vars: PR_NUMBER. Sets the has_replies marker when there are replies.
 #
-# Emits a FLOW_OUTPUT block whose `replies` field (surfaced to the aggregator
+# Emits a FLOW_OUTPUT block whose `replies` field (read by review-reply-check
 # as structured_output) lists issue comments, review bodies and inline review
 # comments posted after the most recent conductor review, excluding the
 # reviewer identity's own posts. It never reads findings from earlier reviews:
@@ -19,7 +20,7 @@ MAX_BODY_CHARS=2000
 emit() {
   # $1 = context string, $2 = replies JSON array
   jq -cn --arg context "$1" --argjson replies "$2" \
-    '{markers: [], context: $context, replies: $replies}' \
+    '{markers: (if ($replies | length) > 0 then ["has_replies"] else [] end), context: $context, replies: $replies}' \
     | { printf '<<<FLOW_OUTPUT>>>\n'; cat; printf '<<<END_FLOW_OUTPUT>>>\n'; }
 }
 
@@ -71,13 +72,13 @@ REPLIES=$(jq -cn \
   --argjson maxchars "${MAX_BODY_CHARS}" '
   def trim_body: if length > $maxchars then .[0:$maxchars] + " [truncated]" else . end;
   [
-    ($issue[] | {kind: "comment", author: .user.login, author_type: .user.type,
+    ($issue[] | {kind: "comment", author: .user.login, author_type: .user.type, author_association: (.author_association // "NONE"),
                  at: .created_at, body: (.body // "")}),
     ($reviews[] | select((.body // "") != "")
                 | select((.body | contains("<!-- conductor-review -->")) | not)
-                | {kind: "review", author: .user.login, author_type: .user.type,
+                | {kind: "review", author: .user.login, author_type: .user.type, author_association: (.author_association // "NONE"),
                    at: .submitted_at, body: .body}),
-    ($inline[] | {kind: "inline", author: .user.login, author_type: .user.type,
+    ($inline[] | {kind: "inline", author: .user.login, author_type: .user.type, author_association: (.author_association // "NONE"),
                   at: .created_at, path: .path, line: (.line // .original_line),
                   body: (.body // "")})
   ]

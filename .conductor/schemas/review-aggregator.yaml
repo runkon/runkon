@@ -1,3 +1,6 @@
+# Output contract of .conductor/scripts/aggregate-reviews.sh (the review-aggregator
+# script step, #152). Script steps emit their markers themselves; the markers
+# below document how they are derived from these fields.
 fields:
   reviewed_by: string
   blocking_findings:

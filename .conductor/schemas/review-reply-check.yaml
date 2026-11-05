@@ -1,0 +1,11 @@
+fields:
+  answered:
+    type: array
+    desc: "Blocking findings a PR reply already answered. Empty when none were."
+    items:
+      reviewer: string
+      file: string
+      line: number
+      answered_by: string
+      reply: string
+  summary: string
