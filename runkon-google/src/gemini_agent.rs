@@ -32,6 +32,9 @@ pub struct GeminiAgentContext {
     pub runtimes: std::collections::HashMap<String, runkon_runtimes::config::RuntimeConfig>,
     /// Default runtime name applied when agent frontmatter omits `runtime:`.
     pub default_runtime: Option<String>,
+    /// Root directory (relative to the worktree and repo) under which agents and
+    /// prompt snippets are searched. See [`runkon_flow_executors::ConfigDir`].
+    pub config_dir: runkon_flow_executors::ConfigDir,
     /// Per-invocation runtime override.
     pub runtime_override: Option<String>,
 }
@@ -92,6 +95,7 @@ impl GeminiAgentExecutor {
             dry_run: params.dry_run,
             schema: params.schema,
             default_runtime: ctx.default_runtime.as_deref(),
+            config_dir: &ctx.config_dir,
         };
 
         let (agent_def, prompt) = agent_loader::load_agent_and_build_prompt(
@@ -353,6 +357,7 @@ mod tests {
             event_sink: Arc::new(runkon_runtimes::NoopEventSink),
             runtimes: std::collections::HashMap::new(),
             default_runtime: None,
+            config_dir: runkon_flow_executors::ConfigDir::new(".conductor").unwrap(),
             runtime_override: None,
         }
     }
@@ -751,6 +756,7 @@ mod tests {
             event_sink: Arc::new(runkon_runtimes::NoopEventSink),
             runtimes: std::collections::HashMap::new(),
             default_runtime: None,
+            config_dir: runkon_flow_executors::ConfigDir::new(".conductor").unwrap(),
             runtime_override: None,
         };
         let params = GeminiAgentParams {

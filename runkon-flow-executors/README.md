@@ -15,7 +15,7 @@ A grab-bag of vendor-neutral building blocks downstream harnesses pick from when
 - **`PathPrependingEnvProvider`** — `ScriptEnvProvider` that prepends directories to `PATH`
 - **`output`** — structured-output parsers (`<<<FLOW_OUTPUT>>>` block extraction, JSON normalization, marker derivation)
 - **`correction`** — runs a subprocess agent and, when its structured output fails schema validation, resumes the same session with a correction prompt (bounded retries)
-- **`agent_loader`** — agent-definition loading from frontmatter `.md` files + prompt-instruction generation from `OutputSchema`
+- **`agent_loader`** — agent-definition loading from frontmatter `.md` files + prompt-instruction generation from `OutputSchema`; agents and prompts are searched under a configurable root (`ConfigDir`, default `.runkon`)
 
 Vendor-specific executors (Anthropic API, OpenAI API, Codex CLI, etc.) live in sibling crates so consumers pull in only the integrations they use.
 

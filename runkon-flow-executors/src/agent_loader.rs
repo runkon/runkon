@@ -101,6 +101,61 @@ fn parse_agent_file(path: &Path, default_runtime: Option<&str>) -> Result<AgentD
 }
 
 // ---------------------------------------------------------------------------
+// Config directory
+// ---------------------------------------------------------------------------
+
+/// Default root directory name for agent and prompt lookup.
+pub const DEFAULT_CONFIG_DIR: &str = ".runkon";
+
+/// Validated, relative root directory name under which agents and prompts are searched:
+/// `<root>/agents`, `<root>/prompts` and `<root>/workflows/<workflow>/{agents,prompts}`.
+///
+/// The base directories (worktree, repo) are passed separately to the loaders. Use
+/// `ConfigDir::default()` for [`DEFAULT_CONFIG_DIR`], or `ConfigDir::new(..)`
+/// with the host's own directory name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigDir(PathBuf);
+
+impl ConfigDir {
+    /// Validate and wrap a root directory name.
+    ///
+    /// Rejects empty values, values containing NUL, and any path with a component other
+    /// than a plain name (absolute paths, `.` and `..`).
+    pub fn new(dir: impl AsRef<Path>) -> Result<Self, String> {
+        let path = dir.as_ref();
+        let valid = !path.as_os_str().is_empty()
+            && !path.to_string_lossy().contains('\0')
+            && path
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)));
+        if !valid {
+            return Err(format!(
+                "invalid agent config dir {:?}: must be a non-empty relative path with no '.', '..' or root components",
+                path.to_string_lossy()
+            ));
+        }
+        Ok(Self(path.to_path_buf()))
+    }
+
+    /// The validated relative root path.
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Default for ConfigDir {
+    fn default() -> Self {
+        Self(PathBuf::from(DEFAULT_CONFIG_DIR))
+    }
+}
+
+impl std::fmt::Display for ConfigDir {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0.display())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Path safety helpers
 // ---------------------------------------------------------------------------
 
@@ -126,7 +181,16 @@ fn validate_path_within_either_base(path: &Path, base1: &str, base2: &str) -> Re
         .map(|_| ())
 }
 
-fn find_agent_path(bases: &[&str], subdir: &Path, filename: &str) -> Option<PathBuf> {
+fn workflow_subdir(config_dir: &ConfigDir, workflow: &str, kind: &str) -> PathBuf {
+    config_dir
+        .as_path()
+        .join("workflows")
+        .join(workflow)
+        .join(kind)
+}
+
+/// First existing `<base>/<subdir>/<filename>`, trying each base in order.
+fn find_in_bases(bases: &[&str], subdir: &Path, filename: &str) -> Option<PathBuf> {
     bases.iter().find_map(|base| {
         let path = PathBuf::from(base).join(subdir).join(filename);
         path.is_file().then_some(path)
@@ -139,9 +203,9 @@ fn find_agent_path(bases: &[&str], subdir: &Path, filename: &str) -> Option<Path
 
 /// Load an agent definition by name from the standard search order.
 ///
-/// Resolution order (first match wins):
-/// 1. `.conductor/workflows/<workflow_name>/agents/<name>.md` — workflow-local override
-/// 2. `.conductor/agents/<name>.md` — shared conductor agents
+/// Resolution order (first match wins; each is tried in `working_dir`, then `repo_path`):
+/// 1. `<config_dir>/workflows/<workflow_name>/agents/<name>.md` — workflow-local override
+/// 2. `<config_dir>/agents/<name>.md` — shared agents
 /// 3. `.claude/agents/<name>.md` — Claude Code agents fallback
 /// 4. `<plugin_dir>/agents/<name>.md` — extra plugin directories
 pub fn load_agent(
@@ -149,34 +213,27 @@ pub fn load_agent(
     repo_path: &str,
     name: &str,
     workflow_name: Option<&str>,
+    config_dir: &ConfigDir,
     plugin_dirs: &[String],
     default_runtime: Option<&str>,
 ) -> Result<AgentDef, String> {
     let filename = format!("{name}.md");
     let bases = [working_dir, repo_path];
 
-    // 1. Workflow-local override (worktree, then repo)
+    // Tiers in priority order (each tried in the worktree, then the repo). The
+    // not-found listing is derived from this same list, so it cannot drift.
+    let mut tiers: Vec<PathBuf> = Vec::new();
     if let Some(wf_name) = workflow_name {
-        let subdir = Path::new(".conductor")
-            .join("workflows")
-            .join(wf_name)
-            .join("agents");
-        if let Some(path) = find_agent_path(&bases, &subdir, &filename) {
+        tiers.push(workflow_subdir(config_dir, wf_name, "agents"));
+    }
+    tiers.push(config_dir.as_path().join("agents"));
+    tiers.push(PathBuf::from(".claude/agents"));
+
+    for subdir in &tiers {
+        if let Some(path) = find_in_bases(&bases, subdir, &filename) {
             validate_path_within_either_base(&path, working_dir, repo_path)?;
             return parse_agent_file(&path, default_runtime);
         }
-    }
-
-    // 2. Shared conductor agents (worktree, then repo)
-    if let Some(path) = find_agent_path(&bases, Path::new(".conductor/agents"), &filename) {
-        validate_path_within_either_base(&path, working_dir, repo_path)?;
-        return parse_agent_file(&path, default_runtime);
-    }
-
-    // 3. Claude Code agents fallback (worktree, then repo)
-    if let Some(path) = find_agent_path(&bases, Path::new(".claude/agents"), &filename) {
-        validate_path_within_either_base(&path, working_dir, repo_path)?;
-        return parse_agent_file(&path, default_runtime);
     }
 
     // 4. Extra plugin directories (lowest priority)
@@ -188,17 +245,40 @@ pub fn load_agent(
         }
     }
 
-    let mut searched = String::new();
-    if let Some(wf) = workflow_name {
-        searched.push_str(&format!("  .conductor/workflows/{wf}/agents/{filename}\n"));
-    }
-    searched.push_str(&format!("  .conductor/agents/{filename}\n"));
-    searched.push_str(&format!("  .claude/agents/{filename}"));
-    for dir in plugin_dirs {
-        searched.push_str(&format!("\n  {dir}/agents/{filename}"));
-    }
+    let plugin_paths: Vec<PathBuf> = plugin_dirs
+        .iter()
+        .map(|dir| Path::new(dir).join("agents").join(&filename))
+        .collect();
+    Err(format!(
+        "Agent '{name}' not found. {}",
+        searched_listing(&bases, &tiers, &filename, &plugin_paths)
+    ))
+}
 
-    Err(format!("Agent '{name}' not found. Searched:\n{searched}"))
+/// Render the "Searched ..." part of a not-found error from the paths actually tried.
+///
+/// `subdirs` are relative to each base (worktree, then repo); `extra` are complete
+/// paths (plugin directories).
+fn searched_listing(
+    bases: &[&str],
+    subdirs: &[PathBuf],
+    filename: &str,
+    extra: &[PathBuf],
+) -> String {
+    let mut base_list = vec![bases[0]];
+    for b in &bases[1..] {
+        if !base_list.contains(b) {
+            base_list.push(b);
+        }
+    }
+    let mut out = format!("Searched (under {}):", base_list.join(", then "));
+    for subdir in subdirs {
+        out.push_str(&format!("\n  {}", subdir.join(filename).display()));
+    }
+    for path in extra {
+        out.push_str(&format!("\n  {}", path.display()));
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -214,18 +294,12 @@ fn validate_name_segment(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn find_snippet_path(bases: &[&str], subdir: &Path, filename: &str) -> Option<PathBuf> {
-    bases.iter().find_map(|base| {
-        let path = PathBuf::from(base).join(subdir).join(filename);
-        path.is_file().then_some(path)
-    })
-}
-
 fn load_snippet_by_name(
     working_dir: &str,
     repo_path: &str,
     name: &str,
     workflow_name: Option<&str>,
+    config_dir: &ConfigDir,
 ) -> Result<String, String> {
     validate_name_segment(name)?;
     if let Some(wf) = workflow_name {
@@ -235,31 +309,23 @@ fn load_snippet_by_name(
     let filename = format!("{name}.md");
     let bases = [working_dir, repo_path];
 
-    // 1. Workflow-local override
+    let mut tiers: Vec<PathBuf> = Vec::new();
     if let Some(wf_name) = workflow_name {
-        let subdir = Path::new(".conductor")
-            .join("workflows")
-            .join(wf_name)
-            .join("prompts");
-        if let Some(path) = find_snippet_path(&bases, &subdir, &filename) {
+        tiers.push(workflow_subdir(config_dir, wf_name, "prompts"));
+    }
+    tiers.push(config_dir.as_path().join("prompts"));
+
+    for subdir in &tiers {
+        if let Some(path) = find_in_bases(&bases, subdir, &filename) {
             return fs::read_to_string(&path)
                 .map(|s| s.trim().to_string())
                 .map_err(|e| format!("Failed to read snippet {}: {e}", path.display()));
         }
     }
 
-    // 2. Shared conductor prompts
-    if let Some(path) = find_snippet_path(&bases, Path::new(".conductor/prompts"), &filename) {
-        return fs::read_to_string(&path)
-            .map(|s| s.trim().to_string())
-            .map_err(|e| format!("Failed to read snippet {}: {e}", path.display()));
-    }
-
-    let wf_hint = workflow_name
-        .map(|wf| format!("  .conductor/workflows/{wf}/prompts/{filename}\n"))
-        .unwrap_or_default();
     Err(format!(
-        "Prompt snippet '{name}' not found. Searched:\n{wf_hint}  .conductor/prompts/{filename}"
+        "Prompt snippet '{name}' not found. {}",
+        searched_listing(&bases, &tiers, &filename, &[])
     ))
 }
 
@@ -297,12 +363,15 @@ fn load_snippet_by_path(repo_path: &str, rel_path: &str) -> Result<String, Strin
 /// Load and concatenate multiple prompt snippets into a single string.
 ///
 /// Snippet refs containing `/` or `\` are treated as explicit paths relative to
-/// `repo_path`; all others are resolved by name via the standard search order.
+/// `repo_path`; all others are resolved by name via the standard search order under
+/// `config_dir` (`<config_dir>/workflows/<workflow_name>/prompts`, then
+/// `<config_dir>/prompts`; worktree before repo).
 pub fn load_and_concat_snippets(
     working_dir: &str,
     repo_path: &str,
     refs: &[String],
     workflow_name: Option<&str>,
+    config_dir: &ConfigDir,
 ) -> Result<String, String> {
     if refs.is_empty() {
         return Ok(String::new());
@@ -313,7 +382,7 @@ pub fn load_and_concat_snippets(
         let content = if name.contains('/') || name.contains('\\') {
             load_snippet_by_path(repo_path, name)?
         } else {
-            load_snippet_by_name(working_dir, repo_path, name, workflow_name)?
+            load_snippet_by_name(working_dir, repo_path, name, workflow_name, config_dir)?
         };
         parts.push(content);
     }
@@ -609,6 +678,10 @@ pub struct BuildPromptParams<'a> {
     /// Default runtime name applied when the agent frontmatter omits `runtime:`.
     /// Falls back to `"claude"` when `None`.
     pub default_runtime: Option<&'a str>,
+    /// Root directory name under which agents and prompt snippets are searched.
+    /// Required: pass `&ConfigDir::default()` for the neutral default, or
+    /// `&ConfigDir::new("<host dir>")?` for a host-specific root.
+    pub config_dir: &'a ConfigDir,
 }
 
 /// Load an agent and build the fully-substituted prompt.
@@ -618,7 +691,8 @@ pub struct BuildPromptParams<'a> {
 /// - `plugin_dirs` — extra directories to search for agent definitions
 /// - `workflow_name` — parent workflow name (for workflow-local agent/snippet overrides)
 /// - `agent_name` — short agent name (e.g. `"plan"`)
-/// - `params` — prompt-building parameters (inputs, snippets, schema, flags)
+/// - `params` — prompt-building parameters (inputs, snippets, schema, flags, and the
+///   `config_dir` root under which agents and snippets are searched)
 pub fn load_agent_and_build_prompt(
     working_dir: &str,
     repo_path: &str,
@@ -632,6 +706,7 @@ pub fn load_agent_and_build_prompt(
         repo_path,
         agent_name,
         Some(workflow_name),
+        params.config_dir,
         plugin_dirs,
         params.default_runtime,
     )?;
@@ -642,6 +717,7 @@ pub fn load_agent_and_build_prompt(
             repo_path,
             params.snippet_refs,
             Some(workflow_name),
+            params.config_dir,
         )?;
         if text.is_empty() {
             vec![]
@@ -702,6 +778,10 @@ mod tests {
         }
     }
 
+    fn cd() -> ConfigDir {
+        ConfigDir::new(".conductor").unwrap()
+    }
+
     fn write_file(dir: &TempDir, rel: &str, content: &str) {
         let path = dir.path().join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -717,7 +797,7 @@ mod tests {
 
         write_file(&tmp, ".conductor/agents/worker.md", "Do the work.");
 
-        let agent = load_agent(&dir, &dir, "worker", None, &[], None).unwrap();
+        let agent = load_agent(&dir, &dir, "worker", None, &cd(), &[], None).unwrap();
         assert_eq!(agent.name, "worker");
         assert_eq!(agent.prompt, "Do the work.");
         assert_eq!(agent.role, runkon_runtimes::AgentRole::Reviewer);
@@ -734,7 +814,7 @@ mod tests {
             "---\nrole: actor\ncan_commit: true\n---\nMake changes.",
         );
 
-        let agent = load_agent(&dir, &dir, "committer", None, &[], None).unwrap();
+        let agent = load_agent(&dir, &dir, "committer", None, &cd(), &[], None).unwrap();
         assert_eq!(agent.role, runkon_runtimes::AgentRole::Actor);
         assert!(agent.can_commit);
         assert_eq!(agent.prompt, "Make changes.");
@@ -752,7 +832,7 @@ mod tests {
             "Workflow-local agent.",
         );
 
-        let agent = load_agent(&dir, &dir, "worker", Some("my-wf"), &[], None).unwrap();
+        let agent = load_agent(&dir, &dir, "worker", Some("my-wf"), &cd(), &[], None).unwrap();
         assert_eq!(agent.prompt, "Workflow-local agent.");
     }
 
@@ -763,7 +843,7 @@ mod tests {
 
         write_file(&tmp, ".claude/agents/fallback.md", "Claude fallback.");
 
-        let agent = load_agent(&dir, &dir, "fallback", None, &[], None).unwrap();
+        let agent = load_agent(&dir, &dir, "fallback", None, &cd(), &[], None).unwrap();
         assert_eq!(agent.prompt, "Claude fallback.");
     }
 
@@ -772,7 +852,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().to_str().unwrap().to_string();
 
-        let err = load_agent(&dir, &dir, "ghost", None, &[], None).unwrap_err();
+        let err = load_agent(&dir, &dir, "ghost", None, &cd(), &[], None).unwrap_err();
         assert!(err.contains("ghost"), "got: {err}");
         assert!(err.contains("not found"), "got: {err}");
     }
@@ -789,7 +869,7 @@ mod tests {
             "---\nrole: [unclosed\n---\nPrompt.",
         );
 
-        let err = load_agent(&dir, &dir, "bad", None, &[], None).unwrap_err();
+        let err = load_agent(&dir, &dir, "bad", None, &cd(), &[], None).unwrap_err();
         assert!(
             err.contains("Invalid YAML") || err.contains("frontmatter"),
             "got: {err}"
@@ -807,7 +887,7 @@ mod tests {
             "---\nrole: reviewer\ncan_commit: true\n---\nPrompt.",
         );
 
-        let err = load_agent(&dir, &dir, "bad", None, &[], None).unwrap_err();
+        let err = load_agent(&dir, &dir, "bad", None, &cd(), &[], None).unwrap_err();
         assert!(err.contains("can_commit"), "got: {err}");
     }
 
@@ -818,7 +898,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().to_str().unwrap().to_string();
 
-        let result = load_and_concat_snippets(&dir, &dir, &[], None).unwrap();
+        let result = load_and_concat_snippets(&dir, &dir, &[], None, &cd()).unwrap();
         assert!(result.is_empty());
     }
 
@@ -829,7 +909,8 @@ mod tests {
 
         write_file(&tmp, ".conductor/prompts/intro.md", "Hello world.");
 
-        let result = load_and_concat_snippets(&dir, &dir, &["intro".to_string()], None).unwrap();
+        let result =
+            load_and_concat_snippets(&dir, &dir, &["intro".to_string()], None, &cd()).unwrap();
         assert_eq!(result, "Hello world.");
     }
 
@@ -846,6 +927,7 @@ mod tests {
             &dir,
             &["first".to_string(), "second".to_string()],
             None,
+            &cd(),
         )
         .unwrap();
         assert_eq!(result, "First.\n\nSecond.");
@@ -856,7 +938,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().to_str().unwrap().to_string();
 
-        let err = load_and_concat_snippets(&dir, &dir, &["missing".to_string()], None).unwrap_err();
+        let err = load_and_concat_snippets(&dir, &dir, &["missing".to_string()], None, &cd())
+            .unwrap_err();
         assert!(err.contains("missing"), "got: {err}");
     }
 
@@ -873,7 +956,8 @@ mod tests {
         );
 
         let result =
-            load_and_concat_snippets(&dir, &dir, &["ctx".to_string()], Some("my-wf")).unwrap();
+            load_and_concat_snippets(&dir, &dir, &["ctx".to_string()], Some("my-wf"), &cd())
+                .unwrap();
         assert_eq!(result, "Workflow-local.");
     }
 
@@ -965,6 +1049,7 @@ mod tests {
         inputs.insert("task".to_string(), "build".to_string());
 
         let params = BuildPromptParams {
+            config_dir: &cd(),
             inputs: &inputs,
             snippet_refs: &[],
             retry_error: None,
@@ -991,6 +1076,7 @@ mod tests {
         let inputs = HashMap::new();
         let snippet_refs = vec!["extra".to_string()];
         let params = BuildPromptParams {
+            config_dir: &cd(),
             inputs: &inputs,
             snippet_refs: &snippet_refs,
             retry_error: None,
@@ -1019,6 +1105,7 @@ mod tests {
         );
         let inputs = HashMap::new();
         let params = BuildPromptParams {
+            config_dir: &cd(),
             inputs: &inputs,
             snippet_refs: &[],
             retry_error: None,
@@ -1047,6 +1134,7 @@ mod tests {
 
         let inputs = HashMap::new();
         let params = BuildPromptParams {
+            config_dir: &cd(),
             inputs: &inputs,
             snippet_refs: &[],
             retry_error: None,
@@ -1068,6 +1156,7 @@ mod tests {
 
         let inputs = HashMap::new();
         let params = BuildPromptParams {
+            config_dir: &cd(),
             inputs: &inputs,
             snippet_refs: &[],
             retry_error: None,
@@ -1079,5 +1168,126 @@ mod tests {
         let err =
             load_agent_and_build_prompt(&dir, &dir, &[], "my-wf", "ghost", &params).unwrap_err();
         assert!(err.contains("ghost"), "got: {err}");
+    }
+
+    // ── ConfigDir ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn config_dir_default_is_runkon() {
+        assert_eq!(ConfigDir::default().as_path(), Path::new(".runkon"));
+        assert_eq!(DEFAULT_CONFIG_DIR, ".runkon");
+    }
+
+    #[test]
+    fn config_dir_rejects_invalid() {
+        for bad in ["", "/abs", "..", "a/../b", ".", "./x", "a\0b"] {
+            let err = ConfigDir::new(bad).unwrap_err();
+            assert!(
+                err.contains(&format!("{bad:?}")),
+                "error for {bad:?} should name the value, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn config_dir_accepts_relative() {
+        for ok in [".conductor", ".runkon", "config/flow"] {
+            assert_eq!(ConfigDir::new(ok).unwrap().as_path(), Path::new(ok));
+        }
+    }
+
+    #[test]
+    fn load_agent_uses_configured_root_without_fallback() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().to_str().unwrap().to_string();
+        write_file(&tmp, ".runkon/agents/a.md", "Default root.");
+        write_file(&tmp, ".conductor/agents/b.md", "Conductor root.");
+
+        let def = ConfigDir::default();
+        let agent = load_agent(&dir, &dir, "a", None, &def, &[], None).unwrap();
+        assert_eq!(agent.prompt, "Default root.");
+        let err = load_agent(&dir, &dir, "b", None, &def, &[], None).unwrap_err();
+        assert!(err.contains("not found"), "got: {err}");
+    }
+
+    #[test]
+    fn load_agent_worktree_before_repo() {
+        let wt = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        let (w, r) = (
+            wt.path().to_str().unwrap().to_string(),
+            repo.path().to_str().unwrap().to_string(),
+        );
+        write_file(&wt, ".conductor/agents/x.md", "worktree shared");
+        write_file(&repo, ".conductor/agents/x.md", "repo shared");
+        let agent = load_agent(&w, &r, "x", None, &cd(), &[], None).unwrap();
+        assert_eq!(agent.prompt, "worktree shared");
+
+        write_file(&wt, ".conductor/workflows/wf/agents/y.md", "worktree local");
+        write_file(&repo, ".conductor/workflows/wf/agents/y.md", "repo local");
+        let agent = load_agent(&w, &r, "y", Some("wf"), &cd(), &[], None).unwrap();
+        assert_eq!(agent.prompt, "worktree local");
+    }
+
+    #[test]
+    fn load_snippet_uses_configured_root_without_fallback() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().to_str().unwrap().to_string();
+        write_file(&tmp, ".runkon/prompts/a.md", "Default root.");
+        write_file(&tmp, ".conductor/prompts/b.md", "Conductor root.");
+
+        let def = ConfigDir::default();
+        let ok = load_and_concat_snippets(&dir, &dir, &["a".to_string()], None, &def).unwrap();
+        assert_eq!(ok, "Default root.");
+        let err = load_and_concat_snippets(&dir, &dir, &["b".to_string()], None, &def).unwrap_err();
+        assert!(err.contains("not found"), "got: {err}");
+    }
+
+    #[test]
+    fn load_snippet_worktree_before_repo() {
+        let wt = TempDir::new().unwrap();
+        let repo = TempDir::new().unwrap();
+        let (w, r) = (
+            wt.path().to_str().unwrap().to_string(),
+            repo.path().to_str().unwrap().to_string(),
+        );
+        write_file(&wt, ".conductor/prompts/x.md", "worktree");
+        write_file(&repo, ".conductor/prompts/x.md", "repo");
+        let out = load_and_concat_snippets(&w, &r, &["x".to_string()], None, &cd()).unwrap();
+        assert_eq!(out, "worktree");
+    }
+
+    #[test]
+    fn load_agent_not_found_lists_configured_paths() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().to_str().unwrap().to_string();
+        let custom = ConfigDir::new("custom/dir").unwrap();
+
+        let err = load_agent(&dir, &dir, "ghost", Some("my-wf"), &custom, &[], None).unwrap_err();
+        assert!(
+            err.contains("custom/dir/workflows/my-wf/agents/ghost.md"),
+            "got: {err}"
+        );
+        assert!(err.contains("custom/dir/agents/ghost.md"), "got: {err}");
+        assert!(err.contains(".claude/agents/ghost.md"), "got: {err}");
+        assert!(err.contains(&dir), "should name the base, got: {err}");
+        assert!(!err.contains(".conductor"), "got: {err}");
+    }
+
+    #[test]
+    fn load_snippet_not_found_lists_configured_paths() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().to_str().unwrap().to_string();
+        let custom = ConfigDir::new("custom/dir").unwrap();
+
+        let err =
+            load_and_concat_snippets(&dir, &dir, &["missing".to_string()], Some("my-wf"), &custom)
+                .unwrap_err();
+        assert!(
+            err.contains("custom/dir/workflows/my-wf/prompts/missing.md"),
+            "got: {err}"
+        );
+        assert!(err.contains("custom/dir/prompts/missing.md"), "got: {err}");
+        assert!(!err.contains(".conductor"), "got: {err}");
     }
 }
