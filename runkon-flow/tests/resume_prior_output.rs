@@ -193,11 +193,11 @@ fn fresh_run_and_unlinked_failure_get_no_prior_attempt() {
     let mut state = common::make_state(
         "wf",
         Arc::clone(&p),
-        named_executors(vec![Box::new(Recorder {
+        named_executors([Box::new(Recorder {
             name: "plan",
             seen: Arc::clone(&seen),
             fail_times: 0,
-        })]),
+        }) as Box<dyn ActionExecutor>]),
     );
     let engine = FlowEngineBuilder::new().build().unwrap();
     engine
