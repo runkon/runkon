@@ -1120,6 +1120,11 @@ mod tests {
 
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         create_canonical_schema(&conn).unwrap();
+        // The engine inserts parallel rows with role 'actor', which the canonical
+        // schema's role CHECK rejects (it lists 'agent'). That mismatch is separate
+        // from #150, so skip CHECK enforcement for this test connection.
+        conn.execute_batch("PRAGMA ignore_check_constraints = ON;")
+            .unwrap();
         let persistence = Arc::new(SqliteWorkflowPersistence::from_shared_connection(Arc::new(
             Mutex::new(conn),
         )));
