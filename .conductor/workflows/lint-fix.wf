@@ -7,17 +7,32 @@ workflow lint-fix {
     group       = "Development"
   }
 
-  do {
-    max_iterations = 3
-    on_max_iter    = fail
+  script analyze-lint {
+    run = ".conductor/scripts/analyze-lint.sh"
+    env = { FEATURE_BASE_BRANCH = "{{feature_base_branch}}" }
+  }
 
-    script analyze-lint {
-      run = ".conductor/scripts/analyze-lint.sh"
-      env = { FEATURE_BASE_BRANCH = "{{feature_base_branch}}" }
-    }
+  // Each iteration fixes, then re-analyzes, so the `while` condition (and the
+  // run's verdict on the last iteration) reflects the state after the fix.
+  // Before #140 the condition read an analysis taken before that iteration's
+  // fix, so a fix made on the last iteration was never checked and the loop
+  // failed on max_iterations even when it had worked.
+  //
+  // The re-analysis has its own step name: a condition reads the latest
+  // result stored under a name, and a repeated name is ambiguous on resume.
+  // lint-fix-impl reads {{prior_context}}, which is analyze-lint on the first
+  // iteration and reanalyze-lint after that.
+  if analyze-lint.has_lint_errors {
+    do {
+      max_iterations = 3
+      on_max_iter    = fail
 
-    if analyze-lint.has_lint_errors {
       call lint-fix-impl
-    }
-  } while analyze-lint.has_lint_errors
+
+      script reanalyze-lint {
+        run = ".conductor/scripts/analyze-lint.sh"
+        env = { FEATURE_BASE_BRANCH = "{{feature_base_branch}}" }
+      }
+    } while reanalyze-lint.has_lint_errors
+  }
 }
