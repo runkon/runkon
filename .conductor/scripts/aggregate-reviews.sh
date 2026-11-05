@@ -124,7 +124,7 @@ if ! result=$(jq -c '
       | if $a != null and $b.reviewer != "Security" and $b.severity != "critical"
            and $b.file != ""
            and ((($a.answered_by // "") | tostring) as $who
-                | any($trusted_replies[]; .author == $who and (.path == $b.file or (.body | contains($b.file)))))
+                | $who != "" and any($trusted_replies[]; .author == $who and (.path == $b.file or (.body | contains($b.file)))))
         then $b + {answered: true, answered_by: (($a.answered_by // "") | tostring), reply: (($a.reply // "") | tostring)}
         else $b + {answered: false} end
     ] as $marked
