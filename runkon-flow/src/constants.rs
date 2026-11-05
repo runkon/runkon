@@ -44,6 +44,9 @@ pub mod metadata_keys {
     /// Number of in-session corrections an agent needed before its structured
     /// output passed schema validation. Set only when at least one was made.
     pub const OUTPUT_CORRECTION_ATTEMPTS: &str = "output_correction_attempts";
+    /// Id of the earlier agent run whose captured output or session a resumed step
+    /// reused instead of starting a fresh run.
+    pub const OUTPUT_RECOVERED_FROM_RUN: &str = "output_recovered_from_run";
 }
 
 pub const FLOW_OUTPUT_INSTRUCTION: &str = r#"

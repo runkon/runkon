@@ -8,7 +8,7 @@ use crate::constants::FLOW_OUTPUT_INSTRUCTION;
 use crate::dsl::{InputType, OnFail, WorkflowDef, WorkflowNode};
 use crate::engine_error::{EngineError, Result};
 use crate::events::{EngineEvent, EventSink};
-use crate::extensions::{Extensions, LlmRunMetrics, RunFailureCause};
+use crate::extensions::{Extensions, LlmRunMetrics, PriorStepAttempt, RunFailureCause};
 use crate::output_schema::OutputSchema;
 use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
 use crate::traits::action_executor::ActionRegistry;
@@ -21,6 +21,22 @@ use crate::types::{
     ContextEntry, StepKey, StepResult, WorkflowExecConfig, WorkflowResult, WorkflowRunStep,
 };
 
+/// One recorded occurrence of a step in an iteration.
+#[derive(Clone, Default)]
+struct Occurrence {
+    /// The latest completed row, when the occurrence completed.
+    completed: Option<WorkflowRunStep>,
+    /// The latest failed row that has a `child_run_id`, kept only when the occurrence
+    /// did not complete.
+    last_failed: Option<PriorStepAttempt>,
+}
+
+impl Occurrence {
+    fn is_completed(&self) -> bool {
+        self.completed.is_some()
+    }
+}
+
 /// Pre-loaded context for resuming a workflow run.
 ///
 /// Saved step rows are matched by occurrence: the n-th time a step name reaches
@@ -30,8 +46,8 @@ use crate::types::{
 #[non_exhaustive]
 pub struct ResumeContext {
     /// (name, iteration) -> one slot per recorded occurrence, in position order;
-    /// `Some(row)` when that occurrence completed.
-    occurrences: HashMap<String, HashMap<u32, Vec<Option<WorkflowRunStep>>>>,
+    /// carrying the completed row when that occurrence completed.
+    occurrences: HashMap<String, HashMap<u32, Vec<Occurrence>>>,
     /// (name, iteration) -> how many occurrences this resumed run has claimed so far.
     cursors: HashMap<StepKey, usize>,
     /// How many steps this resumed run has actually executed (claims that found no
@@ -70,6 +86,7 @@ impl ResumeContext {
                         let slots = by_pos
                             .into_values()
                             .map(|rows| {
+                                let last_failed = latest_failed_attempt(&rows);
                                 let mut done: Vec<WorkflowRunStep> = rows
                                     .into_iter()
                                     .filter(|r| r.status == WorkflowStepStatus::Completed)
@@ -84,7 +101,16 @@ impl ResumeContext {
                                 done.sort_by(|a, b| {
                                     (&a.started_at, &a.id).cmp(&(&b.started_at, &b.id))
                                 });
-                                done.pop()
+                                let completed = done.pop();
+                                let last_failed = if completed.is_some() {
+                                    None
+                                } else {
+                                    last_failed
+                                };
+                                Occurrence {
+                                    completed,
+                                    last_failed,
+                                }
                             })
                             .collect();
                         (iter, slots)
@@ -115,11 +141,28 @@ impl ResumeContext {
 
     /// True when no recorded occurrence completed.
     pub fn is_empty(&self) -> bool {
-        !self
-            .occurrences
+        !self.any_occurrence(Occurrence::is_completed)
+    }
+
+    /// True when any recorded occurrence failed and left a `child_run_id` to recover from.
+    pub(crate) fn has_prior_failed(&self) -> bool {
+        self.any_occurrence(|o| o.last_failed.is_some())
+    }
+
+    /// True when `pred` holds for any recorded occurrence of any step.
+    fn any_occurrence(&self, pred: impl Fn(&Occurrence) -> bool) -> bool {
+        self.occurrences
             .values()
             .flat_map(|m| m.values())
-            .any(|slots| slots.iter().any(Option::is_some))
+            .any(|slots| slots.iter().any(&pred))
+    }
+
+    /// The next unclaimed occurrence of `(name, iteration)`.
+    fn next_slot(&self, name: &str, iteration: u32) -> Option<&Occurrence> {
+        self.occurrences
+            .get(name)?
+            .get(&iteration)?
+            .get(self.cursor(name, iteration))
     }
 
     fn cursor(&self, name: &str, iteration: u32) -> usize {
@@ -131,11 +174,17 @@ impl ResumeContext {
 
     /// The completed row for the next unclaimed occurrence, without claiming it.
     pub(crate) fn next_completed(&self, name: &str, iteration: u32) -> Option<&WorkflowRunStep> {
-        self.occurrences
-            .get(name)?
-            .get(&iteration)?
-            .get(self.cursor(name, iteration))?
-            .as_ref()
+        self.next_slot(name, iteration)?.completed.as_ref()
+    }
+
+    /// The failed attempt of the next unclaimed occurrence (one that did not complete
+    /// but left a failed row with a `child_run_id`), without claiming it.
+    pub(crate) fn next_prior_failed(
+        &self,
+        name: &str,
+        iteration: u32,
+    ) -> Option<&PriorStepAttempt> {
+        self.next_slot(name, iteration)?.last_failed.as_ref()
     }
 
     /// Claim the next occurrence of `(name, iteration)`, returning its completed row
@@ -166,7 +215,7 @@ impl ResumeContext {
             self.occurrences
                 .get(n)
                 .and_then(|m| m.get(&iteration))
-                .is_some_and(|slots| slots.iter().any(Option::is_some))
+                .is_some_and(|slots| slots.iter().any(Occurrence::is_completed))
         })
     }
 
@@ -182,15 +231,43 @@ impl ResumeContext {
     pub(crate) fn completed_iterations(&self, name: &str) -> impl Iterator<Item = u32> + '_ {
         self.occurrences.get(name).into_iter().flat_map(|m| {
             m.iter()
-                .filter(|(_, slots)| slots.iter().any(Option::is_some))
+                .filter(|(_, slots)| slots.iter().any(Occurrence::is_completed))
                 .map(|(i, _)| *i)
         })
     }
 }
 
+/// The latest (by `started_at`, `id`) failed row with a `child_run_id`, as a
+/// [`PriorStepAttempt`].
+fn latest_failed_attempt(rows: &[WorkflowRunStep]) -> Option<PriorStepAttempt> {
+    rows.iter()
+        .filter(|r| r.status == WorkflowStepStatus::Failed && r.child_run_id.is_some())
+        .max_by(|a, b| (&a.started_at, &a.id).cmp(&(&b.started_at, &b.id)))
+        .and_then(|r| {
+            Some(PriorStepAttempt {
+                child_run_id: r.child_run_id.clone()?,
+                step_error: r.result_text.clone(),
+            })
+        })
+}
+
+/// Peek the failed earlier attempt of the next unclaimed occurrence of `step_key`.
+/// Call before the skip check, because claiming advances the cursor.
+pub(crate) fn peek_prior_failed_attempt(
+    state: &ExecutionState,
+    step_key: &str,
+    iteration: u32,
+) -> Option<PriorStepAttempt> {
+    state
+        .resume_ctx
+        .as_ref()?
+        .next_prior_failed(step_key, iteration)
+        .cloned()
+}
+
 /// Last completed row per `(name, iteration)`, for the deprecated `step_map` view.
 fn latest_completed_view(
-    occurrences: &HashMap<String, HashMap<u32, Vec<Option<WorkflowRunStep>>>>,
+    occurrences: &HashMap<String, HashMap<u32, Vec<Occurrence>>>,
 ) -> HashMap<String, HashMap<u32, WorkflowRunStep>> {
     occurrences
         .iter()
@@ -201,7 +278,7 @@ fn latest_completed_view(
                     slots
                         .iter()
                         .rev()
-                        .find_map(|s| s.clone())
+                        .find_map(|s| s.completed.clone())
                         .map(|r| (*iter, r))
                 })
                 .collect();
@@ -2315,6 +2392,48 @@ mod tests {
         assert_eq!(ctx.claim("a", 0).unwrap().id, "first");
         assert!(ctx.claim("a", 0).is_none(), "failed occurrence must run");
         assert!(ctx.claim("a", 0).is_none(), "past the last occurrence");
+    }
+
+    #[test]
+    fn resume_context_keeps_latest_failed_attempt_with_child_run() {
+        let mut older = row("a", 0, 0, WorkflowStepStatus::Failed, "older");
+        older.started_at = Some("2026-01-01T00:00:00Z".to_string());
+        older.child_run_id = Some("run-old".to_string());
+        let mut newer = row("a", 0, 0, WorkflowStepStatus::Failed, "newer");
+        newer.started_at = Some("2026-01-02T00:00:00Z".to_string());
+        newer.child_run_id = Some("run-new".to_string());
+        newer.result_text = Some("bad output".to_string());
+        // A failed row with no child run is never a candidate.
+        let mut unlinked = row("a", 0, 0, WorkflowStepStatus::Failed, "unlinked");
+        unlinked.started_at = Some("2026-01-03T00:00:00Z".to_string());
+        let ctx = ResumeContext::from_steps(vec![older, unlinked, newer]);
+        let prior = ctx.next_prior_failed("a", 0).expect("failed attempt");
+        assert_eq!(prior.child_run_id, "run-new");
+        assert_eq!(prior.step_error.as_deref(), Some("bad output"));
+        assert!(ctx.next_prior_failed("a", 1).is_none());
+        assert!(ctx.next_prior_failed("b", 0).is_none());
+    }
+
+    #[test]
+    fn resume_context_drops_failed_attempt_when_occurrence_completed() {
+        let mut failed = row("a", 0, 0, WorkflowStepStatus::Failed, "f");
+        failed.child_run_id = Some("run-1".to_string());
+        let done = row("a", 0, 0, WorkflowStepStatus::Completed, "c");
+        let ctx = ResumeContext::from_steps(vec![failed, done]);
+        assert!(ctx.next_prior_failed("a", 0).is_none());
+    }
+
+    #[test]
+    fn resume_context_prior_failed_peek_follows_cursor() {
+        let mut failed = row("a", 0, 1, WorkflowStepStatus::Failed, "f");
+        failed.child_run_id = Some("run-1".to_string());
+        let mut ctx = ResumeContext::from_steps(vec![
+            row("a", 0, 0, WorkflowStepStatus::Completed, "c"),
+            failed,
+        ]);
+        assert!(ctx.next_prior_failed("a", 0).is_none());
+        ctx.claim("a", 0);
+        assert_eq!(ctx.next_prior_failed("a", 0).unwrap().child_run_id, "run-1");
     }
 
     #[test]

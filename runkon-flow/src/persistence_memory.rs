@@ -414,7 +414,10 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
                 | WorkflowStepStatus::TimedOut
         );
         step.status = update.status;
-        step.child_run_id = update.child_run_id;
+        // Keep an earlier link when the update has none, like SQLite's COALESCE.
+        if update.child_run_id.is_some() {
+            step.child_run_id = update.child_run_id;
+        }
         if is_starting {
             step.started_at = Some(now);
         } else if is_terminal {
