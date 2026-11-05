@@ -10,12 +10,24 @@ use crate::traits::persistence::StepUpdate;
 use crate::traits::run_context::RunContext;
 use crate::types::{StepResult, StepSuccess};
 
+/// A branch failure caused by a missing required output block. This is the single
+/// owner of the warning text and child run id; the branch's `result` error carries a
+/// copy of the warning only so other consumers of the Err see the reason.
+struct MissingOutput {
+    /// The warning, persisted verbatim as the step's error.
+    warning: String,
+    /// The agent's child run, if it produced one.
+    child_run_id: Option<String>,
+}
+
 struct ParallelCallResult {
     agent_name: String,
     step_id: String,
     agent_step_key: String,
     result: std::result::Result<ActionOutput, EngineError>,
     attempt: u32,
+    /// Set when the branch failed because a required output block was missing.
+    missing_output: Option<MissingOutput>,
 }
 
 /// Persist one finished branch and fold it into the block's tallies.
@@ -63,12 +75,24 @@ fn save_branch_result(
             );
         }
         Err(e) => {
-            tracing::warn!("parallel: '{}' failed: {e}", pr.agent_name);
+            match &pr.missing_output {
+                Some(m) => tracing::warn!(
+                    "parallel: '{}' failed: {} (child_run_id={:?})",
+                    pr.agent_name,
+                    m.warning,
+                    m.child_run_id
+                ),
+                None => tracing::warn!("parallel: '{}' failed: {e}", pr.agent_name),
+            }
             let generation = state.expect_lease_generation();
-            state.persistence.update_step(
-                &pr.step_id,
-                StepUpdate::failed(generation, e.to_string(), pr.attempt),
-            )?;
+            let update = match pr.missing_output {
+                // The warning is persisted verbatim, without the error's Display prefix.
+                Some(m) => {
+                    StepUpdate::failed_with_child(generation, m.warning, pr.attempt, m.child_run_id)
+                }
+                None => StepUpdate::failed(generation, e.to_string(), pr.attempt),
+            };
+            state.persistence.update_step(&pr.step_id, update)?;
             *failures += 1;
         }
     }
@@ -105,6 +129,7 @@ pub fn execute_parallel(
         info: StepInfo,
         params: ActionParams,
         retries: u32,
+        require_output: bool,
     }
 
     struct CallInput {
@@ -113,6 +138,7 @@ pub fn execute_parallel(
         call_schema: Option<crate::output_schema::OutputSchema>,
         effective_with: Vec<String>,
         retries: u32,
+        require_output: bool,
         prior_attempt: Option<crate::extensions::PriorStepAttempt>,
     }
 
@@ -153,12 +179,17 @@ pub fn execute_parallel(
         };
 
         let retries = node.call_retries.get(&i.to_string()).copied().unwrap_or(0);
+        let require_output = crate::dsl::effective_require_output(
+            node.call_require_output.get(&i.to_string()).copied(),
+            effective_schema.is_some(),
+        );
         call_inputs.push(CallInput {
             idx: i,
             agent_step_key: agent_step_key.clone(),
             call_schema: effective_schema,
             effective_with,
             retries,
+            require_output,
             prior_attempt,
         });
     }
@@ -183,6 +214,7 @@ pub fn execute_parallel(
             call_schema,
             effective_with,
             retries,
+            require_output,
             prior_attempt,
         } = call_input;
         let pos = pos_base + i as i64;
@@ -254,6 +286,7 @@ pub fn execute_parallel(
             info,
             params,
             retries,
+            require_output,
         });
     }
 
@@ -266,6 +299,7 @@ pub fn execute_parallel(
         String,
         std::result::Result<ActionOutput, EngineError>,
         u32,
+        Option<MissingOutput>,
     )>();
 
     for dispatch_input in dispatch_queue {
@@ -277,6 +311,7 @@ pub fn execute_parallel(
             let mut last_error = String::new();
             let mut params = dispatch_input.params;
             let mut final_attempt = 0u32;
+            let mut missing_output: Option<MissingOutput> = None;
             let mut result: std::result::Result<ActionOutput, EngineError> =
                 Err(EngineError::Workflow("no attempts made".into()));
 
@@ -292,6 +327,7 @@ pub fn execute_parallel(
                     Some(last_error.clone())
                 };
                 final_attempt = attempt;
+                missing_output = None;
 
                 result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     registry.dispatch(
@@ -312,6 +348,25 @@ pub fn execute_parallel(
                     Err(EngineError::Workflow(msg))
                 });
 
+                if let Ok(output) = &result {
+                    if let Some(warning) =
+                        super::missing_required_output(output, dispatch_input.require_output)
+                    {
+                        // Required output block missing: treat the attempt as failed so
+                        // per-call retries and fail_fast / min_success apply.
+                        let m = MissingOutput {
+                            warning,
+                            child_run_id: output.child_run_id.clone(),
+                        };
+                        // The branch Err carries the real warning so any consumer that
+                        // formats it sees the reason; last_error derives from the same value.
+                        last_error = m.warning.clone();
+                        result = Err(EngineError::Workflow(m.warning.clone()));
+                        missing_output = Some(m);
+                        continue;
+                    }
+                }
+
                 match &result {
                     Ok(_) => break,
                     Err(EngineError::Cancelled(_)) => break,
@@ -327,6 +382,7 @@ pub fn execute_parallel(
                 dispatch_input.agent_step_key,
                 result,
                 final_attempt,
+                missing_output,
             )) {
                 tracing::warn!("parallel: result channel broken (receiver dropped): {}", e);
             }
@@ -351,7 +407,7 @@ pub fn execute_parallel(
     let mut results_count = 0u32;
     loop {
         match completion_rx.recv_timeout(std::time::Duration::from_millis(500)) {
-            Ok((step_id, agent_name, agent_step_key, result, attempt)) => {
+            Ok((step_id, agent_name, agent_step_key, result, attempt, missing_output)) => {
                 results_count += 1;
                 let pr = ParallelCallResult {
                     agent_name,
@@ -359,6 +415,7 @@ pub fn execute_parallel(
                     agent_step_key,
                     result,
                     attempt,
+                    missing_output,
                 };
                 let failed = pr.result.is_err();
                 if failed && node.fail_fast {
@@ -534,6 +591,7 @@ mod tests {
             call_with: HashMap::new(),
             call_if: HashMap::new(),
             call_retries: HashMap::new(),
+            call_require_output: Default::default(),
         };
 
         execute_parallel(&mut state, &node, 0).unwrap();
@@ -616,6 +674,7 @@ mod tests {
             call_with: HashMap::new(),
             call_if: HashMap::new(),
             call_retries: HashMap::new(),
+            call_require_output: Default::default(),
         };
 
         // execute_parallel should succeed (the panic is caught internally).
@@ -680,6 +739,7 @@ mod tests {
             call_with: HashMap::new(),
             call_if: HashMap::new(),
             call_retries: HashMap::new(),
+            call_require_output: Default::default(),
         };
 
         execute_parallel(&mut state, &node, 0).unwrap();
@@ -736,6 +796,7 @@ mod tests {
             call_with: HashMap::new(),
             call_if: HashMap::new(),
             call_retries: HashMap::new(),
+            call_require_output: Default::default(),
         };
 
         execute_parallel(&mut state, &node, 0).unwrap();
@@ -811,6 +872,7 @@ mod tests {
             call_with: HashMap::new(),
             call_if: HashMap::new(),
             call_retries: HashMap::new(),
+            call_require_output: Default::default(),
         };
 
         execute_parallel(&mut state, &node, 0).ok();
@@ -890,6 +952,7 @@ mod tests {
             call_with: HashMap::new(),
             call_if: HashMap::new(),
             call_retries: HashMap::new(),
+            call_require_output: Default::default(),
         };
 
         execute_parallel(&mut state, &node, 0).unwrap();
@@ -952,6 +1015,7 @@ mod tests {
             call_with: HashMap::new(),
             call_if: HashMap::new(),
             call_retries,
+            call_require_output: HashMap::new(),
         };
 
         execute_parallel(&mut state, &node, 0).unwrap();
@@ -1024,6 +1088,7 @@ mod tests {
             call_with: HashMap::new(),
             call_if: HashMap::new(),
             call_retries,
+            call_require_output: HashMap::new(),
         };
 
         execute_parallel(&mut state, &node, 0).unwrap();
@@ -1188,6 +1253,7 @@ mod tests {
             call_with: HashMap::new(),
             call_if: HashMap::new(),
             call_retries: HashMap::new(),
+            call_require_output: Default::default(),
         };
 
         execute_parallel(&mut state, &node, 0).unwrap();
@@ -1260,6 +1326,7 @@ mod tests {
             call_with: HashMap::new(),
             call_if: HashMap::new(),
             call_retries: HashMap::new(),
+            call_require_output: Default::default(),
         }
     }
 

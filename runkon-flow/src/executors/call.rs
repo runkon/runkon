@@ -7,9 +7,21 @@ use crate::engine::{emit_event, handle_on_fail, resolve_schema, ExecutionState};
 use crate::engine_error::{EngineError, Result};
 use crate::events::EngineEvent;
 use crate::status::WorkflowStepStatus;
+use crate::traits::action_executor::ActionOutput;
 use crate::traits::persistence::StepUpdate;
 
 use super::{build_action_params, record_dispatch_success};
+
+/// How one dispatch attempt ended.
+enum AttemptOutcome {
+    Completed(ActionOutput),
+    /// An executor error, or a missing required output block.
+    Failed {
+        message: String,
+        child_run_id: Option<String>,
+    },
+    Cancelled(CancellationReason),
+}
 
 pub fn execute_call(state: &mut ExecutionState, node: &CallNode, iteration: u32) -> Result<()> {
     // Call-level output overrides block-level; if neither is set, use None.
@@ -63,6 +75,9 @@ fn execute_call_inner(
     let schema = schema_name
         .map(|name| resolve_schema(state, name))
         .transpose()?;
+
+    let require_output =
+        crate::dsl::effective_require_output(node.require_output, schema.is_some());
 
     // Retry loop
     let max_attempts = 1 + node.retries;
@@ -255,8 +270,25 @@ fn execute_call_inner(
             }
         }
 
-        match dispatch_result {
-            Ok(output) => {
+        // Classify the attempt once: a missing required output block fails it like an
+        // executor error does.
+        let outcome = match dispatch_result {
+            Ok(output) => match super::missing_required_output(&output, require_output) {
+                Some(warning) => AttemptOutcome::Failed {
+                    message: warning,
+                    child_run_id: output.child_run_id,
+                },
+                None => AttemptOutcome::Completed(output),
+            },
+            Err(EngineError::Cancelled(reason)) => AttemptOutcome::Cancelled(reason),
+            Err(e) => AttemptOutcome::Failed {
+                message: e.to_string(),
+                child_run_id: None,
+            },
+        };
+
+        match outcome {
+            AttemptOutcome::Completed(output) => {
                 tracing::info!(
                     "Step '{}' completed: markers={:?}",
                     agent_label,
@@ -281,7 +313,29 @@ fn execute_call_inner(
                 );
                 return Ok(());
             }
-            Err(EngineError::Cancelled(reason)) => {
+            AttemptOutcome::Failed {
+                message,
+                child_run_id,
+            } => {
+                tracing::warn!(
+                    "Step '{}' (attempt {}/{}): {message}",
+                    agent_label,
+                    attempt + 1,
+                    max_attempts,
+                );
+                let generation = state.expect_lease_generation();
+                state.persistence.update_step(
+                    &step_id,
+                    StepUpdate::failed_with_child(
+                        generation,
+                        message.clone(),
+                        attempt,
+                        child_run_id,
+                    ),
+                )?;
+                last_error = message;
+            }
+            AttemptOutcome::Cancelled(reason) => {
                 let generation = state.expect_lease_generation();
                 state.persistence.update_step(
                     &step_id,
@@ -298,22 +352,6 @@ fn execute_call_inner(
                     },
                 )?;
                 return Err(EngineError::Cancelled(reason));
-            }
-            Err(e) => {
-                let err_msg = e.to_string();
-                tracing::warn!(
-                    "Step '{}' (attempt {}/{}): {err_msg}",
-                    agent_label,
-                    attempt + 1,
-                    max_attempts,
-                );
-                let generation = state.expect_lease_generation();
-                state.persistence.update_step(
-                    &step_id,
-                    StepUpdate::failed(generation, err_msg.clone(), attempt),
-                )?;
-                last_error = err_msg;
-                continue;
             }
         }
     }
@@ -401,6 +439,7 @@ mod tests {
             as_identity: None,
             plugin_dirs: vec![],
             max_turns: None,
+            require_output: None,
         };
 
         execute_call(&mut state, &node, 0).unwrap();

@@ -238,12 +238,29 @@ pub(super) fn build_action_params(
     }
 }
 
+/// Return the `OUTPUT_WARNING` text when the step requires an output block and the
+/// executor reported that it is missing, so the caller can fail the attempt with it.
+pub(super) fn missing_required_output(
+    output: &crate::traits::action_executor::ActionOutput,
+    required: bool,
+) -> Option<String> {
+    if !required {
+        return None;
+    }
+    output
+        .metadata
+        .get(crate::constants::metadata_keys::OUTPUT_WARNING)
+        .cloned()
+}
+
 /// Persist a completed agent step from its [`ActionOutput`].
 ///
 /// If the executor set [`metadata_keys::OUTPUT_WARNING`] (for example, the agent
 /// ended without a `<<<FLOW_OUTPUT>>>` block, so its markers are empty), the
 /// warning is logged and stored as the step's `step_error`: the step still
-/// completes, but the run shows why its markers are missing.
+/// completes, but the run shows why its markers are missing. This warning-only path
+/// applies only to steps that don't require output; callers fail such a step first
+/// (see [`missing_required_output`]).
 ///
 /// [`metadata_keys::OUTPUT_WARNING`]: crate::constants::metadata_keys::OUTPUT_WARNING
 pub(super) fn persist_completed_action_step(
@@ -380,6 +397,30 @@ mod tests {
     use super::*;
     use crate::extensions::ClaudeActionParams;
     use crate::traits::action_executor::ActionParams;
+
+    #[test]
+    fn missing_required_output_returns_the_warning_only_when_required() {
+        let mut output = crate::traits::action_executor::ActionOutput::default();
+        assert_eq!(missing_required_output(&output, true), None);
+        output.metadata.insert(
+            crate::constants::metadata_keys::OUTPUT_WARNING.to_string(),
+            "no block".to_string(),
+        );
+        assert_eq!(
+            missing_required_output(&output, true).as_deref(),
+            Some("no block")
+        );
+        assert_eq!(missing_required_output(&output, false), None);
+    }
+
+    #[test]
+    fn explicit_require_output_wins_over_the_schema_default() {
+        use crate::dsl::effective_require_output as eff;
+        assert!(eff(None, true));
+        assert!(!eff(None, false));
+        assert!(!eff(Some(false), true));
+        assert!(eff(Some(true), false));
+    }
 
     fn make_inputs() -> Arc<HashMap<String, String>> {
         Arc::new(HashMap::new())
