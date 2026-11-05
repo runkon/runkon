@@ -3,9 +3,11 @@ use std::collections::HashMap;
 use runkon_flow::constants::metadata_keys;
 use runkon_flow::helpers::{
     find_block_start, find_flow_output_block, find_output_block_marker, fix_backslash_escapes,
-    parse_flow_output, strip_trailing_commas,
+    flow_output_block_line, parse_flow_output, strip_trailing_commas,
 };
 use runkon_flow::output_schema::{ArrayItems, FieldDef, FieldType, OutputSchema};
+
+pub use crate::error::OutputError;
 
 // ---------------------------------------------------------------------------
 // Structured output
@@ -59,17 +61,24 @@ pub fn strip_code_fences(s: &str) -> String {
 pub fn parse_structured_output(
     text: &str,
     schema: &OutputSchema,
-) -> Result<StructuredOutput, String> {
-    let cleaned = extract_output_block(text)
-        .ok_or_else(|| "No <<<FLOW_OUTPUT>>> block found in agent output".to_string())?;
+) -> Result<StructuredOutput, OutputError> {
+    let cleaned = extract_output_block(text).ok_or(OutputError::Missing)?;
+    // `extract_output_block` found a complete block, so its line is always known.
+    let block_line = flow_output_block_line(text).unwrap_or(1);
 
     let cleaned = strip_trailing_commas(&cleaned);
     let cleaned = fix_backslash_escapes(&cleaned);
 
     let value: serde_json::Value =
-        serde_json::from_str(&cleaned).map_err(|e| format!("Invalid JSON in FLOW_OUTPUT: {e}"))?;
+        serde_json::from_str(&cleaned).map_err(|e| OutputError::InvalidJson {
+            message: e.to_string(),
+            block_line,
+        })?;
 
-    validate_value(&value, &schema.fields)?;
+    validate_value(&value, &schema.fields).map_err(|message| OutputError::Validation {
+        message,
+        block_line,
+    })?;
 
     let markers = derive_markers(&value, schema);
     let context = derive_context(&value, schema);
@@ -109,11 +118,13 @@ pub fn derive_output_from_value(
 ///
 /// Returns `(markers, context, structured_json)`. The `succeeded` flag controls whether
 /// a schema validation failure is treated as an error (`Err`) or silently falls back.
+/// The error is the parser's [`OutputError`]; [`crate::AgentError::Output`] adds the
+/// `structured output validation: ` prefix when it is shown as a step error.
 pub fn interpret_agent_output(
     result_text: Option<&str>,
     schema: Option<&OutputSchema>,
     succeeded: bool,
-) -> Result<(Vec<String>, String, Option<String>), String> {
+) -> Result<(Vec<String>, String, Option<String>), OutputError> {
     if let Some(s) = schema {
         match result_text.map(|text| parse_structured_output(text, s)) {
             Some(Ok(structured)) => Ok((
@@ -121,7 +132,7 @@ pub fn interpret_agent_output(
                 structured.context,
                 Some(structured.json_string),
             )),
-            Some(Err(e)) if succeeded => Err(format!("structured output validation: {e}")),
+            Some(Err(e)) if succeeded => Err(e),
             _ => {
                 let fallback = result_text.and_then(parse_flow_output).unwrap_or_default();
                 Ok((fallback.markers, fallback.context, None))
@@ -773,7 +784,24 @@ mod tests {
     fn parse_structured_output_missing_block() {
         let schema = make_schema("test", vec![make_field("ok", true, FieldType::Boolean)]);
         let err = parse_structured_output("no block here", &schema).unwrap_err();
-        assert!(err.contains("No <<<FLOW_OUTPUT>>>"), "got: {err}");
+        assert_eq!(err, OutputError::Missing);
+        assert_eq!(err.block_line(), None);
+        assert!(err.to_string().contains("No <<<FLOW_OUTPUT>>>"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_structured_output_invalid_json_has_block_line() {
+        let schema = make_schema("test", vec![make_field("ok", true, FieldType::Boolean)]);
+        let text = "one\ntwo\n<<<FLOW_OUTPUT>>>\n{not json}\n<<<END_FLOW_OUTPUT>>>";
+        let err = parse_structured_output(text, &schema).unwrap_err();
+        assert!(
+            matches!(err, OutputError::InvalidJson { block_line: 3, .. }),
+            "got: {err:?}"
+        );
+        assert!(
+            err.to_string().starts_with("Invalid JSON in FLOW_OUTPUT: "),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -781,7 +809,22 @@ mod tests {
         let schema = make_schema("test", vec![make_field("ok", true, FieldType::Boolean)]);
         let text = "<<<FLOW_OUTPUT>>>\n{}\n<<<END_FLOW_OUTPUT>>>";
         let err = parse_structured_output(text, &schema).unwrap_err();
-        assert!(err.contains("Missing required field"), "got: {err}");
+        assert!(
+            matches!(err, OutputError::Validation { block_line: 1, .. }),
+            "got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("Missing required field"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_structured_output_validation_has_block_line_after_prose() {
+        let schema = make_schema("test", vec![make_field("ok", true, FieldType::Boolean)]);
+        let text = "intro\n\n<<<FLOW_OUTPUT>>>\n{}\n<<<END_FLOW_OUTPUT>>>";
+        let err = parse_structured_output(text, &schema).unwrap_err();
+        assert_eq!(err.block_line(), Some(3));
     }
 
     // ── flow_output_warning ───────────────────────────────────────────────────
@@ -893,7 +936,7 @@ mod tests {
         let schema = make_schema("test", vec![make_field("ok", true, FieldType::Boolean)]);
         let text = "no output block at all";
         let err = interpret_agent_output(Some(text), Some(&schema), true).unwrap_err();
-        assert!(err.contains("structured output validation"), "got: {err}");
+        assert_eq!(err, OutputError::Missing);
     }
 
     #[test]

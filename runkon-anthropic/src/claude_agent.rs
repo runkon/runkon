@@ -12,6 +12,7 @@ use runkon_flow_executors::correction::{
     record_correction_attempts, run_agent_with_output_correction, AgentRunOutcome,
 };
 use runkon_flow_executors::output::record_flow_output_warning;
+use runkon_flow_executors::AgentError;
 
 use crate::anthropic_api::ApiCallExecutor;
 
@@ -69,11 +70,16 @@ impl ClaudeAgentExecutor {
         }
     }
 
+    /// Run the agent step.
+    ///
+    /// A FLOW_OUTPUT parse or validation failure is returned as
+    /// [`AgentError::Output`], which hosts can match on; every other failure is
+    /// [`AgentError::Other`]. `Display` text is the same as the old `String` error.
     pub fn execute(
         &self,
         ctx: &ClaudeAgentContext,
         params: &ClaudeAgentParams<'_>,
-    ) -> Result<ActionOutput, String> {
+    ) -> Result<ActionOutput, AgentError> {
         let working_dir = ctx.working_dir.to_str().ok_or_else(|| {
             format!(
                 "working_dir '{}' contains invalid UTF-8",
@@ -248,7 +254,7 @@ impl ClaudeAgentExecutor {
                     params.name, completed.status
                 )
             });
-            Err(detail)
+            Err(detail.into())
         }
     }
 }
@@ -293,6 +299,7 @@ mod tests {
     use super::*;
     use runkon_flow::output_schema::{FieldDef, FieldType};
     use runkon_flow_executors::test_support::{scripted_handle, ScriptedResolver};
+    use runkon_flow_executors::OutputError;
     use runkon_runtimes::{Result as RkResult, RuntimeError};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -440,7 +447,7 @@ mod tests {
         // an HTTP error from the dummy endpoint, not a "no model resolved" error.
         if let Err(ref e) = result {
             assert!(
-                !e.contains("no model resolved"),
+                !e.to_string().contains("no model resolved"),
                 "model resolution should succeed via runtime default_model, got: {e}"
             );
         }
@@ -472,7 +479,7 @@ mod tests {
         // Model resolved from frontmatter; any Err must not be "no model resolved".
         if let Err(ref e) = result {
             assert!(
-                !e.contains("no model resolved"),
+                !e.to_string().contains("no model resolved"),
                 "model resolution should succeed via agent frontmatter model, got: {e}"
             );
         }
@@ -501,11 +508,11 @@ mod tests {
 
         let err = result.expect_err("expected Err when no model and no runtime default");
         assert!(
-            err.contains("no model resolved"),
+            err.to_string().contains("no model resolved"),
             "error should mention 'no model resolved', got: {err}"
         );
         assert!(
-            err.contains("test-agent"),
+            err.to_string().contains("test-agent"),
             "error should name the agent, got: {err}"
         );
     }
@@ -583,7 +590,7 @@ mod tests {
         );
         let err = result.unwrap_err();
         assert!(
-            err.contains("contains invalid UTF-8"),
+            err.to_string().contains("contains invalid UTF-8"),
             "error should mention invalid UTF-8, got: {err}"
         );
     }
@@ -940,6 +947,48 @@ mod tests {
         assert_eq!(
             *resumes.lock().unwrap(),
             vec![None, Some("sess-1".to_string())]
+        );
+    }
+
+    #[test]
+    fn schema_validation_failure_is_a_typed_output_error() {
+        let tmp = TempDir::new().unwrap();
+        write_agent(&tmp);
+        let mut handle = scripted_handle("one\n<<<FLOW_OUTPUT>>>\n{}\n<<<END_FLOW_OUTPUT>>>");
+        // No session id, so the run is not corrected and fails straight away.
+        handle.session_id = None;
+        let resolver = Arc::new(ScriptedResolver {
+            results: vec![handle],
+            resumes: Arc::new(std::sync::Mutex::new(vec![])),
+        });
+        let ctx = make_ctx(&tmp);
+        let schema = make_schema();
+        let params = ClaudeAgentParams {
+            name: "test-agent",
+            inputs: &HashMap::new(),
+            snippet_refs: &[],
+            dry_run: false,
+            retry_error: None,
+            schema: Some(&schema),
+        };
+
+        let err = ClaudeAgentExecutor::new(resolver, None)
+            .execute(&ctx, &params)
+            .unwrap_err();
+
+        assert!(
+            matches!(
+                err,
+                AgentError::Output {
+                    error: OutputError::Validation { block_line: 2, .. },
+                    correction_attempts: 0,
+                }
+            ),
+            "{err:?}"
+        );
+        assert!(
+            err.to_string().starts_with("structured output validation: "),
+            "{err}"
         );
     }
 }

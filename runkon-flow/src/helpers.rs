@@ -63,12 +63,28 @@ pub fn find_block_start(text: &str, marker: &str) -> Option<usize> {
 /// can't be mistaken for the real block's start or end. The start marker must
 /// also be followed by `{`, `[` or a code fence.
 pub fn find_flow_output_block(text: &str) -> Option<&str> {
-    let start = find_block_start(text, FLOW_OUTPUT_START)? + FLOW_OUTPUT_START.len();
+    find_flow_output_span(text).map(|(_, block)| block)
+}
+
+/// The byte offset of the start marker and the trimmed contents of the block
+/// that [`find_flow_output_block`] returns. Shared so the block and its
+/// location can never disagree.
+fn find_flow_output_span(text: &str) -> Option<(usize, &str)> {
+    let marker_pos = find_block_start(text, FLOW_OUTPUT_START)?;
+    let start = marker_pos + FLOW_OUTPUT_START.len();
     let end = text[start..]
         .match_indices(FLOW_OUTPUT_END)
         .map(|(pos, _)| start + pos)
         .find(|&pos| starts_line(text, pos))?;
-    Some(text[start..end].trim())
+    Some((marker_pos, text[start..end].trim()))
+}
+
+/// The 1-based line of `text` on which the block returned by
+/// [`find_flow_output_block`] begins (the line of its `<<<FLOW_OUTPUT>>>`
+/// marker), or `None` when there is no complete block.
+pub fn flow_output_block_line(text: &str) -> Option<usize> {
+    let (marker_pos, _) = find_flow_output_span(text)?;
+    Some(text[..marker_pos].matches('\n').count() + 1)
 }
 
 /// Extract markers and context from a `<<<FLOW_OUTPUT>>> … <<<END_FLOW_OUTPUT>>>`
@@ -437,8 +453,56 @@ pub(crate) fn advance_resume_past_while_iterations(
 #[cfg(test)]
 mod parse_tests {
     use super::{
-        find_block_start, find_flow_output_block, find_output_block_marker, parse_flow_output,
+        find_block_start, find_flow_output_block, find_output_block_marker, flow_output_block_line,
+        parse_flow_output,
     };
+
+    #[test]
+    fn block_line_first_line() {
+        let text = "<<<FLOW_OUTPUT>>>\n{\"markers\": []}\n<<<END_FLOW_OUTPUT>>>\n";
+        assert_eq!(flow_output_block_line(text), Some(1));
+    }
+
+    #[test]
+    fn block_line_after_prose() {
+        let text = "one\ntwo\n<<<FLOW_OUTPUT>>>\n{\"markers\": []}\n<<<END_FLOW_OUTPUT>>>\n";
+        assert_eq!(flow_output_block_line(text), Some(3));
+    }
+
+    #[test]
+    fn block_line_indented_marker() {
+        let text = "one\n   <<<FLOW_OUTPUT>>>\n   {}\n   <<<END_FLOW_OUTPUT>>>\n";
+        assert_eq!(flow_output_block_line(text), Some(2));
+    }
+
+    #[test]
+    fn block_line_is_last_of_several_blocks() {
+        let text = concat!(
+            "<<<FLOW_OUTPUT>>>\n{\"markers\": [\"a\"]}\n<<<END_FLOW_OUTPUT>>>\n",
+            "more\n",
+            "<<<FLOW_OUTPUT>>>\n{\"markers\": [\"b\"]}\n<<<END_FLOW_OUTPUT>>>\n",
+        );
+        assert_eq!(flow_output_block_line(text), Some(5));
+    }
+
+    #[test]
+    fn block_line_ignores_quoted_marker() {
+        let text = concat!(
+            "<<<FLOW_OUTPUT>>>\n",
+            "{\"context\": \"see <<<FLOW_OUTPUT>>> {\"}\n",
+            "<<<END_FLOW_OUTPUT>>>\n",
+        );
+        assert_eq!(flow_output_block_line(text), Some(1));
+    }
+
+    #[test]
+    fn block_line_none_without_end_marker() {
+        assert_eq!(
+            flow_output_block_line("x\n<<<FLOW_OUTPUT>>>\n{\"markers\": []}\n"),
+            None
+        );
+        assert_eq!(flow_output_block_line("no block"), None);
+    }
 
     #[test]
     fn finds_output_block_markers() {
