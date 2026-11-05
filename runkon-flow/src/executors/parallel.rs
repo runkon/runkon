@@ -10,15 +10,22 @@ use crate::traits::persistence::StepUpdate;
 use crate::traits::run_context::RunContext;
 use crate::types::{StepResult, StepSuccess};
 
+/// A branch failure caused by a missing required output block.
+struct MissingOutput {
+    /// The warning text, persisted verbatim as the step's error.
+    warning: String,
+    /// The agent's child run, if it produced one.
+    child_run_id: Option<String>,
+}
+
 struct ParallelCallResult {
     agent_name: String,
     step_id: String,
     agent_step_key: String,
     result: std::result::Result<ActionOutput, EngineError>,
     attempt: u32,
-    /// Set when the branch failed because a required output block was missing: the
-    /// warning text (persisted verbatim as the error) and the agent's child run.
-    missing_output: Option<(String, Option<String>)>,
+    /// Set when the branch failed because a required output block was missing.
+    missing_output: Option<MissingOutput>,
 }
 
 /// Persist one finished branch and fold it into the block's tallies.
@@ -69,8 +76,8 @@ fn save_branch_result(
             tracing::warn!("parallel: '{}' failed: {e}", pr.agent_name);
             let generation = state.expect_lease_generation();
             let update = match pr.missing_output {
-                Some((warning, child_run_id)) => {
-                    StepUpdate::failed_with_child(generation, warning, pr.attempt, child_run_id)
+                Some(m) => {
+                    StepUpdate::failed_with_child(generation, m.warning, pr.attempt, m.child_run_id)
                 }
                 None => StepUpdate::failed(generation, e.to_string(), pr.attempt),
             };
@@ -281,7 +288,7 @@ pub fn execute_parallel(
         String,
         std::result::Result<ActionOutput, EngineError>,
         u32,
-        Option<(String, Option<String>)>,
+        Option<MissingOutput>,
     )>();
 
     for dispatch_input in dispatch_queue {
@@ -293,7 +300,7 @@ pub fn execute_parallel(
             let mut last_error = String::new();
             let mut params = dispatch_input.params;
             let mut final_attempt = 0u32;
-            let mut missing_output: Option<(String, Option<String>)> = None;
+            let mut missing_output: Option<MissingOutput> = None;
             let mut result: std::result::Result<ActionOutput, EngineError> =
                 Err(EngineError::Workflow("no attempts made".into()));
 
@@ -337,7 +344,10 @@ pub fn execute_parallel(
                         // Required output block missing: treat the attempt as failed so
                         // per-call retries and fail_fast / min_success apply.
                         last_error = warning.clone();
-                        missing_output = Some((warning.clone(), output.child_run_id.clone()));
+                        missing_output = Some(MissingOutput {
+                            warning: warning.clone(),
+                            child_run_id: output.child_run_id.clone(),
+                        });
                         result = Err(EngineError::Workflow(warning));
                         continue;
                     }

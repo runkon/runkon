@@ -258,31 +258,32 @@ fn execute_call_inner(
             }
         }
 
+        // One failure path for both an executor error and a missing required output
+        // block: the message and the agent's child run (if any). Cancellation is
+        // handled separately below.
+        let failure: Option<(String, Option<String>)> = match &dispatch_result {
+            Ok(output) => super::missing_required_output(output, require_output)
+                .map(|warning| (warning, output.child_run_id.clone())),
+            Err(EngineError::Cancelled(_)) => None,
+            Err(e) => Some((e.to_string(), None)),
+        };
+        if let Some((msg, child_run_id)) = failure {
+            tracing::warn!(
+                "Step '{}' (attempt {}/{}): {msg}",
+                agent_label,
+                attempt + 1,
+                max_attempts,
+            );
+            let generation = state.expect_lease_generation();
+            state.persistence.update_step(
+                &step_id,
+                StepUpdate::failed_with_child(generation, msg.clone(), attempt, child_run_id),
+            )?;
+            last_error = msg;
+            continue;
+        }
+
         match dispatch_result {
-            Ok(output) if super::missing_required_output(&output, require_output).is_some() => {
-                // The step requires an output block and the agent ended without one:
-                // fail the attempt with the warning so retries / on_fail apply.
-                let msg =
-                    super::missing_required_output(&output, require_output).unwrap_or_default();
-                tracing::warn!(
-                    "Step '{}' (attempt {}/{}): {msg}",
-                    agent_label,
-                    attempt + 1,
-                    max_attempts,
-                );
-                let generation = state.expect_lease_generation();
-                state.persistence.update_step(
-                    &step_id,
-                    StepUpdate::failed_with_child(
-                        generation,
-                        msg.clone(),
-                        attempt,
-                        output.child_run_id.clone(),
-                    ),
-                )?;
-                last_error = msg;
-                continue;
-            }
             Ok(output) => {
                 tracing::info!(
                     "Step '{}' completed: markers={:?}",
@@ -326,22 +327,7 @@ fn execute_call_inner(
                 )?;
                 return Err(EngineError::Cancelled(reason));
             }
-            Err(e) => {
-                let err_msg = e.to_string();
-                tracing::warn!(
-                    "Step '{}' (attempt {}/{}): {err_msg}",
-                    agent_label,
-                    attempt + 1,
-                    max_attempts,
-                );
-                let generation = state.expect_lease_generation();
-                state.persistence.update_step(
-                    &step_id,
-                    StepUpdate::failed(generation, err_msg.clone(), attempt),
-                )?;
-                last_error = err_msg;
-                continue;
-            }
+            Err(_) => unreachable!("executor errors are handled above"),
         }
     }
 
