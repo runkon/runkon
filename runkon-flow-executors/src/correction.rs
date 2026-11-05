@@ -137,7 +137,8 @@ pub fn recover_prior_output(
     if prior.status != RunStatus::Completed || prior.result_text.is_none() {
         return None;
     }
-    let output_ok = interpret_agent_output(prior.result_text.as_deref(), Some(schema), true).is_ok();
+    let output_ok =
+        interpret_agent_output(prior.result_text.as_deref(), Some(schema), true).is_ok();
     if !output_ok && prior.session_id.is_none() {
         return None;
     }
@@ -150,12 +151,18 @@ pub fn recover_prior_output(
     prior.cache_read_input_tokens = None;
     prior.cache_creation_input_tokens = None;
     Some(
-        correct_from(runtime, request, prior, shutdown, step_timeout, Some(schema)).map(
-            |mut outcome| {
-                outcome.recovered_from = Some(prior_id);
-                outcome
-            },
-        ),
+        correct_from(
+            runtime,
+            request,
+            prior,
+            shutdown,
+            step_timeout,
+            Some(schema),
+        )
+        .map(|mut outcome| {
+            outcome.recovered_from = Some(prior_id);
+            outcome
+        }),
     )
 }
 

@@ -114,10 +114,7 @@ fn resume(
         Arc::clone(p) as Arc<dyn WorkflowPersistence>,
         run_id.to_string(),
     );
-    state.action_registry = Arc::new(ActionRegistry::from_executors(
-        named_executors(execs),
-        None,
-    ));
+    state.action_registry = Arc::new(ActionRegistry::from_executors(named_executors(execs), None));
     state.workflow_name = def.name.clone();
     let engine = FlowEngineBuilder::new().build().unwrap();
     engine.resume(def, &mut state).unwrap()
@@ -127,7 +124,14 @@ fn resume(
 fn resumed_step_gets_prior_attempt_on_first_dispatch_only() {
     let p = make_persistence();
     let run_id = new_run(&p, "wf");
-    seed(&p, &run_id, "plan", 0, WorkflowStepStatus::Failed, Some("agent-run-1"));
+    seed(
+        &p,
+        &run_id,
+        "plan",
+        0,
+        WorkflowStepStatus::Failed,
+        Some("agent-run-1"),
+    );
     let seen = Arc::new(Mutex::new(vec![]));
     let def = make_def(
         "wf",
@@ -207,7 +211,14 @@ fn parallel_branch_gets_prior_attempt_on_resume() {
     let p = make_persistence();
     let run_id = new_run(&p, "wf");
     seed(&p, &run_id, "a", 0, WorkflowStepStatus::Completed, None);
-    seed(&p, &run_id, "b", 1, WorkflowStepStatus::Failed, Some("agent-run-b"));
+    seed(
+        &p,
+        &run_id,
+        "b",
+        1,
+        WorkflowStepStatus::Failed,
+        Some("agent-run-b"),
+    );
     let seen_a = Arc::new(Mutex::new(vec![]));
     let seen_b = Arc::new(Mutex::new(vec![]));
     let def = make_def(
@@ -242,7 +253,10 @@ fn parallel_branch_gets_prior_attempt_on_resume() {
         ],
     );
     assert!(result.all_succeeded);
-    assert!(seen_a.lock().unwrap().is_empty(), "completed branch skipped");
+    assert!(
+        seen_a.lock().unwrap().is_empty(),
+        "completed branch skipped"
+    );
     assert_eq!(
         *seen_b.lock().unwrap(),
         vec![Some("agent-run-b".to_string())]
