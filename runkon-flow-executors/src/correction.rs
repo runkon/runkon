@@ -32,6 +32,9 @@ pub struct AgentRunOutcome {
     pub structured_output: Option<String>,
     /// Number of correction runs made (0 when the first output was accepted).
     pub correction_attempts: u32,
+    /// The id of the earlier agent run this outcome was recovered from, when
+    /// [`recover_prior_output`] produced it; `None` for a fresh run.
+    pub recovered_from: Option<String>,
 }
 
 /// Prompt sent into the resumed session after a validation failure.
@@ -106,7 +109,111 @@ pub fn run_agent_with_output_correction(
     step_timeout: Duration,
     schema: Option<&OutputSchema>,
 ) -> Result<AgentRunOutcome, AgentError> {
-    let mut run = spawn_and_poll(runtime, &request, shutdown, step_timeout)?;
+    let run = spawn_and_poll(runtime, &request, shutdown, step_timeout)?;
+    correct_from(runtime, &mut request, run, shutdown, step_timeout, schema)
+}
+
+/// Reuse the output of an earlier, completed agent run of a step that is being resumed.
+///
+/// Returns `None` when the caller should start a fresh run instead: the prior run did
+/// not complete, has no `result_text`, or its output is still invalid and it has no
+/// session to resume. Otherwise:
+///
+/// - if the captured output now passes `schema`, it is returned with no spawn;
+/// - if it still fails and the run has a session id, that session is resumed with the
+///   correction prompt (on `request`'s `run_id`), up to
+///   [`MAX_OUTPUT_CORRECTION_ATTEMPTS`] times.
+///
+/// The prior run's metrics are cleared first: the failed attempt already recorded them,
+/// so the outcome only carries new spend.
+pub fn recover_prior_output(
+    runtime: &dyn AgentRuntime,
+    request: &mut RuntimeRequest,
+    mut prior: RunHandle,
+    shutdown: Option<&Arc<AtomicBool>>,
+    step_timeout: Duration,
+    schema: &OutputSchema,
+) -> Option<Result<AgentRunOutcome, AgentError>> {
+    if prior.status != RunStatus::Completed || prior.result_text.is_none() {
+        return None;
+    }
+    let output_ok = interpret_agent_output(prior.result_text.as_deref(), Some(schema), true).is_ok();
+    if !output_ok && prior.session_id.is_none() {
+        return None;
+    }
+    let prior_id = prior.id.clone();
+    prior.cost_usd = None;
+    prior.num_turns = None;
+    prior.duration_ms = None;
+    prior.input_tokens = None;
+    prior.output_tokens = None;
+    prior.cache_read_input_tokens = None;
+    prior.cache_creation_input_tokens = None;
+    Some(
+        correct_from(runtime, request, prior, shutdown, step_timeout, Some(schema)).map(
+            |mut outcome| {
+                outcome.recovered_from = Some(prior_id);
+                outcome
+            },
+        ),
+    )
+}
+
+/// Run an agent step, first trying to reuse the output of `prior_run_id`, the earlier
+/// failed attempt of a step being resumed.
+///
+/// With a `schema` and a `prior_run_id`, the prior run is loaded through
+/// `request.tracker` and handed to [`recover_prior_output`]. Every other case, including
+/// a tracker error, a missing row or a prior run with nothing to reuse, falls back to
+/// [`run_agent_with_output_correction`] (a fresh run), as before.
+pub fn run_agent_resuming_prior(
+    runtime: &dyn AgentRuntime,
+    mut request: RuntimeRequest,
+    prior_run_id: Option<&str>,
+    shutdown: Option<&Arc<AtomicBool>>,
+    step_timeout: Duration,
+    schema: Option<&OutputSchema>,
+) -> Result<AgentRunOutcome, AgentError> {
+    if let (Some(prior_id), Some(schema)) = (prior_run_id, schema) {
+        match request.tracker.get_run(prior_id) {
+            Ok(Some(prior)) => {
+                if let Some(outcome) = recover_prior_output(
+                    runtime,
+                    &mut request,
+                    prior,
+                    shutdown,
+                    step_timeout,
+                    schema,
+                ) {
+                    return outcome;
+                }
+                tracing::info!(
+                    "prior agent run {prior_id} has no reusable output; starting a fresh run"
+                );
+            }
+            Ok(None) => {
+                tracing::warn!("prior agent run {prior_id} not found; starting a fresh run");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "failed to load prior agent run {prior_id}: {e}; starting a fresh run"
+                );
+            }
+        }
+    }
+    run_agent_with_output_correction(runtime, request, shutdown, step_timeout, schema)
+}
+
+/// Interpret `run`'s output and, while it fails validation and the run has a session,
+/// resume that session with a correction prompt.
+fn correct_from(
+    runtime: &dyn AgentRuntime,
+    request: &mut RuntimeRequest,
+    mut run: RunHandle,
+    shutdown: Option<&Arc<AtomicBool>>,
+    step_timeout: Duration,
+    schema: Option<&OutputSchema>,
+) -> Result<AgentRunOutcome, AgentError> {
     let mut attempts: u32 = 0;
 
     loop {
@@ -119,6 +226,7 @@ pub fn run_agent_with_output_correction(
                     context,
                     structured_output,
                     correction_attempts: attempts,
+                    recovered_from: None,
                 });
             }
             Err(error) => {
@@ -144,7 +252,7 @@ pub fn run_agent_with_output_correction(
                 request.prompt = output_correction_prompt(&original.to_string(), schema);
                 request.resume_session_id = Some(session_id);
                 let next =
-                    spawn_and_poll(runtime, &request, shutdown, step_timeout).map_err(|ce| {
+                    spawn_and_poll(runtime, request, shutdown, step_timeout).map_err(|ce| {
                         AgentError::Other(format!(
                             "output correction failed: {ce}; original error: {original}"
                         ))
@@ -371,6 +479,87 @@ mod tests {
         let err = err.to_string();
         assert!(err.contains("Failed"), "{err}");
         assert!(err.contains("Missing required field: 'id'"), "{err}");
+    }
+
+    fn recover(
+        rt: &ScriptedRuntime,
+        prior: RunHandle,
+    ) -> Option<Result<AgentRunOutcome, AgentError>> {
+        let s = schema();
+        recover_prior_output(rt, &mut request(), prior, None, Duration::from_secs(1), &s)
+    }
+
+    #[test]
+    fn recovery_resumes_prior_session_for_missing_field_without_fresh_run() {
+        let rt = ScriptedRuntime::new(vec![Ok(handle(GOOD, Some("sess-1"), 0.05, 1))]);
+        let out = recover(&rt, handle(BAD, Some("sess-1"), 0.4, 20))
+            .expect("recovery applies")
+            .unwrap();
+        let spawns = rt.spawns();
+        assert_eq!(spawns.len(), 1, "one session-resume spawn, no fresh run");
+        assert_eq!(spawns[0].1.as_deref(), Some("sess-1"));
+        assert!(spawns[0].0.contains("Missing required field: 'id'"));
+        assert_ne!(spawns[0].0, "original");
+        assert_eq!(out.correction_attempts, 1);
+        assert_eq!(out.recovered_from.as_deref(), Some("run-1"));
+        assert!(out.structured_output.unwrap().contains("\"b\""));
+        // The prior attempt's metrics were already recorded; only the new run counts.
+        assert_eq!(out.run.num_turns, Some(1));
+        assert!((out.run.cost_usd.unwrap() - 0.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn recovery_accepts_now_valid_output_without_spawning() {
+        let rt = ScriptedRuntime::new(vec![]);
+        let out = recover(&rt, handle(GOOD, Some("s"), 0.4, 20))
+            .expect("recovery applies")
+            .unwrap();
+        assert!(rt.spawns().is_empty());
+        assert_eq!(out.correction_attempts, 0);
+        assert_eq!(out.recovered_from.as_deref(), Some("run-1"));
+        assert!(out.structured_output.unwrap().contains("\"b\""));
+        assert_eq!(out.run.cost_usd, None);
+        assert_eq!(out.run.num_turns, None);
+    }
+
+    #[test]
+    fn recovery_fails_after_max_corrections() {
+        let rt = ScriptedRuntime::new(vec![
+            Ok(handle(BAD, Some("s"), 0.1, 1)),
+            Ok(handle(BAD, Some("s"), 0.1, 1)),
+        ]);
+        let err = recover(&rt, handle(BAD, Some("s"), 0.4, 20))
+            .expect("recovery applies")
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AgentError::Output {
+                    correction_attempts: 2,
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+        assert_eq!(rt.spawns().len(), 2);
+    }
+
+    #[test]
+    fn recovery_declines_when_nothing_to_reuse() {
+        let rt = ScriptedRuntime::new(vec![]);
+        for status in [RunStatus::Failed, RunStatus::Cancelled] {
+            let mut h = handle(BAD, Some("s"), 0.1, 1);
+            h.status = status;
+            assert!(recover(&rt, h).is_none());
+        }
+        let mut no_text = handle(BAD, Some("s"), 0.1, 1);
+        no_text.result_text = None;
+        assert!(recover(&rt, no_text).is_none());
+        assert!(
+            recover(&rt, handle(BAD, None, 0.1, 1)).is_none(),
+            "invalid output with no session"
+        );
+        assert!(rt.spawns().is_empty());
     }
 
     #[test]

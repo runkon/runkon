@@ -50,6 +50,8 @@ fn execute_call_inner(
     state.position += 1;
 
     let step_key_check = node.agent.step_key();
+    // Peek before the skip check: claiming advances the resume cursor.
+    let prior_attempt = crate::engine::peek_prior_failed_attempt(state, &step_key_check, iteration);
     if super::skip_if_already_completed(state, &step_key_check, iteration, &step_key_check) {
         return Ok(());
     }
@@ -113,6 +115,7 @@ fn execute_call_inner(
             effective_bot_name,
             merged_plugin_dirs,
             node.max_turns,
+            if attempt == 0 { prior_attempt.clone() } else { None },
         );
 
         // Per-step timeout: spawn a timer thread that cancels a child token after

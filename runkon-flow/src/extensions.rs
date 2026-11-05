@@ -69,6 +69,19 @@ pub struct RunFailureCause {
     pub error: String,
 }
 
+/// The failed earlier attempt of a step occurrence, inserted into
+/// `ActionParams.extensions` on attempt 0 of a resumed occurrence whose latest recorded
+/// row failed and has a `child_run_id`.
+///
+/// An executor can use `child_run_id` to look up that attempt's agent run and reuse its
+/// output or session instead of starting over. DSL retries (`attempt > 0`) and fresh runs
+/// never carry it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PriorStepAttempt {
+    pub child_run_id: String,
+    pub step_error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

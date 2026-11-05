@@ -9,7 +9,7 @@ use runkon_runtimes::{RunEventSink, RunStatus, RunTracker, RuntimeRequest, Runti
 
 use runkon_flow_executors::agent_loader::{self, BuildPromptParams};
 use runkon_flow_executors::correction::{
-    record_correction_attempts, run_agent_with_output_correction, AgentRunOutcome,
+    record_correction_attempts, run_agent_resuming_prior, AgentRunOutcome,
 };
 use runkon_flow_executors::output::record_flow_output_warning;
 use runkon_flow_executors::AgentError;
@@ -50,6 +50,12 @@ pub struct ClaudeAgentParams<'a> {
     pub dry_run: bool,
     pub retry_error: Option<&'a str>,
     pub schema: Option<&'a OutputSchema>,
+    /// The agent run of this step's earlier failed attempt, set on the first attempt of
+    /// a resumed step (from `PriorStepAttempt::child_run_id` in `ActionParams.extensions`).
+    /// When that run completed but failed output validation, its captured output is
+    /// re-validated and, if still invalid, its session is resumed for a corrected block
+    /// instead of starting a fresh run. `None` always starts a fresh run.
+    pub prior_run_id: Option<&'a str>,
 }
 
 /// Executes a workflow step by loading a `.md` agent definition and either
@@ -193,9 +199,15 @@ impl ClaudeAgentExecutor {
             context,
             structured_output,
             correction_attempts,
-        } = run_agent_with_output_correction(
+            recovered_from,
+        } = run_agent_resuming_prior(
             &*runtime,
             request,
+            if params.dry_run {
+                None
+            } else {
+                params.prior_run_id
+            },
             ctx.shutdown.as_ref(),
             ctx.step_timeout,
             params.schema,
@@ -233,6 +245,9 @@ impl ClaudeAgentExecutor {
                 );
             }
             record_correction_attempts(&mut metadata, correction_attempts);
+            if let Some(prior) = recovered_from {
+                metadata.insert(metadata_keys::OUTPUT_RECOVERED_FROM_RUN.to_string(), prior);
+            }
             record_flow_output_warning(
                 &mut metadata,
                 completed.result_text.as_deref(),
@@ -397,6 +412,7 @@ mod tests {
             dry_run: false,
             retry_error: None,
             schema: Some(&schema),
+            prior_run_id: None,
         };
 
         let executor = ClaudeAgentExecutor::new(resolver, Some("dummy-api-key".to_string()));
@@ -437,6 +453,7 @@ mod tests {
             dry_run: false,
             retry_error: None,
             schema: Some(&schema),
+            prior_run_id: None,
         };
 
         let executor = ClaudeAgentExecutor::new(resolver, Some("dummy-api-key".to_string()));
@@ -470,6 +487,7 @@ mod tests {
             dry_run: false,
             retry_error: None,
             schema: Some(&schema),
+            prior_run_id: None,
         };
 
         let executor = ClaudeAgentExecutor::new(resolver, Some("dummy-api-key".to_string()));
@@ -500,6 +518,7 @@ mod tests {
             dry_run: false,
             retry_error: None,
             schema: Some(&schema),
+            prior_run_id: None,
         };
 
         let executor = ClaudeAgentExecutor::new(resolver, Some("dummy-api-key".to_string()));
@@ -533,6 +552,7 @@ mod tests {
             dry_run: false,
             retry_error: None,
             schema: None,
+            prior_run_id: None,
         };
 
         let executor = ClaudeAgentExecutor::new(resolver, Some("dummy-api-key".to_string()));
@@ -578,6 +598,7 @@ mod tests {
             dry_run: false,
             retry_error: None,
             schema: None,
+            prior_run_id: None,
         };
 
         let executor = ClaudeAgentExecutor::new(resolver, None);
@@ -612,6 +633,7 @@ mod tests {
             dry_run: false,
             retry_error: None,
             schema: Some(&schema),
+            prior_run_id: None,
         };
 
         let executor = ClaudeAgentExecutor::new(resolver, None);
@@ -830,6 +852,7 @@ mod tests {
             dry_run: false,
             retry_error: None,
             schema: None,
+            prior_run_id: None,
         };
 
         let executor = ClaudeAgentExecutor::new(resolver.clone(), None);
@@ -857,6 +880,7 @@ mod tests {
             dry_run: false,
             retry_error: None,
             schema: None,
+            prior_run_id: None,
         };
 
         let executor = ClaudeAgentExecutor::new(resolver.clone(), None);
@@ -891,6 +915,7 @@ mod tests {
             dry_run: false,
             retry_error: None,
             schema: Some(&schema),
+            prior_run_id: None,
         };
 
         let executor = ClaudeAgentExecutor::new(resolver, Some("dummy-api-key".to_string()));
@@ -930,6 +955,7 @@ mod tests {
             dry_run: false,
             retry_error: None,
             schema: Some(&schema),
+            prior_run_id: None,
         };
 
         let out = ClaudeAgentExecutor::new(resolver, None)
@@ -969,6 +995,7 @@ mod tests {
             dry_run: false,
             retry_error: None,
             schema: Some(&schema),
+            prior_run_id: None,
         };
 
         let err = ClaudeAgentExecutor::new(resolver, None)
@@ -990,5 +1017,117 @@ mod tests {
                 .starts_with("structured output validation: "),
             "{err}"
         );
+    }
+
+    /// Tracker whose `get_run` returns a canned earlier attempt.
+    struct PriorRunTracker(runkon_runtimes::run::RunHandle);
+
+    impl RunTracker for PriorRunTracker {
+        fn record_pid(&self, _run_id: &str, _pid: u32) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        fn record_runtime(&self, _run_id: &str, _name: &str) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        fn mark_cancelled(&self, _run_id: &str) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        fn mark_failed_if_running(&self, _run_id: &str, _reason: &str) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        fn get_run(
+            &self,
+            run_id: &str,
+        ) -> Result<Option<runkon_runtimes::run::RunHandle>, RuntimeError> {
+            Ok((run_id == self.0.id).then(|| self.0.clone()))
+        }
+    }
+
+    fn prior_attempt_run(status: RunStatus) -> runkon_runtimes::run::RunHandle {
+        let mut h = scripted_handle("<<<FLOW_OUTPUT>>>\n{}\n<<<END_FLOW_OUTPUT>>>");
+        h.id = "prior-run".to_string();
+        h.status = status;
+        h.cost_usd = Some(0.42);
+        h
+    }
+
+    #[test]
+    fn resumed_step_corrects_prior_output_in_its_session_without_a_fresh_run() {
+        let tmp = TempDir::new().unwrap();
+        write_agent(&tmp);
+        let resumes = Arc::new(std::sync::Mutex::new(vec![]));
+        let resolver = Arc::new(ScriptedResolver {
+            results: vec![scripted_handle(
+                "<<<FLOW_OUTPUT>>>\n{\"ok\":true}\n<<<END_FLOW_OUTPUT>>>",
+            )],
+            resumes: resumes.clone(),
+        });
+        let mut ctx = make_ctx(&tmp);
+        ctx.tracker = Arc::new(PriorRunTracker(prior_attempt_run(RunStatus::Completed)));
+        let schema = make_schema();
+        let params = ClaudeAgentParams {
+            name: "test-agent",
+            inputs: &HashMap::new(),
+            snippet_refs: &[],
+            dry_run: false,
+            retry_error: None,
+            schema: Some(&schema),
+            prior_run_id: Some("prior-run"),
+        };
+
+        let out = ClaudeAgentExecutor::new(resolver, None)
+            .execute(&ctx, &params)
+            .unwrap();
+
+        assert_eq!(out.structured_output.as_deref(), Some("{\"ok\":true}"));
+        assert_eq!(
+            *resumes.lock().unwrap(),
+            vec![Some("sess-1".to_string())],
+            "only a session-resume spawn, no fresh run"
+        );
+        assert_eq!(
+            out.metadata
+                .get(metadata_keys::OUTPUT_RECOVERED_FROM_RUN)
+                .map(String::as_str),
+            Some("prior-run")
+        );
+        assert!(
+            !out.metadata.contains_key(metadata_keys::COST_USD),
+            "the prior attempt's cost is not counted again"
+        );
+    }
+
+    #[test]
+    fn resumed_step_runs_fresh_when_prior_run_did_not_complete() {
+        let tmp = TempDir::new().unwrap();
+        write_agent(&tmp);
+        let resumes = Arc::new(std::sync::Mutex::new(vec![]));
+        let resolver = Arc::new(ScriptedResolver {
+            results: vec![scripted_handle(
+                "<<<FLOW_OUTPUT>>>\n{\"ok\":true}\n<<<END_FLOW_OUTPUT>>>",
+            )],
+            resumes: resumes.clone(),
+        });
+        let mut ctx = make_ctx(&tmp);
+        ctx.tracker = Arc::new(PriorRunTracker(prior_attempt_run(RunStatus::Failed)));
+        let schema = make_schema();
+        let params = ClaudeAgentParams {
+            name: "test-agent",
+            inputs: &HashMap::new(),
+            snippet_refs: &[],
+            dry_run: false,
+            retry_error: None,
+            schema: Some(&schema),
+            prior_run_id: Some("prior-run"),
+        };
+
+        let out = ClaudeAgentExecutor::new(resolver, None)
+            .execute(&ctx, &params)
+            .unwrap();
+
+        assert_eq!(*resumes.lock().unwrap(), vec![None]);
+        assert!(!out
+            .metadata
+            .contains_key(metadata_keys::OUTPUT_RECOVERED_FROM_RUN));
     }
 }
