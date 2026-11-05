@@ -10,10 +10,9 @@ use crate::traits::persistence::StepUpdate;
 use crate::traits::run_context::RunContext;
 use crate::types::{StepResult, StepSuccess};
 
-/// A branch failure caused by a missing required output block.
+/// Marks a branch failure caused by a missing required output block. The warning
+/// text lives only in the branch's `EngineError::Workflow` result.
 struct MissingOutput {
-    /// The warning text, persisted verbatim as the step's error.
-    warning: String,
     /// The agent's child run, if it produced one.
     child_run_id: Option<String>,
 }
@@ -75,11 +74,12 @@ fn save_branch_result(
         Err(e) => {
             tracing::warn!("parallel: '{}' failed: {e}", pr.agent_name);
             let generation = state.expect_lease_generation();
-            let update = match pr.missing_output {
-                Some(m) => {
-                    StepUpdate::failed_with_child(generation, m.warning, pr.attempt, m.child_run_id)
+            let update = match (pr.missing_output, e) {
+                // The warning is persisted verbatim, without the error's Display prefix.
+                (Some(m), EngineError::Workflow(warning)) => {
+                    StepUpdate::failed_with_child(generation, warning, pr.attempt, m.child_run_id)
                 }
-                None => StepUpdate::failed(generation, e.to_string(), pr.attempt),
+                (_, e) => StepUpdate::failed(generation, e.to_string(), pr.attempt),
             };
             state.persistence.update_step(&pr.step_id, update)?;
             *failures += 1;
@@ -343,11 +343,10 @@ pub fn execute_parallel(
                     {
                         // Required output block missing: treat the attempt as failed so
                         // per-call retries and fail_fast / min_success apply.
-                        last_error = warning.clone();
                         missing_output = Some(MissingOutput {
-                            warning: warning.clone(),
                             child_run_id: output.child_run_id.clone(),
                         });
+                        last_error = warning.clone();
                         result = Err(EngineError::Workflow(warning));
                         continue;
                     }
