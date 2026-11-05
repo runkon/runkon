@@ -265,7 +265,12 @@ pub fn load_agent(
 ///
 /// `subdirs` are relative to each base (worktree, then repo); `extra` are complete
 /// paths (plugin directories).
-fn searched_listing(bases: &[&str], subdirs: &[PathBuf], filename: &str, extra: &[PathBuf]) -> String {
+fn searched_listing(
+    bases: &[&str],
+    subdirs: &[PathBuf],
+    filename: &str,
+    extra: &[PathBuf],
+) -> String {
     let mut base_list = vec![bases[0]];
     for b in &bases[1..] {
         if !base_list.contains(b) {
@@ -928,7 +933,8 @@ mod tests {
 
         write_file(&tmp, ".conductor/prompts/intro.md", "Hello world.");
 
-        let result = load_and_concat_snippets(&dir, &dir, &["intro".to_string()], None, &cd()).unwrap();
+        let result =
+            load_and_concat_snippets(&dir, &dir, &["intro".to_string()], None, &cd()).unwrap();
         assert_eq!(result, "Hello world.");
     }
 
@@ -956,7 +962,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().to_str().unwrap().to_string();
 
-        let err = load_and_concat_snippets(&dir, &dir, &["missing".to_string()], None, &cd()).unwrap_err();
+        let err = load_and_concat_snippets(&dir, &dir, &["missing".to_string()], None, &cd())
+            .unwrap_err();
         assert!(err.contains("missing"), "got: {err}");
     }
 
@@ -973,7 +980,8 @@ mod tests {
         );
 
         let result =
-            load_and_concat_snippets(&dir, &dir, &["ctx".to_string()], Some("my-wf"), &cd()).unwrap();
+            load_and_concat_snippets(&dir, &dir, &["ctx".to_string()], Some("my-wf"), &cd())
+                .unwrap();
         assert_eq!(result, "Workflow-local.");
     }
 
@@ -1255,8 +1263,7 @@ mod tests {
         let def = ConfigDir::default();
         let ok = load_and_concat_snippets(&dir, &dir, &["a".to_string()], None, &def).unwrap();
         assert_eq!(ok, "Default root.");
-        let err =
-            load_and_concat_snippets(&dir, &dir, &["b".to_string()], None, &def).unwrap_err();
+        let err = load_and_concat_snippets(&dir, &dir, &["b".to_string()], None, &def).unwrap_err();
         assert!(err.contains("not found"), "got: {err}");
     }
 
@@ -1281,7 +1288,10 @@ mod tests {
         let custom = ConfigDir::new("custom/dir").unwrap();
 
         let err = load_agent(&dir, &dir, "ghost", Some("my-wf"), &custom, &[], None).unwrap_err();
-        assert!(err.contains("custom/dir/workflows/my-wf/agents/ghost.md"), "got: {err}");
+        assert!(
+            err.contains("custom/dir/workflows/my-wf/agents/ghost.md"),
+            "got: {err}"
+        );
         assert!(err.contains("custom/dir/agents/ghost.md"), "got: {err}");
         assert!(err.contains(".claude/agents/ghost.md"), "got: {err}");
         assert!(err.contains(&dir), "should name the base, got: {err}");
@@ -1294,15 +1304,13 @@ mod tests {
         let dir = tmp.path().to_str().unwrap().to_string();
         let custom = ConfigDir::new("custom/dir").unwrap();
 
-        let err = load_and_concat_snippets(
-            &dir,
-            &dir,
-            &["missing".to_string()],
-            Some("my-wf"),
-            &custom,
-        )
-        .unwrap_err();
-        assert!(err.contains("custom/dir/workflows/my-wf/prompts/missing.md"), "got: {err}");
+        let err =
+            load_and_concat_snippets(&dir, &dir, &["missing".to_string()], Some("my-wf"), &custom)
+                .unwrap_err();
+        assert!(
+            err.contains("custom/dir/workflows/my-wf/prompts/missing.md"),
+            "got: {err}"
+        );
         assert!(err.contains("custom/dir/prompts/missing.md"), "got: {err}");
         assert!(!err.contains(".conductor"), "got: {err}");
     }
