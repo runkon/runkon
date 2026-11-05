@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # show-plan-decisions.sh — list the plan's open decisions before the
-# human_plan_decisions gate (#153, port of devinrosen/conductor-ai#3128). A gate's prompt is fixed text, so the
+# human_review gate after plan (#153, port of devinrosen/conductor-ai#3128). A gate's prompt is fixed text, so the
 # questions go in this step's context, where whoever answers the gate reads them.
 # Env: PRIOR_OUTPUT — the plan step's structured output (task-plan schema).
 # Never fails the step: the gate still runs, pointing at PLAN.md if needed.
