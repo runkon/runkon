@@ -1,5 +1,95 @@
 # Changelog — runkon-flow
 
+## 0.9.0 — Breaking
+
+- **Changed (breaking):** `runkon-flow-executors`' `agent_loader` no longer hard-codes the
+  `.conductor/` directory. Agents and prompt snippets are searched under a configurable
+  root, the new validated `ConfigDir` type, which defaults to `.runkon`
+  (`DEFAULT_CONFIG_DIR`). `load_agent` and `load_and_concat_snippets` take a `&ConfigDir`,
+  and `BuildPromptParams` has a new required `config_dir` field. The search order is
+  unchanged (workflow-local, then shared; worktree before repo). To keep the old layout,
+  pass `ConfigDir::new(".conductor")?`. `ConfigDir::new` rejects empty, absolute, `.` and
+  `..` paths.
+- **Changed:** "agent not found" and "prompt snippet not found" errors list the paths
+  actually searched under the configured root, and the base directories.
+
+- **Changed (breaking):** removed `FlowEngineBuilder::script_env_provider()`, deprecated
+  since 0.7.1-alpha. It had no effect; script steps take their provider from
+  `RunInput.script_env_provider` / `ChildRunInput.script_env_provider`. To upgrade,
+  delete the call.
+- **Added:** `FlowEngine::validate_with(def, &ActionRegistry, &ItemProviderRegistry)`
+  validates a workflow against the registries a host passes to `RunInput` /
+  `ChildRunInput`, using the engine's gate resolvers and workflow resolver. It is the
+  same check `run_workflow` / `run_child` apply, so executors no longer need to be
+  registered on the builder just for pre-flight validation.
+- **Changed (docs):** the ownership split is now documented. The builder holds the
+  engine-wide hooks (gate resolvers, workflow resolver, event sinks); `RunInput` /
+  `ChildRunInput` hold the per-run registries. The builder's `.action()`,
+  `.action_fallback()` and `.item_provider()` serve `validate()` only.
+
+- **Added:** a `require_output` option on `call` and on each `call` inside `parallel`
+  (`require_output = true|false`). When it is in effect and the executor reports
+  `metadata_keys::OUTPUT_WARNING` (the agent ended without a parseable `<<<FLOW_OUTPUT>>>`
+  block), the attempt fails with the warning as its error, and `retries` / `on_fail`
+  (or, in `parallel`, per-call `retries` and `fail_fast` / `min_success`) apply.
+  `require_output` on a `script` step is a parse error.
+- **Added:** `CallNode::require_output` and `ParallelNode::call_require_output`, both
+  serde-defaulted. Code that builds these structs with literals must add
+  `require_output: None` / `call_require_output: HashMap::new()`.
+- **Changed (behaviour):** a step with an output schema (`output = …`, including one
+  from a `do` block or a `parallel` block) now fails by default when its executor
+  reports `OUTPUT_WARNING`. With the bundled executors that happens when the agent
+  produced no result text; before, the step completed with empty markers and the
+  warning as its `step_error`. Set `require_output = false` to keep the old behaviour.
+  Hosts that worked around this in an adapter, such as conductor-ai's
+  `schema_output_missing`, can drop the workaround.
+
+- **Added:** `helpers::flow_output_block_line`, the 1-based line of a result text on
+  which the `<<<FLOW_OUTPUT>>>` block that `find_flow_output_block` returns begins, so
+  hosts no longer recompute it.
+- **Added:** `runkon_flow_executors::{OutputError, AgentError}`. A FLOW_OUTPUT failure
+  is typed as `OutputError::Missing`, `InvalidJson` or `Validation` (the last two carry
+  `block_line`), and `AgentError::Output` wraps it with the number of correction
+  attempts, so hosts can match on the failure instead of on the message. The message
+  text is unchanged.
+- **Changed (breaking):** `parse_structured_output` and `interpret_agent_output` return
+  `OutputError`, and `run_agent_with_output_correction` and
+  `runkon-google`'s `GeminiAgentExecutor::execute` return `AgentError`, instead of
+  `String`. To keep the old behaviour, use `.map_err(|e| EngineError::Workflow(e.to_string()))`
+  or `String::from(e)`.
+
+- **Added:** on resume, the first attempt of an agent step whose earlier attempt failed
+  carries `PriorStepAttempt` (the failed attempt's `child_run_id` and error) in
+  `ActionParams.extensions`, so an executor can reuse that attempt's output instead of
+  re-running it. A run whose only recorded steps failed now resumes with that context
+  too. New metadata key `output_recovered_from_run`.
+- **Fixed:** `InMemoryWorkflowPersistence::update_step` no longer clears a step's
+  `child_run_id` when the update has none, matching the SQLite backend.
+
+- **Fixed:** a `parallel` block now saves each branch's row (status, `ended_at`,
+  `context_out`, `markers_out`, `structured_output`) when that branch finishes, instead
+  of after the slowest sibling. A host recovery pass, such as conductor's
+  `recover_stuck_steps`, can no longer mark finished branches as completed with NULL
+  outputs and one shared `ended_at`. In addition, when
+  `SqliteWorkflowPersistence::update_step` finds a step already `completed` with NULL
+  outputs, it fills them in from the engine's write and logs a `warn`, where it used to
+  drop the write at `debug`.
+
+- **Fixed:** the canonical SQLite schema's `workflow_run_steps.role` CHECK now accepts
+  every role the engine writes (`actor`, `reviewer`, `gate`, `workflow`, `script`,
+  `foreach`, plus the legacy `agent`). Before, a host on runkon's own schema could not
+  record a `call`, `parallel` or `script` step. The column default stays `'agent'`.
+- **Breaking:** `create_canonical_schema` now creates `runkon_flow_schema_versions`. When
+  it finds the pre-0.9 role CHECK, it rebuilds `workflow_run_steps` in place, keeping
+  rows, indexes and host-added columns. That rebuild must run outside an open
+  transaction and returns an error otherwise. Tables with a different CHECK (such as
+  conductor's) are left untouched. `runkon_flow_schema_versions` is not part of
+  `CANONICAL_SCHEMA_DDL`, so hosts that mirror the const get a different schema from hosts
+  that call the function, and its name differs from the `runkon_flow_schema_history`
+  table older conductor-ai databases carry from refinery, so the two never collide. Hosts
+  that mirror `CANONICAL_SCHEMA_DDL` in their own migrations must widen the CHECK
+  themselves. #131 will decide how canonical schema changes reach hosts.
+
 ## 0.8.2 — Breaking
 
 - **Fixed:** a waiting gate now polls its registered `GateResolver`. `Approved` and
