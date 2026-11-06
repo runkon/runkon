@@ -217,16 +217,43 @@ fn serialize_gate_selections(selections: Option<&[String]>) -> Result<Option<Str
 // Canonical schema DDL
 // ---------------------------------------------------------------------------
 
+/// The single source of truth for the allowed `workflow_run_steps.role` values.
+/// A macro, not a const, because `concat!` only accepts literals.
+macro_rules! step_roles {
+    () => {
+        "'actor','reviewer','gate','workflow','script','foreach','agent'"
+    };
+}
+
+/// The role CHECK clause, built from `step_roles!` so its shape lives in one place.
+macro_rules! role_check {
+    () => {
+        concat!("CHECK (role IN (", step_roles!(), "))")
+    };
+}
+
 /// Engine-essential DDL for the three canonical workflow tables and their
 /// indexes. Column set mirrors [`RUN_COLUMNS`] and [`STEP_COLUMNS`] exactly.
 /// Conductor-specific extension columns (`worktree_id`, `ticket_id`, etc.) and
 /// FK references to conductor-only tables are intentionally excluded so the DDL
 /// is portable to non-conductor harnesses.
 ///
+/// The `workflow_run_steps.role` CHECK admits every role the engine writes. The
+/// allowed roles are listed once, in `step_roles!`, and this text is built from it:
+#[doc = concat!("`", step_roles!(), "`.")]
+///
+/// `actor` is call and parallel agent steps, `reviewer` is dry-run gates, and
+/// `agent` is the legacy column default. Hosts that mirror this DDL in their own
+/// migrations must widen an older CHECK themselves; [`create_canonical_schema`]
+/// does it for tables it finds in the pre-0.9 form. The DDL does not include
+/// `runkon_flow_schema_versions`, which [`create_canonical_schema`] creates in
+/// addition (see its docs); hosts that mirror this const don't get that table.
+///
 /// Exposed as a `pub const` for harnesses that prefer to mirror it in an
 /// explicit migration file rather than calling [`create_canonical_schema`] at
 /// runtime.
-pub const CANONICAL_SCHEMA_DDL: &str = "
+pub const CANONICAL_SCHEMA_DDL: &str = concat!(
+    "
 CREATE TABLE IF NOT EXISTS workflow_runs (
     id                                TEXT    PRIMARY KEY,
     workflow_name                     TEXT    NOT NULL,
@@ -260,7 +287,9 @@ CREATE TABLE IF NOT EXISTS workflow_run_steps (
     workflow_run_id   TEXT    NOT NULL REFERENCES workflow_runs(id),
     step_name         TEXT    NOT NULL DEFAULT '',
     role              TEXT    NOT NULL DEFAULT 'agent'
-                          CHECK (role IN ('agent','gate','foreach','workflow')),
+                          ",
+    role_check!(),
+    ",
     can_commit        INTEGER NOT NULL DEFAULT 0,
     condition_expr    TEXT,
     status            TEXT    NOT NULL DEFAULT 'pending'
@@ -327,6 +356,26 @@ CREATE INDEX IF NOT EXISTS idx_workflow_run_steps_child_run_id
 
 CREATE INDEX IF NOT EXISTS idx_fan_out_items_step
     ON workflow_run_step_fan_out_items(step_run_id, status);
+"
+);
+
+/// The role CHECK clause in [`CANONICAL_SCHEMA_DDL`].
+const ROLE_CHECK: &str = role_check!();
+
+/// The role CHECK clause runkon's DDL wrote before #169. SQLite stores the CREATE
+/// statement verbatim, so this exact text identifies a legacy runkon-made table.
+const LEGACY_ROLE_CHECK: &str = "CHECK (role IN ('agent','gate','foreach','workflow'))";
+
+/// Records which canonical schema changes have been applied. Kept out of
+/// [`CANONICAL_SCHEMA_DDL`] so hosts that mirror the public DDL don't get a table
+/// they never fill. A stopgap until #131 settles how canonical schema changes
+/// reach hosts.
+const SCHEMA_HISTORY_DDL: &str = "
+CREATE TABLE IF NOT EXISTS runkon_flow_schema_versions (
+    version     INTEGER PRIMARY KEY,
+    description TEXT    NOT NULL,
+    applied_at  TEXT    NOT NULL DEFAULT (datetime('now'))
+);
 ";
 
 /// Create the canonical workflow tables (`workflow_runs`,
@@ -336,6 +385,12 @@ CREATE INDEX IF NOT EXISTS idx_fan_out_items_step
 /// Idempotent — uses `CREATE TABLE IF NOT EXISTS`. Safe to call against an
 /// already-populated DB (e.g. conductor's, where the tables are managed by
 /// conductor's own migrations 020/021).
+///
+/// It also creates `runkon_flow_schema_versions`, and rebuilds
+/// `workflow_run_steps` in place when it finds the pre-0.9 role CHECK (keeping
+/// rows, host-added columns and indexes). That rebuild needs
+/// `PRAGMA foreign_keys` off, so it returns an error if called inside an open
+/// transaction. Tables with a different CHECK (conductor's) are left untouched.
 ///
 /// Harnesses without their own migration runner can call this as their sole
 /// initial setup. Harnesses with a migration runner can either call this
@@ -355,7 +410,117 @@ CREATE INDEX IF NOT EXISTS idx_fan_out_items_step
 /// # }
 /// ```
 pub fn create_canonical_schema(conn: &Connection) -> Result<(), EngineError> {
-    conn.execute_batch(CANONICAL_SCHEMA_DDL).map_err(db_err)
+    conn.execute_batch(CANONICAL_SCHEMA_DDL).map_err(db_err)?;
+    conn.execute_batch(SCHEMA_HISTORY_DDL).map_err(db_err)?;
+    record_version(conn, 1, "canonical schema")?;
+    migrate_v2_widen_step_role_check(conn)
+}
+
+fn record_version(conn: &Connection, version: i64, description: &str) -> Result<(), EngineError> {
+    conn.execute(
+        "INSERT OR IGNORE INTO runkon_flow_schema_versions (version, description) VALUES (?1, ?2)",
+        rusqlite::params![version, description],
+    )
+    .map(|_| ())
+    .map_err(db_err)
+}
+
+const V2_DESCRIPTION: &str = "widen workflow_run_steps.role CHECK (#169)";
+
+/// v2: rebuild a legacy runkon-made `workflow_run_steps` so its role CHECK admits
+/// the roles the engine writes. The new table is made from the stored CREATE SQL
+/// with only the CHECK clause rewritten, so host-added columns, indexes and
+/// triggers survive. Tables without the legacy CHECK are not touched.
+fn migrate_v2_widen_step_role_check(conn: &Connection) -> Result<(), EngineError> {
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'workflow_run_steps'",
+            [],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(db_err)?;
+    let Some(stored) = stored.filter(|sql| sql.contains(LEGACY_ROLE_CHECK)) else {
+        return record_version(conn, 2, V2_DESCRIPTION);
+    };
+    if !conn.is_autocommit() {
+        return Err(EngineError::Persistence(
+            "create_canonical_schema must rebuild workflow_run_steps to widen the role CHECK \
+             (#169), which cannot run inside a transaction; call it outside one"
+                .to_string(),
+        ));
+    }
+    let fk_was_on: bool = conn
+        .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+        .map_err(db_err)?;
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(db_err)?;
+    let result = rebuild_steps_table(conn, &stored);
+    if fk_was_on {
+        let restored = conn
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(db_err);
+        match (result, restored) {
+            (Err(e), Err(r)) => Err(EngineError::Persistence(format!(
+                "{e}; additionally failed to re-enable foreign_keys: {r}"
+            ))),
+            (Err(e), Ok(())) => Err(e),
+            (Ok(()), r) => r,
+        }
+    } else {
+        result
+    }
+}
+
+fn rebuild_steps_table(conn: &Connection, stored: &str) -> Result<(), EngineError> {
+    const TABLE: &str = "workflow_run_steps";
+    let header = stored.find(TABLE).ok_or_else(|| {
+        EngineError::Persistence("workflow_run_steps CREATE statement has no table name".into())
+    })?;
+    let new_sql = format!(
+        "{}workflow_run_steps_new{}",
+        &stored[..header],
+        &stored[header + TABLE.len()..]
+    )
+    .replacen(LEGACY_ROLE_CHECK, ROLE_CHECK, 1);
+
+    let tx = conn.unchecked_transaction().map_err(db_err)?;
+    let dependents: Vec<String> = {
+        let mut stmt = tx
+            .prepare(
+                "SELECT sql FROM sqlite_master WHERE tbl_name = 'workflow_run_steps' \
+                 AND type IN ('index','trigger') AND sql IS NOT NULL",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |r| r.get(0))
+            .map_err(db_err)?
+            .collect::<rusqlite::Result<Vec<String>>>()
+            .map_err(db_err)?;
+        rows
+    };
+    tx.execute_batch(&new_sql).map_err(db_err)?;
+    tx.execute_batch(
+        "INSERT INTO workflow_run_steps_new SELECT * FROM workflow_run_steps;
+         DROP TABLE workflow_run_steps;
+         ALTER TABLE workflow_run_steps_new RENAME TO workflow_run_steps;",
+    )
+    .map_err(db_err)?;
+    for sql in &dependents {
+        tx.execute_batch(sql).map_err(db_err)?;
+    }
+    let violations: i64 = tx
+        .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+            r.get(0)
+        })
+        .map_err(db_err)?;
+    if violations > 0 {
+        return Err(EngineError::Persistence(format!(
+            "workflow_run_steps rebuild left {violations} foreign key violation(s); rolled back"
+        )));
+    }
+    record_version(&tx, 2, V2_DESCRIPTION)?;
+    tx.commit().map_err(db_err)
 }
 
 // ---------------------------------------------------------------------------
@@ -1177,8 +1342,300 @@ fn validate_gate_selections(
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use super::{create_canonical_schema, SqliteWorkflowPersistence};
+    use super::{
+        create_canonical_schema, SqliteWorkflowPersistence, CANONICAL_SCHEMA_DDL,
+        LEGACY_ROLE_CHECK, ROLE_CHECK,
+    };
+    use crate::engine_error::EngineError;
     use crate::traits::persistence::WorkflowPersistence;
+
+    fn steps_sql(conn: &rusqlite::Connection) -> String {
+        conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE name = 'workflow_run_steps'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    fn history_versions(conn: &rusqlite::Connection) -> Vec<i64> {
+        let mut stmt = conn
+            .prepare("SELECT version FROM runkon_flow_schema_versions ORDER BY version")
+            .unwrap();
+        stmt.query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    }
+
+    /// A DB holding the pre-#169 canonical tables, with a run, an `agent` step and a
+    /// fan-out item that references the step. Foreign keys are ON.
+    fn legacy_db() -> rusqlite::Connection {
+        assert!(CANONICAL_SCHEMA_DDL.contains(ROLE_CHECK));
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(&CANONICAL_SCHEMA_DDL.replace(ROLE_CHECK, LEGACY_ROLE_CHECK))
+            .unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             INSERT INTO workflow_runs (id, workflow_name) VALUES ('r1', 'wf');
+             INSERT INTO workflow_run_steps (id, workflow_run_id, step_name, role)
+                 VALUES ('s1', 'r1', 'old', 'agent');
+             INSERT INTO workflow_run_step_fan_out_items (id, step_run_id, item_type, item_id)
+                 VALUES ('f1', 's1', 't', 'i');",
+        )
+        .unwrap();
+        conn
+    }
+
+    /// A database that already has a `runkon_flow_schema_history` table in the
+    /// refinery shape (`version, name, applied_on, checksum`), as conductor-ai's
+    /// does from its earlier refinery migrations, must not stop
+    /// `create_canonical_schema`: its version table has a different name.
+    #[test]
+    fn create_canonical_schema_ignores_a_refinery_history_table() {
+        let conn = legacy_db();
+        conn.execute_batch(
+            "CREATE TABLE runkon_flow_schema_history (
+                 version INT4 PRIMARY KEY, name VARCHAR(255),
+                 applied_on VARCHAR(255), checksum VARCHAR(255));
+             INSERT INTO runkon_flow_schema_history VALUES
+                 (1, 'create_workflow_tables', '2026-05-07T03:09:17Z', '753259979722612854');",
+        )
+        .unwrap();
+        create_canonical_schema(&conn).unwrap();
+        assert!(history_versions(&conn).contains(&2));
+        let refinery_rows: i64 = conn
+            .query_row("SELECT count(*) FROM runkon_flow_schema_history", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            refinery_rows, 1,
+            "the host's refinery table is left as it was"
+        );
+    }
+
+    #[test]
+    fn every_engine_step_role_passes_the_role_check() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        create_canonical_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO workflow_runs (id, workflow_name) VALUES ('r', 'wf')",
+            [],
+        )
+        .unwrap();
+        let roles = ROLE_CHECK
+            .split_once("IN (")
+            .and_then(|(_, rest)| rest.strip_suffix("))"))
+            .expect("ROLE_CHECK has the form CHECK (role IN (...))")
+            .split(',')
+            .map(|r| r.trim_matches('\''))
+            .collect::<Vec<_>>();
+        assert!(roles.len() >= 7, "{roles:?}");
+        for role in roles {
+            conn.execute(
+                "INSERT INTO workflow_run_steps (id, workflow_run_id, step_name, role) \
+                 VALUES (?1, 'r', ?1, ?1)",
+                [role],
+            )
+            .unwrap_or_else(|e| panic!("role {role} must pass the CHECK: {e}"));
+        }
+        let err = conn
+            .execute(
+                "INSERT INTO workflow_run_steps (id, workflow_run_id, step_name, role) \
+                 VALUES ('b', 'r', 'b', 'bogus')",
+                [],
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("CHECK"), "{err}");
+    }
+
+    #[test]
+    fn create_canonical_schema_rebuilds_a_pre_169_steps_table() {
+        let conn = legacy_db();
+        create_canonical_schema(&conn).unwrap();
+
+        assert!(steps_sql(&conn).contains(ROLE_CHECK));
+        let kept: String = conn
+            .query_row(
+                "SELECT role FROM workflow_run_steps WHERE id = 's1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, "agent");
+        let fan_out: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM workflow_run_step_fan_out_items",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fan_out, 1);
+        conn.execute(
+            "INSERT INTO workflow_run_steps (id, workflow_run_id, step_name, role) \
+             VALUES ('s2', 'r1', 'new', 'actor')",
+            [],
+        )
+        .unwrap();
+        for idx in [
+            "idx_workflow_run_steps_run",
+            "idx_steps_status_gate",
+            "idx_workflow_run_steps_child_run_id",
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                    [idx],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "index {idx} must survive the rebuild");
+        }
+        let fk: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fk, 1, "foreign_keys must be restored");
+        let violations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(violations, 0);
+        assert_eq!(history_versions(&conn), vec![1, 2]);
+    }
+
+    #[test]
+    fn create_canonical_schema_rebuild_is_idempotent() {
+        let conn = legacy_db();
+        create_canonical_schema(&conn).unwrap();
+        let sql = steps_sql(&conn);
+        create_canonical_schema(&conn).unwrap();
+        assert_eq!(steps_sql(&conn), sql);
+        assert_eq!(history_versions(&conn), vec![1, 2]);
+    }
+
+    /// `legacy_db()` plus a host-added column and a trigger. `ALTER TABLE ADD COLUMN`
+    /// appends to the stored SQL, so the legacy CHECK is still there and the rebuild runs.
+    fn legacy_db_with_host_column_and_trigger() -> rusqlite::Connection {
+        let conn = legacy_db();
+        conn.execute_batch(
+            "ALTER TABLE workflow_run_steps ADD COLUMN worktree_id TEXT;
+             UPDATE workflow_run_steps SET worktree_id = 'wt-1' WHERE id = 's1';
+             CREATE TRIGGER steps_mark AFTER INSERT ON workflow_run_steps
+             BEGIN UPDATE workflow_run_steps SET result_text = 'trigger-ran' WHERE id = NEW.id; END;",
+        )
+        .unwrap();
+        assert!(steps_sql(&conn).contains(LEGACY_ROLE_CHECK));
+        conn
+    }
+
+    #[test]
+    fn rebuild_keeps_host_columns_and_triggers() {
+        let conn = legacy_db_with_host_column_and_trigger();
+        create_canonical_schema(&conn).unwrap();
+
+        assert!(steps_sql(&conn).contains(ROLE_CHECK));
+        let wt: String = conn
+            .query_row(
+                "SELECT worktree_id FROM workflow_run_steps WHERE id = 's1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(wt, "wt-1");
+        conn.execute(
+            "INSERT INTO workflow_run_steps (id, workflow_run_id, role, worktree_id) \
+             VALUES ('s2', 'r1', 'actor', 'wt-2')",
+            [],
+        )
+        .unwrap();
+        let text: String = conn
+            .query_row(
+                "SELECT result_text FROM workflow_run_steps WHERE id = 's2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(text, "trigger-ran", "the trigger must survive the rebuild");
+    }
+
+    #[test]
+    fn rebuild_leaves_foreign_keys_off_when_they_were_off() {
+        let conn = legacy_db_with_host_column_and_trigger();
+        conn.execute_batch("PRAGMA foreign_keys = OFF;").unwrap();
+        create_canonical_schema(&conn).unwrap();
+        let fk: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(fk, 0);
+        assert!(steps_sql(&conn).contains(ROLE_CHECK));
+    }
+
+    #[test]
+    fn rebuild_rolls_back_on_foreign_key_violation() {
+        let conn = legacy_db();
+        // An orphan fan-out item: foreign_keys is ON but the row was inserted before
+        // the constraint was enforced.
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             INSERT INTO workflow_run_step_fan_out_items (id, step_run_id, item_type, item_id)
+                 VALUES ('orphan', 'missing', 't', 'i2');
+             PRAGMA foreign_keys = ON;",
+        )
+        .unwrap();
+        let err = create_canonical_schema(&conn).unwrap_err();
+        assert!(err.to_string().contains("foreign key violation"), "{err}");
+        assert!(steps_sql(&conn).contains(LEGACY_ROLE_CHECK), "rolled back");
+        let fk: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            fk, 1,
+            "foreign_keys must be restored after a failed rebuild"
+        );
+        assert_eq!(history_versions(&conn), vec![1]);
+    }
+
+    #[test]
+    fn create_canonical_schema_leaves_a_host_owned_steps_table_alone() {
+        // A conductor-shaped table: canonical columns, a different role CHECK and an
+        // extra host column.
+        let host_ddl = CANONICAL_SCHEMA_DDL
+            .replace(ROLE_CHECK, "CHECK (role IN ('actor','reviewer','gate'))")
+            .replace(
+                "step_error        TEXT\n",
+                "step_error        TEXT,\n    worktree_id       TEXT\n",
+            );
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(&host_ddl).unwrap();
+        conn.execute_batch(
+            "INSERT INTO workflow_runs (id, workflow_name) VALUES ('r', 'wf');
+             INSERT INTO workflow_run_steps (id, workflow_run_id, role, worktree_id)
+                 VALUES ('s', 'r', 'actor', 'wt-1');",
+        )
+        .unwrap();
+        let before = steps_sql(&conn);
+        create_canonical_schema(&conn).unwrap();
+        assert_eq!(steps_sql(&conn), before);
+        let wt: String = conn
+            .query_row("SELECT worktree_id FROM workflow_run_steps", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(wt, "wt-1");
+    }
+
+    #[test]
+    fn create_canonical_schema_refuses_rebuild_inside_a_transaction() {
+        let conn = legacy_db();
+        let before = steps_sql(&conn);
+        conn.execute_batch("BEGIN").unwrap();
+        let err = create_canonical_schema(&conn).unwrap_err();
+        assert!(matches!(err, EngineError::Persistence(_)), "{err:?}");
+        conn.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(steps_sql(&conn), before);
+    }
 
     #[test]
     fn create_canonical_schema_creates_three_tables() {
@@ -1205,6 +1662,10 @@ mod tests {
         assert!(
             tables.contains(&"workflow_runs".to_string()),
             "workflow_runs table must exist"
+        );
+        assert!(
+            tables.contains(&"runkon_flow_schema_versions".to_string()),
+            "runkon_flow_schema_versions table must exist"
         );
 
         let mut idx_stmt = conn
@@ -1381,8 +1842,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            table_count, 3,
-            "table count must remain 3 after second call"
+            table_count, 4,
+            "table count must remain 4 (3 canonical + schema history) after second call"
         );
     }
 
