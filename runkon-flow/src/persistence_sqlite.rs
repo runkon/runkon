@@ -225,6 +225,13 @@ macro_rules! step_roles {
     };
 }
 
+/// The role CHECK clause, built from `step_roles!` so its shape lives in one place.
+macro_rules! role_check {
+    () => {
+        concat!("CHECK (role IN (", step_roles!(), "))")
+    };
+}
+
 /// Engine-essential DDL for the three canonical workflow tables and their
 /// indexes. Column set mirrors [`RUN_COLUMNS`] and [`STEP_COLUMNS`] exactly.
 /// Conductor-specific extension columns (`worktree_id`, `ticket_id`, etc.) and
@@ -280,9 +287,9 @@ CREATE TABLE IF NOT EXISTS workflow_run_steps (
     workflow_run_id   TEXT    NOT NULL REFERENCES workflow_runs(id),
     step_name         TEXT    NOT NULL DEFAULT '',
     role              TEXT    NOT NULL DEFAULT 'agent'
-                          CHECK (role IN (",
-    step_roles!(),
-    ")),
+                          ",
+    role_check!(),
+    ",
     can_commit        INTEGER NOT NULL DEFAULT 0,
     condition_expr    TEXT,
     status            TEXT    NOT NULL DEFAULT 'pending'
@@ -353,7 +360,7 @@ CREATE INDEX IF NOT EXISTS idx_fan_out_items_step
 );
 
 /// The role CHECK clause in [`CANONICAL_SCHEMA_DDL`].
-const ROLE_CHECK: &str = concat!("CHECK (role IN (", step_roles!(), "))");
+const ROLE_CHECK: &str = role_check!();
 
 /// The role CHECK clause runkon's DDL wrote before #169. SQLite stores the CREATE
 /// statement verbatim, so this exact text identifies a legacy runkon-made table.
@@ -1480,23 +1487,18 @@ mod tests {
         assert_eq!(history_versions(&conn), vec![1, 2]);
     }
 
+    /// `legacy_db()` plus a host-added column and a trigger. `ALTER TABLE ADD COLUMN`
+    /// appends to the stored SQL, so the legacy CHECK is still there and the rebuild runs.
     fn legacy_db_with_host_column_and_trigger() -> rusqlite::Connection {
-        let ddl = CANONICAL_SCHEMA_DDL
-            .replace(ROLE_CHECK, LEGACY_ROLE_CHECK)
-            .replace(
-                "step_error        TEXT\n",
-                "step_error        TEXT,\n    worktree_id       TEXT\n",
-            );
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(&ddl).unwrap();
+        let conn = legacy_db();
         conn.execute_batch(
-            "CREATE TRIGGER steps_mark AFTER INSERT ON workflow_run_steps
-             BEGIN UPDATE workflow_run_steps SET result_text = 'trigger-ran' WHERE id = NEW.id; END;
-             INSERT INTO workflow_runs (id, workflow_name) VALUES ('r1', 'wf');
-             INSERT INTO workflow_run_steps (id, workflow_run_id, role, worktree_id)
-                 VALUES ('s1', 'r1', 'agent', 'wt-1');",
+            "ALTER TABLE workflow_run_steps ADD COLUMN worktree_id TEXT;
+             UPDATE workflow_run_steps SET worktree_id = 'wt-1' WHERE id = 's1';
+             CREATE TRIGGER steps_mark AFTER INSERT ON workflow_run_steps
+             BEGIN UPDATE workflow_run_steps SET result_text = 'trigger-ran' WHERE id = NEW.id; END;",
         )
         .unwrap();
+        assert!(steps_sql(&conn).contains(LEGACY_ROLE_CHECK));
         conn
     }
 
