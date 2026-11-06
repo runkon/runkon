@@ -1712,8 +1712,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            table_count, 3,
-            "table count must remain 3 after second call"
+            table_count, 4,
+            "table count must remain 4 (3 canonical + schema history) after second call"
         );
     }
 
