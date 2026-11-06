@@ -18,7 +18,7 @@ Two ways to invoke Claude inside a `runkon-flow` workflow, both implementing `ru
 
 ```toml
 [dependencies]
-runkon-anthropic = "0.8.2-alpha"
+runkon-anthropic = "0.9.0-alpha"
 ```
 
 Optional features:

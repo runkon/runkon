@@ -1,5 +1,27 @@
 # Changelog — runkon-anthropic
 
+## 0.9.0 — Breaking
+
+- **Changed (breaking):** `ClaudeAgentContext` and `runkon-google`'s `GeminiAgentContext`
+  gain a required `config_dir: ConfigDir` field, the root under which agents and prompt
+  snippets are searched. Set it to `ConfigDir::new(".conductor")` to keep the old layout;
+  `ConfigDir::default()` is `.runkon`.
+
+- **Changed (breaking):** `ClaudeAgentExecutor::execute` returns
+  `runkon_flow_executors::AgentError` instead of `String`. `AgentError::Output` marks a
+  FLOW_OUTPUT parse or validation failure and carries an `OutputError` with the line
+  where the block starts; every other failure is `AgentError::Other`. The message text
+  is unchanged. A host that mapped the error with `.map_err(EngineError::Workflow)`
+  must use `.map_err(|e| EngineError::Workflow(e.to_string()))`.
+
+- **Changed (breaking):** `ClaudeAgentParams` and `GeminiAgentParams` have a new
+  `prior_run_id` field. When a resumed agent step's earlier attempt completed but failed
+  output validation, the executor re-validates that run's output against the current
+  schema and, if it still fails, resumes that session for a corrected `FLOW_OUTPUT` block.
+  It no longer re-runs the agent from the start. Hosts pass
+  `params.extensions.get::<PriorStepAttempt>().map(|p| p.child_run_id.clone())`, or `None`
+  to keep the old behaviour.
+
 ## 0.7.2 — Fixed
 
 - **An agent that ends with a `result` event is reported as finished even if the host
