@@ -246,7 +246,7 @@ macro_rules! role_check {
 /// `agent` is the legacy column default. Hosts that mirror this DDL in their own
 /// migrations must widen an older CHECK themselves; [`create_canonical_schema`]
 /// does it for tables it finds in the pre-0.9 form. The DDL does not include
-/// `runkon_flow_schema_history`, which [`create_canonical_schema`] creates in
+/// `runkon_flow_schema_versions`, which [`create_canonical_schema`] creates in
 /// addition (see its docs); hosts that mirror this const don't get that table.
 ///
 /// Exposed as a `pub const` for harnesses that prefer to mirror it in an
@@ -371,7 +371,7 @@ const LEGACY_ROLE_CHECK: &str = "CHECK (role IN ('agent','gate','foreach','workf
 /// they never fill. A stopgap until #131 settles how canonical schema changes
 /// reach hosts.
 const SCHEMA_HISTORY_DDL: &str = "
-CREATE TABLE IF NOT EXISTS runkon_flow_schema_history (
+CREATE TABLE IF NOT EXISTS runkon_flow_schema_versions (
     version     INTEGER PRIMARY KEY,
     description TEXT    NOT NULL,
     applied_at  TEXT    NOT NULL DEFAULT (datetime('now'))
@@ -386,7 +386,7 @@ CREATE TABLE IF NOT EXISTS runkon_flow_schema_history (
 /// already-populated DB (e.g. conductor's, where the tables are managed by
 /// conductor's own migrations 020/021).
 ///
-/// It also creates `runkon_flow_schema_history`, and rebuilds
+/// It also creates `runkon_flow_schema_versions`, and rebuilds
 /// `workflow_run_steps` in place when it finds the pre-0.9 role CHECK (keeping
 /// rows, host-added columns and indexes). That rebuild needs
 /// `PRAGMA foreign_keys` off, so it returns an error if called inside an open
@@ -418,7 +418,7 @@ pub fn create_canonical_schema(conn: &Connection) -> Result<(), EngineError> {
 
 fn record_version(conn: &Connection, version: i64, description: &str) -> Result<(), EngineError> {
     conn.execute(
-        "INSERT OR IGNORE INTO runkon_flow_schema_history (version, description) VALUES (?1, ?2)",
+        "INSERT OR IGNORE INTO runkon_flow_schema_versions (version, description) VALUES (?1, ?2)",
         rusqlite::params![version, description],
     )
     .map(|_| ())
@@ -1360,7 +1360,7 @@ mod tests {
 
     fn history_versions(conn: &rusqlite::Connection) -> Vec<i64> {
         let mut stmt = conn
-            .prepare("SELECT version FROM runkon_flow_schema_history ORDER BY version")
+            .prepare("SELECT version FROM runkon_flow_schema_versions ORDER BY version")
             .unwrap();
         stmt.query_map([], |r| r.get(0))
             .unwrap()
@@ -1385,6 +1385,34 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    /// A database that already has a `runkon_flow_schema_history` table in the
+    /// refinery shape (`version, name, applied_on, checksum`), as conductor-ai's
+    /// does from its earlier refinery migrations, must not stop
+    /// `create_canonical_schema`: its version table has a different name.
+    #[test]
+    fn create_canonical_schema_ignores_a_refinery_history_table() {
+        let conn = legacy_db();
+        conn.execute_batch(
+            "CREATE TABLE runkon_flow_schema_history (
+                 version INT4 PRIMARY KEY, name VARCHAR(255),
+                 applied_on VARCHAR(255), checksum VARCHAR(255));
+             INSERT INTO runkon_flow_schema_history VALUES
+                 (1, 'create_workflow_tables', '2026-05-07T03:09:17Z', '753259979722612854');",
+        )
+        .unwrap();
+        create_canonical_schema(&conn).unwrap();
+        assert!(history_versions(&conn).contains(&2));
+        let refinery_rows: i64 = conn
+            .query_row("SELECT count(*) FROM runkon_flow_schema_history", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            refinery_rows, 1,
+            "the host's refinery table is left as it was"
+        );
     }
 
     #[test]
@@ -1636,8 +1664,8 @@ mod tests {
             "workflow_runs table must exist"
         );
         assert!(
-            tables.contains(&"runkon_flow_schema_history".to_string()),
-            "runkon_flow_schema_history table must exist"
+            tables.contains(&"runkon_flow_schema_versions".to_string()),
+            "runkon_flow_schema_versions table must exist"
         );
 
         let mut idx_stmt = conn
