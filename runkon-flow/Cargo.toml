@@ -98,5 +98,9 @@ name = "resume_exhausted_child_loop"
 required-features = ["test-utils"]
 
 [[test]]
+name = "sqlite_canonical_schema"
+required-features = ["test-utils", "sqlite"]
+
+[[test]]
 name = "resume_prior_output"
 required-features = ["test-utils"]
