@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use runkon_flow::dsl::{
-    AgentRef, GateNode, ParallelNode, ScriptNode, WorkflowNode, ApprovalMode, OnTimeout,
+    AgentRef, ApprovalMode, GateNode, OnTimeout, ParallelNode, ScriptNode, WorkflowNode,
 };
 use runkon_flow::status::WorkflowStepStatus;
 use runkon_flow::traits::action_executor::ActionRegistry;
@@ -119,9 +119,10 @@ fn run_workflow(
         run.id,
     );
     state.action_registry = Arc::new(ActionRegistry::from_executors(
-        named_executors(["alpha", "beta", "gamma"].map(|n| {
-            Box::new(MockExecutor::new(n)) as Box<dyn common::ActionExecutor>
-        })),
+        named_executors(
+            ["alpha", "beta", "gamma"]
+                .map(|n| Box::new(MockExecutor::new(n)) as Box<dyn common::ActionExecutor>),
+        ),
         None,
     ));
     state.workflow_name = wf_name.to_string();

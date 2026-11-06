@@ -449,7 +449,9 @@ fn migrate_v2_widen_step_role_check(conn: &Connection) -> Result<(), EngineError
         .map_err(db_err)?;
     let result = rebuild_steps_table(conn, &stored);
     if fk_was_on {
-        let restored = conn.execute_batch("PRAGMA foreign_keys = ON;").map_err(db_err);
+        let restored = conn
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(db_err);
         result.and(restored)
     } else {
         result
@@ -1375,8 +1377,11 @@ mod tests {
     fn every_engine_step_role_passes_the_role_check() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         create_canonical_schema(&conn).unwrap();
-        conn.execute("INSERT INTO workflow_runs (id, workflow_name) VALUES ('r', 'wf')", [])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO workflow_runs (id, workflow_name) VALUES ('r', 'wf')",
+            [],
+        )
+        .unwrap();
         for role in [
             "actor", "reviewer", "gate", "workflow", "script", "foreach", "agent",
         ] {
@@ -1404,11 +1409,19 @@ mod tests {
 
         assert!(steps_sql(&conn).contains(ROLE_CHECK));
         let kept: String = conn
-            .query_row("SELECT role FROM workflow_run_steps WHERE id = 's1'", [], |r| r.get(0))
+            .query_row(
+                "SELECT role FROM workflow_run_steps WHERE id = 's1'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(kept, "agent");
         let fan_out: i64 = conn
-            .query_row("SELECT COUNT(*) FROM workflow_run_step_fan_out_items", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM workflow_run_step_fan_out_items",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(fan_out, 1);
         conn.execute(
@@ -1431,10 +1444,14 @@ mod tests {
                 .unwrap();
             assert_eq!(n, 1, "index {idx} must survive the rebuild");
         }
-        let fk: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
+        let fk: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(fk, 1, "foreign_keys must be restored");
         let violations: i64 = conn
-            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(violations, 0);
         assert_eq!(history_versions(&conn), vec![1, 2]);
@@ -1472,7 +1489,9 @@ mod tests {
         create_canonical_schema(&conn).unwrap();
         assert_eq!(steps_sql(&conn), before);
         let wt: String = conn
-            .query_row("SELECT worktree_id FROM workflow_run_steps", [], |r| r.get(0))
+            .query_row("SELECT worktree_id FROM workflow_run_steps", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(wt, "wt-1");
     }
