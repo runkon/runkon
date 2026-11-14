@@ -20,6 +20,21 @@ enum ScriptAttempt {
     Failed(String),
 }
 
+/// Join a pipe reader thread and decode its bytes as UTF-8. A panicked reader
+/// or invalid UTF-8 is logged and yields an empty string.
+fn join_pipe(handle: std::thread::JoinHandle<Vec<u8>>, stream_name: &str) -> String {
+    match handle.join() {
+        Ok(buf) => String::from_utf8(buf).unwrap_or_else(|e| {
+            tracing::warn!("script: {stream_name} is not valid UTF-8: {e}");
+            String::new()
+        }),
+        Err(_) => {
+            tracing::warn!("script: {stream_name} reader thread panicked");
+            String::new()
+        }
+    }
+}
+
 /// Spawn a reader thread BEFORE waiting for the child to avoid pipe deadlock.
 /// If the child writes more than the OS pipe buffer size to either stream
 /// while the parent is blocked in wait(), the child would hang forever.
@@ -119,36 +134,12 @@ fn run_script_once(
     };
     let duration_ms = start.elapsed().as_millis() as i64;
 
-    let stdout = match stdout_handle.join() {
-        Ok(buf) => match String::from_utf8(buf) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("script: stdout is not valid UTF-8: {e}");
-                String::new()
-            }
-        },
-        Err(_) => {
-            tracing::warn!("script: stdout reader thread panicked");
-            String::new()
-        }
-    };
+    let stdout = join_pipe(stdout_handle, "stdout");
 
     if !status.success() {
         let exit_code = status.code().unwrap_or(-1);
 
-        let stderr = match stderr_handle.join() {
-            Ok(buf) => match String::from_utf8(buf) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!("script: stderr is not valid UTF-8: {e}");
-                    String::new()
-                }
-            },
-            Err(_) => {
-                tracing::warn!("script: stderr reader thread panicked");
-                String::new()
-            }
-        };
+        let stderr = join_pipe(stderr_handle, "stderr");
 
         let captured_stderr = stderr.trim().chars().take(2000).collect::<String>();
 
@@ -266,20 +257,8 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
             super::insert_step_record(state, &node.name, "script", pos, iteration, Some(0))?;
         let err_msg = format!("Script '{}': {e}", node.name);
         tracing::warn!("{}", err_msg);
-        let generation = state.expect_lease_generation();
-        state
-            .persistence
-            .update_step(&step_id, StepUpdate::failed(generation, err_msg.clone(), 0))?;
-        return handle_on_fail(
-            state,
-            node.name.clone(),
-            &node.name,
-            &node.on_fail,
-            err_msg,
-            node.retries,
-            iteration,
-            1,
-        );
+        mark_attempt_failed(state, &step_id, &err_msg, 0)?;
+        return fail_step(state, node, err_msg, iteration, 1);
     }
 
     // Build variable map for substitution, shell-quoting all values to prevent
@@ -438,25 +417,47 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
                     max_attempts,
                     err_msg
                 );
-                let generation = state.expect_lease_generation();
-                state.persistence.update_step(
-                    &step_id,
-                    StepUpdate::failed(generation, err_msg.clone(), attempt),
-                )?;
+                mark_attempt_failed(state, &step_id, &err_msg, attempt)?;
                 last_error = err_msg;
             }
         }
     }
 
+    fail_step(state, node, last_error, iteration, max_attempts)
+}
+
+/// Record a failed attempt on its step row.
+fn mark_attempt_failed(
+    state: &ExecutionState,
+    step_id: &str,
+    err_msg: &str,
+    retry_count: u32,
+) -> Result<()> {
+    let generation = state.expect_lease_generation();
+    state.persistence.update_step(
+        step_id,
+        StepUpdate::failed(generation, err_msg.to_string(), retry_count),
+    )?;
+    Ok(())
+}
+
+/// Route a step that has failed for good through its `on_fail` policy.
+fn fail_step(
+    state: &mut ExecutionState,
+    node: &ScriptNode,
+    err_msg: String,
+    iteration: u32,
+    attempts: u32,
+) -> Result<()> {
     handle_on_fail(
         state,
         node.name.clone(),
         &node.name,
         &node.on_fail,
-        last_error,
+        err_msg,
         node.retries,
         iteration,
-        max_attempts,
+        attempts,
     )
 }
 
@@ -1093,6 +1094,30 @@ mod tests {
             state.step_results["flaky"].status,
             WorkflowStepStatus::Completed
         );
+    }
+
+    #[test]
+    fn unparseable_output_is_retried() {
+        let (persistence, run_id) = make_persistence();
+        let mut state = make_state(Arc::clone(&persistence), run_id.clone());
+        let marker = marker_path("unparseable");
+        let _ = std::fs::remove_file(&marker);
+        let bad = "echo '<<<FLOW_OUTPUT>>> not json <<<END_FLOW_OUTPUT>>>'";
+        let mut node = make_node("bad_output_once", &fail_once_script(&marker, bad));
+        node.retries = 1;
+
+        execute_script(&mut state, &node, 0).unwrap();
+        let _ = std::fs::remove_file(&marker);
+
+        let steps = attempts(&persistence, &run_id);
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].status, WorkflowStepStatus::Failed);
+        assert!(steps[0]
+            .result_text
+            .as_deref()
+            .unwrap_or("")
+            .contains("could not be parsed"));
+        assert_eq!(steps[1].status, WorkflowStepStatus::Completed);
     }
 
     #[test]
