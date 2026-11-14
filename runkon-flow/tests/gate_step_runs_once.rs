@@ -85,10 +85,7 @@ fn def() -> runkon_flow::dsl::WorkflowDef {
     };
     // `gate_node` times out immediately; these tests need a gate that waits.
     gate.timeout_secs = 60;
-    make_def(
-        "wf",
-        vec![WorkflowNode::Gate(gate), call_node(NEXT_STEP)],
-    )
+    make_def("wf", vec![WorkflowNode::Gate(gate), call_node(NEXT_STEP)])
 }
 
 /// A state for `run_id` (or a fresh run when `None`) with the counting executor registered.
@@ -133,11 +130,7 @@ fn wait_for_waiting_gate(persistence: &InMemoryWorkflowPersistence, run_id: &str
 
 /// The next step ran once, has one `Completed` row, nothing is left in flight, and the run
 /// and the gate are `Completed`.
-fn assert_ran_once(
-    persistence: &InMemoryWorkflowPersistence,
-    run_id: &str,
-    count: &AtomicUsize,
-) {
+fn assert_ran_once(persistence: &InMemoryWorkflowPersistence, run_id: &str, count: &AtomicUsize) {
     assert_eq!(
         count.load(Ordering::SeqCst),
         1,
@@ -156,7 +149,10 @@ fn assert_ran_once(
             )
         })
         .collect();
-    assert!(in_flight.is_empty(), "no step row left in flight: {in_flight:?}");
+    assert!(
+        in_flight.is_empty(),
+        "no step row left in flight: {in_flight:?}"
+    );
     let gate = steps.iter().find(|s| s.step_name == GATE).unwrap();
     assert_eq!(gate.status, WorkflowStepStatus::Completed);
     let run = persistence.get_run(run_id).unwrap().unwrap();
@@ -235,7 +231,9 @@ fn approval_then_resume_runs_next_step_once() {
         .update_run_status(&run_id, WorkflowRunStatus::Running, None, None)
         .unwrap();
 
-    let result = engine.resume(&def(), &mut state).expect("resume should succeed");
+    let result = engine
+        .resume(&def(), &mut state)
+        .expect("resume should succeed");
     assert!(result.all_succeeded);
     assert_ran_once(&persistence, &run_id, &count);
 }
@@ -248,7 +246,12 @@ fn resume_while_another_engine_polls_is_refused() {
     let gate_id = wait_for_waiting_gate(&persistence, &run_id);
 
     let engine_b = build_engine(&count);
-    let mut state_b = state_for(&persistence, &count, Some(&run_id), Duration::from_millis(1));
+    let mut state_b = state_for(
+        &persistence,
+        &count,
+        Some(&run_id),
+        Duration::from_millis(1),
+    );
     let refused = engine_b.resume(&def(), &mut state_b);
     assert!(
         matches!(refused, Err(EngineError::AlreadyOwned(_))),
@@ -280,7 +283,12 @@ fn resume_after_lease_owner_cleared_runs_next_step_once() {
     persistence.clear_lease_owner(&run_id, 60);
 
     let engine_b = build_engine(&count);
-    let mut state_b = state_for(&persistence, &count, Some(&run_id), Duration::from_millis(1));
+    let mut state_b = state_for(
+        &persistence,
+        &count,
+        Some(&run_id),
+        Duration::from_millis(1),
+    );
     let result_b = engine_b
         .resume(&def(), &mut state_b)
         .expect("resume should succeed");
