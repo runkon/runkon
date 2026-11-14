@@ -15,6 +15,11 @@ pub struct WorkflowDef {
     pub title: Option<String>,
     pub description: String,
     pub trigger: WorkflowTrigger,
+    /// The schedule of a `trigger = scheduled` workflow; `Some` exactly when `trigger` is
+    /// `Scheduled` (the parser guarantees it). The engine never runs a schedule: the host
+    /// reads this and starts runs on its own timer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<Schedule>,
     #[serde(default)]
     pub targets: Vec<String>,
     #[serde(default)]
@@ -141,7 +146,50 @@ pub struct WorkflowWarning {
 pub enum WorkflowTrigger {
     Manual,
     Pr,
+    /// Started by the host on a timer. The schedule is on [`WorkflowDef::schedule`]; the
+    /// engine never runs it.
     Scheduled,
+}
+
+/// When a `trigger = scheduled` workflow should run. The engine never acts on this; the
+/// host reads it and starts runs on its own timer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Schedule {
+    pub spec: ScheduleSpec,
+    /// Time zone name as written in the `.wf` file (e.g. `America/New_York`). `None` means
+    /// the host's local time. runkon does not resolve zones: the host must, and should
+    /// reject a name it does not know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+}
+
+/// The timing rule of a [`Schedule`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScheduleSpec {
+    /// A fixed interval (`every = "15m"`), in whole seconds, always greater than zero.
+    Every { seconds: u64 },
+    /// A five-field cron expression (minute hour day-of-month month day-of-week), numeric
+    /// only, with whitespace between fields collapsed to single spaces.
+    Cron { expr: String },
+}
+
+impl Schedule {
+    /// The interval of an `every` schedule; `None` for cron.
+    pub fn interval(&self) -> Option<std::time::Duration> {
+        match &self.spec {
+            ScheduleSpec::Every { seconds } => Some(std::time::Duration::from_secs(*seconds)),
+            ScheduleSpec::Cron { .. } => None,
+        }
+    }
+
+    /// The cron expression of a cron schedule; `None` for `every`.
+    pub fn cron(&self) -> Option<&str> {
+        match &self.spec {
+            ScheduleSpec::Cron { expr } => Some(expr),
+            ScheduleSpec::Every { .. } => None,
+        }
+    }
 }
 
 impl std::fmt::Display for WorkflowTrigger {
@@ -781,6 +829,7 @@ mod tests {
             title: None,
             description: String::new(),
             trigger: WorkflowTrigger::Manual,
+            schedule: None,
             targets: vec![],
             group: None,
             inputs: vec![],
@@ -1209,6 +1258,52 @@ mod tests {
             AgentRef::Path("bar/baz.md".to_string()).label(),
             "bar/baz.md"
         );
+    }
+
+    // ── Schedule serde ────────────────────────────────────────────────────────
+
+    #[test]
+    fn schedule_round_trips_and_is_skipped_when_absent() {
+        let mut wf = simple_wf(vec![]);
+        let json = serde_json::to_string(&wf).unwrap();
+        assert!(!json.contains("schedule"));
+        let back: WorkflowDef = serde_json::from_str(&json).unwrap();
+        assert!(back.schedule.is_none());
+
+        wf.trigger = WorkflowTrigger::Scheduled;
+        wf.schedule = Some(Schedule {
+            spec: ScheduleSpec::Every { seconds: 900 },
+            timezone: None,
+        });
+        let back: WorkflowDef = serde_json::from_str(&serde_json::to_string(&wf).unwrap()).unwrap();
+        assert_eq!(back.schedule, wf.schedule);
+
+        wf.schedule = Some(Schedule {
+            spec: ScheduleSpec::Cron {
+                expr: "0 8 * * 1-5".into(),
+            },
+            timezone: Some("America/New_York".into()),
+        });
+        let back: WorkflowDef = serde_json::from_str(&serde_json::to_string(&wf).unwrap()).unwrap();
+        assert_eq!(back.schedule, wf.schedule);
+    }
+
+    #[test]
+    fn schedule_accessors() {
+        let every = Schedule {
+            spec: ScheduleSpec::Every { seconds: 90 },
+            timezone: None,
+        };
+        assert_eq!(every.interval(), Some(std::time::Duration::from_secs(90)));
+        assert_eq!(every.cron(), None);
+        let cron = Schedule {
+            spec: ScheduleSpec::Cron {
+                expr: "* * * * *".into(),
+            },
+            timezone: None,
+        };
+        assert_eq!(cron.interval(), None);
+        assert_eq!(cron.cron(), Some("* * * * *"));
     }
 
     // ── WorkflowTrigger serde ─────────────────────────────────────────────────

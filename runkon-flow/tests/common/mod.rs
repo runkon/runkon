@@ -158,6 +158,7 @@ pub fn make_def_with_always(
         title: None,
         description: String::new(),
         trigger: WorkflowTrigger::Manual,
+        schedule: None,
         targets: vec![],
         group: None,
         inputs: vec![],

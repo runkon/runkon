@@ -77,6 +77,7 @@ pub fn make_def(name: &str, body: Vec<WorkflowNode>) -> WorkflowDef {
         title: None,
         description: String::new(),
         trigger: WorkflowTrigger::Manual,
+        schedule: None,
         targets: vec![],
         group: None,
         inputs: vec![],
