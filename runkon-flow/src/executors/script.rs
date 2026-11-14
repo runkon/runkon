@@ -1,43 +1,215 @@
 use std::io::Read;
 
 use crate::dsl::ScriptNode;
-use crate::engine::{
-    record_step_failure, record_step_skipped, record_step_success, ExecutionState,
-};
+use crate::engine::{handle_on_fail, record_step_success, ExecutionState};
 use crate::engine_error::Result;
 use crate::prompt_builder::build_variable_map;
 use crate::traits::persistence::StepUpdate;
 
 use wait_timeout::ChildExt;
 
-fn apply_script_on_fail(
-    state: &mut ExecutionState,
-    step_name: &str,
-    on_fail: &Option<crate::dsl::OnFail>,
-    err_msg: String,
-) -> Result<()> {
-    match on_fail {
-        Some(crate::dsl::OnFail::Continue) => {
-            record_step_skipped(state, step_name.to_string(), step_name);
-            Ok(())
+/// How one run of the script ended.
+enum ScriptAttempt {
+    Succeeded {
+        markers: Vec<String>,
+        context: String,
+        structured_output: Option<String>,
+        duration_ms: i64,
+    },
+    /// A spawn error, timeout, non-zero exit or unparseable output block.
+    Failed(String),
+}
+
+/// Join a pipe reader thread and decode its bytes as UTF-8. A panicked reader
+/// or invalid UTF-8 is logged and yields an empty string.
+fn join_pipe(handle: std::thread::JoinHandle<Vec<u8>>, stream_name: &str) -> String {
+    match handle.join() {
+        Ok(buf) => String::from_utf8(buf).unwrap_or_else(|e| {
+            tracing::warn!("script: {stream_name} is not valid UTF-8: {e}");
+            String::new()
+        }),
+        Err(_) => {
+            tracing::warn!("script: {stream_name} reader thread panicked");
+            String::new()
         }
-        _ => record_step_failure(state, step_name.to_string(), step_name, err_msg, 1, true),
     }
 }
 
-/// Persist a script step failure and apply on_fail logic in one call.
-fn fail_script_step(
-    state: &mut ExecutionState,
-    step_id: &str,
+/// Spawn a reader thread BEFORE waiting for the child to avoid pipe deadlock.
+/// If the child writes more than the OS pipe buffer size to either stream
+/// while the parent is blocked in wait(), the child would hang forever.
+fn spawn_reader_thread<R: Read + Send + 'static>(
+    mut pipe: R,
+    stream_name: &'static str,
+) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Err(e) = pipe.read_to_end(&mut buf) {
+            tracing::warn!("script: failed to read {stream_name} pipe: {e}");
+        }
+        buf
+    })
+}
+
+/// Run the script once. Persists nothing and leaves `step_results` alone.
+fn run_script_once(
     node: &ScriptNode,
-    err_msg: String,
-) -> Result<()> {
-    tracing::warn!("{}", err_msg);
-    let generation = state.expect_lease_generation();
-    state
-        .persistence
-        .update_step(step_id, StepUpdate::failed(generation, err_msg.clone(), 0))?;
-    apply_script_on_fail(state, &node.name, &node.on_fail, err_msg)
+    script_cmd: &str,
+    env_vars: &std::collections::HashMap<String, String>,
+    working_dir: &str,
+) -> ScriptAttempt {
+    let mut cmd = std::process::Command::new("sh");
+    cmd.arg("-c").arg(script_cmd);
+    cmd.current_dir(working_dir);
+    for (k, v) in env_vars {
+        cmd.env(k, v);
+    }
+    // The host's stdin may carry a protocol stream; a step must never read it.
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return ScriptAttempt::Failed(format!("Script '{}' failed to execute: {e}", node.name));
+        }
+    };
+
+    let stdout_handle = match child.stdout.take() {
+        Some(p) => spawn_reader_thread(p, "stdout"),
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return ScriptAttempt::Failed(format!(
+                "script '{}': stdout pipe unavailable after spawn",
+                node.name
+            ));
+        }
+    };
+    let stderr_handle = match child.stderr.take() {
+        Some(p) => spawn_reader_thread(p, "stderr"),
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout_handle.join();
+            return ScriptAttempt::Failed(format!(
+                "script '{}': stderr pipe unavailable after spawn",
+                node.name
+            ));
+        }
+    };
+
+    let start = std::time::Instant::now();
+
+    let status = if let Some(timeout_secs) = node.timeout {
+        let timeout = std::time::Duration::from_secs(timeout_secs);
+        match child.wait_timeout(timeout) {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return ScriptAttempt::Failed(format!(
+                    "Script '{}' timed out after {}s",
+                    node.name, timeout_secs
+                ));
+            }
+            Err(e) => {
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return ScriptAttempt::Failed(format!("Script '{}' wait failed: {e}", node.name));
+            }
+        }
+    } else {
+        match child.wait() {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = stdout_handle.join();
+                let _ = stderr_handle.join();
+                return ScriptAttempt::Failed(format!("Script '{}' wait failed: {e}", node.name));
+            }
+        }
+    };
+    let duration_ms = start.elapsed().as_millis() as i64;
+
+    let stdout = join_pipe(stdout_handle, "stdout");
+
+    if !status.success() {
+        let exit_code = status.code().unwrap_or(-1);
+
+        let stderr = join_pipe(stderr_handle, "stderr");
+
+        let captured_stderr = stderr.trim().chars().take(2000).collect::<String>();
+
+        return ScriptAttempt::Failed(if captured_stderr.is_empty() {
+            format!("Script '{}' exited with code {}", node.name, exit_code)
+        } else {
+            format!(
+                "Script '{}' exited with code {}\n{}",
+                node.name, exit_code, captured_stderr
+            )
+        });
+    }
+
+    // Discard stderr on success — join the thread so it doesn't leak,
+    // but don't convert to String to avoid unnecessary allocation.
+    let _ = stderr_handle.join();
+
+    tracing::info!(
+        "script '{}': completed successfully in {}ms",
+        node.name,
+        duration_ms
+    );
+
+    // Parse FLOW_OUTPUT once; keep the full struct so we can persist its
+    // JSON shape (including any `extras` fields) as structured_output for
+    // downstream variable injection — see prompt_builder::build_variable_map.
+    let (markers, context, structured_output) = match crate::helpers::parse_flow_output(&stdout) {
+        Some(out) => {
+            let json = serde_json::to_string(&out)
+                .map_err(|e| {
+                    tracing::warn!(
+                        step = %node.name,
+                        error = %e,
+                        "script: failed to re-serialize FlowOutput as structured_output \
+                         — downstream `{{name}}` variable injection from this step's \
+                         extras will be unavailable",
+                    );
+                })
+                .ok();
+            (out.markers, out.context, json)
+        }
+        None => {
+            // An output block that didn't parse must fail the step: recording
+            // `markers: []` would silently turn every downstream `if` false.
+            if let Some(marker) = crate::helpers::find_output_block_marker(&stdout) {
+                let detail = match marker {
+                    "<<<FLOW_OUTPUT>>>" => "a <<<FLOW_OUTPUT>>> block that could not be \
+                         parsed (invalid JSON or missing <<<END_FLOW_OUTPUT>>>)"
+                        .to_string(),
+                    other => format!(
+                        "an unrecognised {other} block; expected <<<FLOW_OUTPUT>>> … \
+                         <<<END_FLOW_OUTPUT>>>"
+                    ),
+                };
+                return ScriptAttempt::Failed(format!(
+                    "Script '{}' ({}) printed {detail}",
+                    node.name, node.run
+                ));
+            }
+            let ctx: String = stdout.chars().take(2000).collect();
+            (vec![], ctx, None)
+        }
+    };
+
+    ScriptAttempt::Succeeded {
+        markers,
+        context,
+        structured_output,
+        duration_ms,
+    }
 }
 
 pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: u32) -> Result<()> {
@@ -49,9 +221,9 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
         return Ok(());
     }
 
-    let step_id = super::insert_step_record(state, &node.name, "script", pos, iteration, Some(0))?;
-
     if state.exec_config.dry_run {
+        let step_id =
+            super::insert_step_record(state, &node.name, "script", pos, iteration, Some(0))?;
         tracing::info!("script '{}': dry-run, skipping execution", node.name);
         super::persist_completed_step(
             state,
@@ -74,6 +246,19 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
             },
         );
         return Ok(());
+    }
+
+    // `run_inner` rejects an invalid prefix before the run starts; this covers
+    // callers that execute a script step directly. The error is about the
+    // configuration, so it is never retried.
+    let input_prefix = state.script_env_provider.input_env_prefix().to_string();
+    if let Err(e) = crate::traits::script_env_provider::validate_input_env_prefix(&input_prefix) {
+        let step_id =
+            super::insert_step_record(state, &node.name, "script", pos, iteration, Some(0))?;
+        let err_msg = format!("Script '{}': {e}", node.name);
+        tracing::warn!("{}", err_msg);
+        mark_attempt_failed(state, &step_id, &err_msg, 0)?;
+        return fail_step(state, node, err_msg, iteration, 1);
     }
 
     // Build variable map for substitution, shell-quoting all values to prevent
@@ -124,17 +309,6 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
     // provider's `input_env_prefix()` (`FLOW_` by default).
     // Validate that keys consist only of alphanumeric characters and underscores to
     // prevent malformed env var names if a key contains `=` or a null byte.
-    // `run_inner` rejects an invalid prefix before the run starts; this covers
-    // callers that execute a script step directly.
-    let input_prefix = state.script_env_provider.input_env_prefix();
-    if let Err(e) = crate::traits::script_env_provider::validate_input_env_prefix(input_prefix) {
-        return fail_script_step(
-            state,
-            &step_id,
-            node,
-            format!("Script '{}': {e}", node.name),
-        );
-    }
     for (k, v) in &state.inputs {
         if !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             tracing::warn!(
@@ -182,262 +356,109 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
         env_vars.insert(k.clone(), resolved);
     }
 
-    // Execute the script
-    let working_dir_owned = state.run_ctx.working_dir_str();
-    let working_dir = &working_dir_owned;
+    let working_dir = state.run_ctx.working_dir_str();
 
-    let mut cmd = std::process::Command::new("sh");
-    cmd.arg("-c").arg(&script_cmd);
-    cmd.current_dir(working_dir);
-    for (k, v) in &env_vars {
-        cmd.env(k, v);
-    }
-    // The host's stdin may carry a protocol stream; a step must never read it.
-    cmd.stdin(std::process::Stdio::null());
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
+    // One step row per attempt, as `call` records its retries. Retries are
+    // immediate: `call` has no backoff either.
+    let max_attempts = 1 + node.retries;
+    let mut last_error = String::new();
+    for attempt in 0..max_attempts {
+        let step_id =
+            super::begin_retry_attempt(state, &node.name, "script", pos, iteration, attempt)?;
 
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            return fail_script_step(
-                state,
-                &step_id,
-                node,
-                format!("Script '{}' failed to execute: {e}", node.name),
-            );
-        }
-    };
-
-    // Spawn reader threads BEFORE waiting for the child to avoid pipe deadlock.
-    // If the child writes more than the OS pipe buffer size to either stream
-    // while the parent is blocked in wait(), the child would hang forever.
-    fn spawn_reader_thread<R: Read + Send + 'static>(
-        mut pipe: R,
-        stream_name: &'static str,
-    ) -> std::thread::JoinHandle<Vec<u8>> {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Err(e) = pipe.read_to_end(&mut buf) {
-                tracing::warn!("script: failed to read {stream_name} pipe: {e}");
-            }
-            buf
-        })
-    }
-
-    let stdout_handle = {
-        let pipe = match child.stdout.take() {
-            Some(p) => p,
-            None => {
-                return fail_script_step(
-                    state,
-                    &step_id,
-                    node,
-                    format!(
-                        "script '{}': stdout pipe unavailable after spawn",
-                        node.name
-                    ),
-                );
-            }
-        };
-        spawn_reader_thread(pipe, "stdout")
-    };
-    let stderr_handle = {
-        let pipe = match child.stderr.take() {
-            Some(p) => p,
-            None => {
-                return fail_script_step(
-                    state,
-                    &step_id,
-                    node,
-                    format!(
-                        "script '{}': stderr pipe unavailable after spawn",
-                        node.name
-                    ),
-                );
-            }
-        };
-        spawn_reader_thread(pipe, "stderr")
-    };
-
-    let start = std::time::Instant::now();
-
-    let status = if let Some(timeout_secs) = node.timeout {
-        let timeout = std::time::Duration::from_secs(timeout_secs);
-        match child.wait_timeout(timeout) {
-            Ok(Some(s)) => s,
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stdout_handle.join();
-                let _ = stderr_handle.join();
-                return fail_script_step(
-                    state,
-                    &step_id,
-                    node,
-                    format!("Script '{}' timed out after {}s", node.name, timeout_secs),
-                );
-            }
-            Err(e) => {
-                let _ = stdout_handle.join();
-                let _ = stderr_handle.join();
-                return fail_script_step(
-                    state,
-                    &step_id,
-                    node,
-                    format!("Script '{}' wait failed: {e}", node.name),
-                );
-            }
-        }
-    } else {
-        match child.wait() {
-            Ok(s) => s,
-            Err(e) => {
-                let _ = stdout_handle.join();
-                let _ = stderr_handle.join();
-                return fail_script_step(
-                    state,
-                    &step_id,
-                    node,
-                    format!("Script '{}' wait failed: {e}", node.name),
-                );
-            }
-        }
-    };
-    let duration_ms = start.elapsed().as_millis() as i64;
-
-    let stdout = match stdout_handle.join() {
-        Ok(buf) => match String::from_utf8(buf) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("script: stdout is not valid UTF-8: {e}");
-                String::new()
-            }
-        },
-        Err(_) => {
-            tracing::warn!("script: stdout reader thread panicked");
-            String::new()
-        }
-    };
-
-    if status.success() {
-        // Discard stderr on success — join the thread so it doesn't leak,
-        // but don't convert to String to avoid unnecessary allocation.
-        let _ = stderr_handle.join();
-
-        tracing::info!(
-            "script '{}': completed successfully in {}ms",
-            node.name,
-            duration_ms
-        );
-
-        // Parse FLOW_OUTPUT once; keep the full struct so we can persist its
-        // JSON shape (including any `extras` fields) as structured_output for
-        // downstream variable injection — see prompt_builder::build_variable_map.
-        let parsed = crate::helpers::parse_flow_output(&stdout);
-        let (markers, context, structured_output) = match parsed {
-            Some(out) => {
-                let json = serde_json::to_string(&out)
-                    .map_err(|e| {
-                        tracing::warn!(
-                            step = %node.name,
-                            error = %e,
-                            "script: failed to re-serialize FlowOutput as structured_output \
-                             — downstream `{{name}}` variable injection from this step's \
-                             extras will be unavailable",
-                        );
-                    })
-                    .ok();
-                (out.markers, out.context, json)
-            }
-            None => {
-                // An output block that didn't parse must fail the step: recording
-                // `markers: []` would silently turn every downstream `if` false.
-                if let Some(marker) = crate::helpers::find_output_block_marker(&stdout) {
-                    let detail = match marker {
-                        "<<<FLOW_OUTPUT>>>" => "a <<<FLOW_OUTPUT>>> block that could not be \
-                             parsed (invalid JSON or missing <<<END_FLOW_OUTPUT>>>)"
-                            .to_string(),
-                        other => format!(
-                            "an unrecognised {other} block; expected <<<FLOW_OUTPUT>>> … \
-                             <<<END_FLOW_OUTPUT>>>"
-                        ),
-                    };
-                    return fail_script_step(
-                        state,
-                        &step_id,
-                        node,
-                        format!("Script '{}' ({}) printed {detail}", node.name, node.run),
-                    );
-                }
-                let ctx: String = stdout.chars().take(2000).collect();
-                (vec![], ctx, None)
-            }
-        };
-
-        let markers_json =
-            crate::helpers::serialize_or_empty_array(&markers, &format!("script '{}'", node.name));
-
-        super::persist_completed_step(
-            state,
-            &step_id,
-            None,
-            Some(format!("Script '{}' completed", node.name)),
-            Some(context.clone()),
-            Some(markers_json),
-            0,
-            structured_output.clone(),
-        )?;
-
-        record_step_success(
-            state,
-            node.name.clone(),
-            crate::types::StepSuccess {
-                step_name: node.name.clone(),
-                result_text: Some(format!("Script '{}' completed", node.name)),
-                metadata: std::collections::HashMap::from([(
-                    crate::constants::metadata_keys::DURATION_MS.to_string(),
-                    duration_ms.to_string(),
-                )]),
+        match run_script_once(node, &script_cmd, &env_vars, &working_dir) {
+            ScriptAttempt::Succeeded {
                 markers,
                 context,
-                iteration,
                 structured_output,
-                ..crate::types::StepSuccess::default()
-            },
-        );
+                duration_ms,
+            } => {
+                let markers_json = crate::helpers::serialize_or_empty_array(
+                    &markers,
+                    &format!("script '{}'", node.name),
+                );
 
-        Ok(())
-    } else {
-        let exit_code = status.code().unwrap_or(-1);
+                super::persist_completed_step(
+                    state,
+                    &step_id,
+                    None,
+                    Some(format!("Script '{}' completed", node.name)),
+                    Some(context.clone()),
+                    Some(markers_json),
+                    attempt,
+                    structured_output.clone(),
+                )?;
 
-        let stderr = match stderr_handle.join() {
-            Ok(buf) => match String::from_utf8(buf) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!("script: stderr is not valid UTF-8: {e}");
-                    String::new()
-                }
-            },
-            Err(_) => {
-                tracing::warn!("script: stderr reader thread panicked");
-                String::new()
+                record_step_success(
+                    state,
+                    node.name.clone(),
+                    crate::types::StepSuccess {
+                        step_name: node.name.clone(),
+                        result_text: Some(format!("Script '{}' completed", node.name)),
+                        metadata: std::collections::HashMap::from([(
+                            crate::constants::metadata_keys::DURATION_MS.to_string(),
+                            duration_ms.to_string(),
+                        )]),
+                        markers,
+                        context,
+                        iteration,
+                        structured_output,
+                        ..crate::types::StepSuccess::default()
+                    },
+                );
+
+                return Ok(());
             }
-        };
-
-        let captured_stderr = stderr.trim().chars().take(2000).collect::<String>();
-
-        let err_msg = if captured_stderr.is_empty() {
-            format!("Script '{}' exited with code {}", node.name, exit_code)
-        } else {
-            format!(
-                "Script '{}' exited with code {}\n{}",
-                node.name, exit_code, captured_stderr
-            )
-        };
-
-        fail_script_step(state, &step_id, node, err_msg)
+            ScriptAttempt::Failed(err_msg) => {
+                tracing::warn!(
+                    "script '{}' (attempt {}/{}): {}",
+                    node.name,
+                    attempt + 1,
+                    max_attempts,
+                    err_msg
+                );
+                mark_attempt_failed(state, &step_id, &err_msg, attempt)?;
+                last_error = err_msg;
+            }
+        }
     }
+
+    fail_step(state, node, last_error, iteration, max_attempts)
+}
+
+/// Record a failed attempt on its step row.
+fn mark_attempt_failed(
+    state: &ExecutionState,
+    step_id: &str,
+    err_msg: &str,
+    retry_count: u32,
+) -> Result<()> {
+    let generation = state.expect_lease_generation();
+    state.persistence.update_step(
+        step_id,
+        StepUpdate::failed(generation, err_msg.to_string(), retry_count),
+    )?;
+    Ok(())
+}
+
+/// Route a step that has failed for good through its `on_fail` policy.
+fn fail_step(
+    state: &mut ExecutionState,
+    node: &ScriptNode,
+    err_msg: String,
+    iteration: u32,
+    attempts: u32,
+) -> Result<()> {
+    handle_on_fail(
+        state,
+        node.name.clone(),
+        &node.name,
+        &node.on_fail,
+        err_msg,
+        node.retries,
+        iteration,
+        attempts,
+    )
 }
 
 #[cfg(test)]
@@ -1021,5 +1042,182 @@ mod tests {
         assert_eq!(steps.len(), 1);
         let step = &steps[0];
         assert_eq!(step.status, WorkflowStepStatus::Failed);
+    }
+
+    /// A unique marker path so retry tests can tell the first run from the next.
+    fn marker_path(tag: &str) -> String {
+        std::env::temp_dir()
+            .join(format!(
+                "runkon-script-retry-{tag}-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ))
+            .to_string_lossy()
+            .replace(['(', ')'], "")
+    }
+
+    /// Steps ordered by attempt; the in-memory store only sorts by position, which
+    /// is shared by every attempt of a step.
+    fn attempts(
+        persistence: &Arc<InMemoryWorkflowPersistence>,
+        run_id: &str,
+    ) -> Vec<crate::types::WorkflowRunStep> {
+        let mut steps = persistence.get_steps(run_id).unwrap();
+        steps.sort_by_key(|s| s.retry_count);
+        steps
+    }
+
+    /// Fails on the first run (creating the marker) and succeeds on the second.
+    fn fail_once_script(marker: &str, fail_cmd: &str) -> String {
+        format!("if [ -f '{marker}' ]; then echo ok; else touch '{marker}'; {fail_cmd}; fi")
+    }
+
+    #[test]
+    fn retries_then_succeeds() {
+        let (persistence, run_id) = make_persistence();
+        let mut state = make_state(Arc::clone(&persistence), run_id.clone());
+        let marker = marker_path("succeeds");
+        let _ = std::fs::remove_file(&marker);
+        let mut node = make_node("flaky", &fail_once_script(&marker, "exit 1"));
+        node.retries = 1;
+
+        execute_script(&mut state, &node, 0).unwrap();
+        let _ = std::fs::remove_file(&marker);
+
+        let steps = attempts(&persistence, &run_id);
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].status, WorkflowStepStatus::Failed);
+        assert_eq!(steps[0].retry_count, 0);
+        assert_eq!(steps[1].status, WorkflowStepStatus::Completed);
+        assert_eq!(steps[1].retry_count, 1);
+        assert_eq!(
+            state.step_results["flaky"].status,
+            WorkflowStepStatus::Completed
+        );
+    }
+
+    #[test]
+    fn unparseable_output_is_retried() {
+        let (persistence, run_id) = make_persistence();
+        let mut state = make_state(Arc::clone(&persistence), run_id.clone());
+        let marker = marker_path("unparseable");
+        let _ = std::fs::remove_file(&marker);
+        let bad = "echo '<<<FLOW_OUTPUT>>> not json <<<END_FLOW_OUTPUT>>>'";
+        let mut node = make_node("bad_output_once", &fail_once_script(&marker, bad));
+        node.retries = 1;
+
+        execute_script(&mut state, &node, 0).unwrap();
+        let _ = std::fs::remove_file(&marker);
+
+        let steps = attempts(&persistence, &run_id);
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].status, WorkflowStepStatus::Failed);
+        assert!(steps[0]
+            .result_text
+            .as_deref()
+            .unwrap_or("")
+            .contains("could not be parsed"));
+        assert_eq!(steps[1].status, WorkflowStepStatus::Completed);
+    }
+
+    #[test]
+    fn timeout_is_retried() {
+        let (persistence, run_id) = make_persistence();
+        let mut state = make_state(Arc::clone(&persistence), run_id.clone());
+        let marker = marker_path("timeout");
+        let _ = std::fs::remove_file(&marker);
+        let mut node = make_node("slow_once", &fail_once_script(&marker, "sleep 5"));
+        node.timeout = Some(1);
+        node.retries = 1;
+
+        execute_script(&mut state, &node, 0).unwrap();
+        let _ = std::fs::remove_file(&marker);
+
+        let steps = attempts(&persistence, &run_id);
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].status, WorkflowStepStatus::Failed);
+        assert!(steps[0]
+            .result_text
+            .as_deref()
+            .unwrap_or("")
+            .contains("timed out"));
+        assert_eq!(steps[1].status, WorkflowStepStatus::Completed);
+    }
+
+    #[test]
+    fn on_fail_continue_after_retries_skips() {
+        let (persistence, run_id) = make_persistence();
+        let mut state = make_state(Arc::clone(&persistence), run_id.clone());
+        let mut node = make_node("always_bad", "exit 1");
+        node.retries = 1;
+        node.on_fail = Some(crate::dsl::OnFail::Continue);
+
+        execute_script(&mut state, &node, 0).unwrap();
+
+        let steps = attempts(&persistence, &run_id);
+        assert_eq!(steps.len(), 2);
+        assert!(steps.iter().all(|s| s.status == WorkflowStepStatus::Failed));
+        assert_eq!(
+            state.step_results["always_bad"].status,
+            WorkflowStepStatus::Skipped
+        );
+    }
+
+    #[test]
+    fn exhausted_retries_run_the_on_fail_agent_once() {
+        use crate::traits::action_executor::{
+            ActionExecutor, ActionOutput, ActionParams, ActionRegistry, StepInfo,
+        };
+        use std::sync::Mutex;
+
+        struct Recorder(Arc<Mutex<Vec<HashMap<String, String>>>>);
+        impl ActionExecutor for Recorder {
+            fn name(&self) -> &str {
+                "fixer"
+            }
+            fn execute(
+                &self,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &StepInfo,
+                params: &ActionParams,
+            ) -> std::result::Result<ActionOutput, crate::engine_error::EngineError> {
+                self.0.lock().unwrap().push((*params.inputs).clone());
+                Ok(ActionOutput::default())
+            }
+        }
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let mut named: HashMap<String, Box<dyn ActionExecutor>> = HashMap::new();
+        named.insert(
+            "fixer".to_string(),
+            Box::new(Recorder(Arc::clone(&calls))) as Box<dyn ActionExecutor>,
+        );
+
+        let (persistence, run_id) = make_persistence();
+        let mut state = make_state(Arc::clone(&persistence), run_id.clone());
+        state.action_registry = Arc::new(ActionRegistry::new(named, None));
+        let mut node = make_node("doomed", "exit 3");
+        node.retries = 2;
+        node.on_fail = Some(crate::dsl::OnFail::Agent(crate::dsl::AgentRef::Name(
+            "fixer".to_string(),
+        )));
+
+        // fail_fast is on, so the exhausted step still fails the call.
+        assert!(execute_script(&mut state, &node, 0).is_err());
+
+        let steps = attempts(&persistence, &run_id);
+        let script_rows: Vec<_> = steps.iter().filter(|s| s.role == "script").collect();
+        assert_eq!(script_rows.len(), 3);
+        assert!(script_rows
+            .iter()
+            .all(|s| s.status == WorkflowStepStatus::Failed));
+        let counts: Vec<i64> = script_rows.iter().map(|s| s.retry_count).collect();
+        assert_eq!(counts, vec![0, 1, 2]);
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "on_fail agent should run exactly once");
+        assert_eq!(calls[0]["failed_step"], "doomed");
+        assert!(calls[0]["failure_reason"].contains("exited with code 3"));
+        assert_eq!(calls[0]["retry_count"], "2");
     }
 }
