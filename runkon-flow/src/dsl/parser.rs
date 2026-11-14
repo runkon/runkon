@@ -6,8 +6,9 @@ use super::lexer::{Lexer, Token};
 use super::types::{
     AgentRef, AlwaysNode, CallNode, CallWorkflowNode, Condition, DoNode, DoWhileNode, ForEachNode,
     GateNode, GateOptions, IfNode, InputDecl, InputType, OnChildFail, OnCycle, OnFail,
-    OnFailAction, OnMaxIter, OnTimeout, ParallelNode, QualityGateConfig, ScriptNode, UnlessNode,
-    WhileNode, WorkflowDef, WorkflowNode, WorkflowTrigger, QUALITY_GATE_TYPE,
+    OnFailAction, OnMaxIter, OnTimeout, ParallelNode, QualityGateConfig, Schedule, ScheduleSpec,
+    ScriptNode, UnlessNode, WhileNode, WorkflowDef, WorkflowNode, WorkflowTrigger,
+    QUALITY_GATE_TYPE,
 };
 
 // ---------------------------------------------------------------------------
@@ -261,6 +262,9 @@ impl Parser {
         let mut title: Option<String> = None;
         let mut description = String::new();
         let mut trigger = WorkflowTrigger::Manual;
+        let mut every: Option<String> = None;
+        let mut cron: Option<String> = None;
+        let mut timezone: Option<String> = None;
         let mut targets: Vec<String> = Vec::new();
         let mut group: Option<String> = None;
         let mut inputs = Vec::new();
@@ -286,13 +290,17 @@ impl Parser {
                         trigger = trig_str
                             .parse::<WorkflowTrigger>()
                             .map_err(|e| format!("In meta block: {e}"))?;
-                        if trigger != WorkflowTrigger::Manual {
+                        if trigger == WorkflowTrigger::Pr {
                             self.warnings.push(format!(
                                 "trigger '{}' is not implemented in v1; only 'manual' is active",
                                 trig_str
                             ));
                         }
                     }
+                    let read = |key: &str| kvs.get(key).map(|v| v.as_str().to_string());
+                    every = read("every").or(every);
+                    cron = read("cron").or(cron);
+                    timezone = read("timezone").or(timezone);
                     if let Some(tgts) = kvs.get("targets") {
                         targets = tgts.clone().into_string_array();
                     }
@@ -360,11 +368,14 @@ impl Parser {
 
         self.expect(&Token::RBrace)?;
 
+        let schedule = build_schedule(&name, &trigger, every, cron, timezone)?;
+
         Ok(WorkflowDef {
             name,
             title,
             description,
             trigger,
+            schedule,
             targets,
             group,
             inputs,
@@ -1048,6 +1059,147 @@ impl Parser {
 }
 
 // ---------------------------------------------------------------------------
+// Schedule validation
+// ---------------------------------------------------------------------------
+
+/// Build and validate the schedule from the `every` / `cron` / `timezone` meta keys.
+/// Errors name the workflow.
+fn build_schedule(
+    name: &str,
+    trigger: &WorkflowTrigger,
+    every: Option<String>,
+    cron: Option<String>,
+    timezone: Option<String>,
+) -> std::result::Result<Option<Schedule>, String> {
+    let fail = |msg: String| format!("workflow '{name}': {msg}");
+    if *trigger != WorkflowTrigger::Scheduled {
+        let key = [
+            ("every", every.is_some()),
+            ("cron", cron.is_some()),
+            ("timezone", timezone.is_some()),
+        ]
+        .into_iter()
+        .find_map(|(key, present)| present.then_some(key));
+        return match key {
+            Some(key) => Err(fail(format!(
+                "'{key}' in meta needs trigger = scheduled (trigger is '{trigger}')"
+            ))),
+            None => Ok(None),
+        };
+    }
+
+    let spec = match (every, cron) {
+        (None, None) => {
+            return Err(fail(
+                "trigger = scheduled needs a schedule: set every = \"<duration>\" \
+                 or cron = \"<5-field cron>\" in meta"
+                    .to_string(),
+            ))
+        }
+        (Some(_), Some(_)) => {
+            return Err(fail(
+                "set only one of 'every' or 'cron' in meta, not both".to_string(),
+            ))
+        }
+        (Some(e), None) => {
+            let seconds = parse_duration_str(&e)
+                .map_err(|err| fail(format!("invalid 'every' value: {err}")))?;
+            if seconds == 0 {
+                return Err(fail(format!(
+                    "'every' must be greater than zero (got '{e}')"
+                )));
+            }
+            ScheduleSpec::Every { seconds }
+        }
+        (None, Some(c)) => ScheduleSpec::Cron {
+            expr: validate_cron(&c)
+                .map_err(|err| fail(format!("invalid 'cron' value '{c}': {err}")))?,
+        },
+    };
+
+    if let Some(tz) = &timezone {
+        if tz.is_empty() || tz.chars().any(char::is_whitespace) {
+            return Err(fail(format!(
+                "invalid 'timezone' value '{tz}': must be a non-empty zone name without whitespace"
+            )));
+        }
+    }
+
+    Ok(Some(Schedule { spec, timezone }))
+}
+
+/// Validate a numeric five-field cron expression and return it with fields separated by
+/// single spaces. Names (`MON`, `JAN`) and macros (`@daily`) are not accepted.
+fn validate_cron(expr: &str) -> std::result::Result<String, String> {
+    const FIELDS: [(&str, u32, u32); 5] = [
+        ("minute", 0, 59),
+        ("hour", 0, 23),
+        ("day-of-month", 1, 31),
+        ("month", 1, 12),
+        ("day-of-week", 0, 7),
+    ];
+    let parts: Vec<&str> = expr.split_whitespace().collect();
+    if parts.len() != FIELDS.len() {
+        return Err(format!(
+            "expected 5 fields (minute hour day-of-month month day-of-week), found {}",
+            parts.len()
+        ));
+    }
+    for (part, (field, min, max)) in parts.iter().zip(FIELDS) {
+        validate_cron_field(part, min, max).map_err(|e| format!("{field} field '{part}': {e}"))?;
+    }
+    Ok(parts.join(" "))
+}
+
+fn is_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn validate_cron_field(field: &str, min: u32, max: u32) -> std::result::Result<(), String> {
+    let num = |s: &str| -> std::result::Result<u32, String> {
+        if !is_digits(s) {
+            return Err(format!(
+                "'{s}' is not a number (use numbers, not names or macros)"
+            ));
+        }
+        let n: u32 = s.parse().map_err(|_| format!("'{s}' is out of range"))?;
+        if n < min || n > max {
+            return Err(format!("{n} is out of range {min}-{max}"));
+        }
+        Ok(n)
+    };
+    for item in field.split(',') {
+        let (range, step) = match item.split_once('/') {
+            Some((r, s)) => (r, Some(s)),
+            None => (item, None),
+        };
+        if let Some(step) = step {
+            if !is_digits(step) {
+                return Err(format!("step '{step}' is not a number"));
+            }
+            if step.parse::<u32>().map_or(true, |n| n == 0) {
+                return Err("step must be greater than zero".to_string());
+            }
+        }
+        if range == "*" {
+            continue;
+        }
+        match range.split_once('-') {
+            Some((a, b)) => {
+                let (a, b) = (num(a)?, num(b)?);
+                if a > b {
+                    return Err(format!("range {a}-{b} is inverted"));
+                }
+            }
+            None => {
+                num(range)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Duration parser
 // ---------------------------------------------------------------------------
 
@@ -1114,8 +1266,11 @@ pub fn parse_workflow_str(input: &str, source_path: &str) -> Result<WorkflowDef,
 
 #[cfg(test)]
 mod tests {
+    use super::validate_cron;
     use super::{parse_duration_str, parse_workflow_str};
-    use crate::dsl::{AgentRef, Condition, InputType, WorkflowNode, WorkflowTrigger};
+    use crate::dsl::{
+        AgentRef, Condition, InputType, ScheduleSpec, WorkflowDef, WorkflowNode, WorkflowTrigger,
+    };
 
     // ---- basic workflow structure ----
 
@@ -1143,6 +1298,133 @@ workflow deploy {
         assert_eq!(def.name, "deploy");
         assert_eq!(def.description, "Deploy the service");
         assert_eq!(def.trigger, WorkflowTrigger::Manual);
+    }
+
+    fn parse_meta(meta: &str) -> std::result::Result<WorkflowDef, String> {
+        let src = format!("workflow w {{\n meta {{\n {meta}\n }}\n}}\n");
+        parse_workflow_str(&src, "t.wf").map_err(|e| e.to_string())
+    }
+
+    fn meta_warnings(meta: &str) -> Vec<String> {
+        use super::{Lexer, Parser, Token};
+        let src = format!("workflow w {{\n meta {{\n {meta}\n }}\n}}\n");
+        let mut lexer = Lexer::new(&src);
+        let mut tokens = Vec::new();
+        loop {
+            let tok = lexer.next_token().unwrap();
+            let is_eof = tok == Token::Eof;
+            tokens.push(tok);
+            if is_eof {
+                break;
+            }
+        }
+        let mut parser = Parser::new(tokens);
+        parser.parse_workflow().unwrap();
+        parser.warnings
+    }
+
+    #[test]
+    fn trigger_warnings_only_for_pr() {
+        assert!(meta_warnings(r#"trigger = scheduled every = "15m""#).is_empty());
+        assert!(meta_warnings("trigger = manual").is_empty());
+        let pr = meta_warnings("trigger = pr");
+        assert_eq!(pr.len(), 1);
+        assert!(pr[0].contains("not implemented"));
+    }
+
+    fn sched_err(meta: &str) -> String {
+        parse_meta(meta).unwrap_err()
+    }
+
+    fn sched_ok(meta: &str) -> WorkflowDef {
+        parse_meta(meta).unwrap()
+    }
+
+    #[test]
+    fn scheduled_every_parses() {
+        let def = sched_ok(r#"trigger = scheduled every = "15m""#);
+        let s = def.schedule.unwrap();
+        assert_eq!(s.spec, ScheduleSpec::Every { seconds: 900 });
+        assert_eq!(s.interval(), Some(std::time::Duration::from_secs(900)));
+        assert_eq!(s.timezone, None);
+    }
+
+    #[test]
+    fn scheduled_cron_parses_with_and_without_timezone() {
+        let s = sched_ok(r#"trigger = scheduled cron = "0 8 * * 1-5""#)
+            .schedule
+            .unwrap();
+        assert_eq!(s.cron(), Some("0 8 * * 1-5"));
+        assert_eq!(s.timezone, None);
+        let s =
+            sched_ok(r#"trigger = scheduled cron = "0 8 * * 1-5" timezone = "America/New_York""#)
+                .schedule
+                .unwrap();
+        assert_eq!(s.timezone.as_deref(), Some("America/New_York"));
+    }
+
+    #[test]
+    fn manual_and_pr_have_no_schedule() {
+        assert!(sched_ok("trigger = manual").schedule.is_none());
+        assert!(sched_ok("trigger = pr").schedule.is_none());
+        assert!(sched_ok(r#"description = "x""#).schedule.is_none());
+    }
+
+    #[test]
+    fn invalid_schedule_combinations_name_the_workflow() {
+        for meta in [
+            "trigger = scheduled",
+            r#"trigger = scheduled every = "5m" cron = "* * * * *""#,
+            r#"trigger = pr every = "5m""#,
+            r#"cron = "* * * * *""#,
+            r#"trigger = manual timezone = "UTC""#,
+            r#"trigger = scheduled every = "0m""#,
+            r#"trigger = scheduled every = "abc""#,
+            r#"trigger = scheduled cron = "* * * *""#,
+            r#"trigger = scheduled cron = "60 * * * *""#,
+            r#"trigger = scheduled cron = "*/0 * * * *""#,
+            r#"trigger = scheduled cron = "0 0 * * MON""#,
+            r#"trigger = scheduled every = "5m" timezone = "a b""#,
+            r#"trigger = scheduled every = "5m" timezone = """#,
+        ] {
+            let err = sched_err(meta);
+            assert!(err.contains("workflow 'w'"), "{meta}: {err}");
+        }
+        assert!(sched_err(r#"trigger = scheduled every = "0m""#).contains("'every'"));
+        assert!(sched_err(r#"trigger = scheduled every = "abc""#).contains("'every'"));
+    }
+
+    #[test]
+    fn cron_validator() {
+        for ok in [
+            "*/15 * * * *",
+            "0,30 9-17 * * 1-5",
+            "0 0 1 1 7",
+            "0 0-23/2 * * *",
+            "5/10 * * * *",
+            "  0   8 * * *  ",
+        ] {
+            assert!(validate_cron(ok).is_ok(), "{ok}");
+        }
+        assert_eq!(validate_cron("  0   8 * * *  ").unwrap(), "0 8 * * *");
+        for bad in [
+            "* * * *",
+            "* * * * * *",
+            "60 * * * *",
+            "* 24 * * *",
+            "* * 0 * *",
+            "* * * 13 *",
+            "* * * * 8",
+            "5-1 * * * *",
+            "*/0 * * * *",
+            "* * * JAN *",
+            "@daily",
+            "*/ * * * *",
+            "1,,2 * * * *",
+            "-5 * * * *",
+        ] {
+            assert!(validate_cron(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
