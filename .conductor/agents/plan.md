@@ -34,6 +34,8 @@ A non-empty `decisions` list stops the run at a gate before `implement`, so don'
 
 Write the plan to `PLAN.md` in the worktree's git directory, `"$(git rev-parse --git-dir)/PLAN.md"`, not the worktree root. That directory is private to this worktree and outside the working tree, so git never tracks or commits the file, and it stays available to the implement and triage-reviews steps for the rest of the run.
 
+Resolve the absolute path with `git rev-parse --absolute-git-dir` (the file is `<that>/PLAN.md`) and give that absolute path in the FLOW_OUTPUT `summary` and in your closing message. The user reviewing the plan won't find it among the worktree's files.
+
 ## Do NOT include verification commands in the plan
 
 Do **not** include `cargo build`, `cargo test`, `cargo nextest`, `cargo clippy`, or `cargo fmt` instructions in `PLAN.md` (no "definition of done", no "verification" section, no "finally run X" trailing notes). Verification runs automatically as a separate `verify` step after `implement` commits. Including cargo commands in the plan causes the implement agent to dutifully execute them, which fills its context with build output and defeats the implement → verify split.
