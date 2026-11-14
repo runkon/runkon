@@ -148,6 +148,19 @@ impl InMemoryWorkflowPersistence {
         }
     }
 
+    /// Test helper: clear the lease owner for `run_id` and keep a `grace_secs` lease, as a
+    /// host does when it releases a run for resume. The next `acquire_lease` succeeds
+    /// immediately and bumps the generation, even if the previous owner is still alive.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn clear_lease_owner(&self, run_id: &str, grace_secs: i64) {
+        let mut store = self.store.lock().unwrap();
+        if let Some(run) = store.runs.get_mut(run_id) {
+            run.owner_token = None;
+            run.lease_until =
+                Some((chrono::Utc::now() + chrono::Duration::seconds(grace_secs)).to_rfc3339());
+        }
+    }
+
     /// Test helper: forcibly expire the current lease for `run_id`, then immediately
     /// steal it with `new_token`. Used to simulate another engine claiming the lease
     /// while the original engine is still running.

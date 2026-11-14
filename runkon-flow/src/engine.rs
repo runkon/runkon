@@ -450,6 +450,51 @@ impl ExecutionState {
             .expect("lease_generation must be set after FlowEngine::run/resume entry")
     }
 
+    /// Confirm this engine still holds the run's lease.
+    ///
+    /// Re-acquires the lease with this engine's own token. That renews it when we still
+    /// own it, and returns `None` or a different generation when another engine took the
+    /// run over (for example a host that cleared the lease owner and resumed the run
+    /// while this engine was waiting on a gate). On loss, or on a persistence error
+    /// (same policy as the refresh thread), cancels the token with `LeaseLost` and
+    /// returns `Err(Cancelled(LeaseLost))`.
+    ///
+    /// Lets a long wait (a gate) check ownership right before it acts on a decision,
+    /// instead of waiting up to `lease_refresh_interval` for the refresh thread.
+    /// A no-op when the state holds no owner token.
+    pub fn verify_lease(&self) -> Result<()> {
+        use crate::cancellation_reason::CancellationReason;
+
+        let (Some(token), Some(expected)) = (self.owner_token.as_deref(), self.lease_generation)
+        else {
+            return Ok(());
+        };
+        let still_owned = match self.persistence.acquire_lease(
+            &self.workflow_run_id,
+            token,
+            self.exec_config.lease_ttl_secs,
+        ) {
+            Ok(Some(gen)) => gen == expected,
+            Ok(None) => false,
+            Err(e) => {
+                tracing::warn!(
+                    "run {}: lease verification DB error: {e}, aborting",
+                    self.workflow_run_id
+                );
+                false
+            }
+        };
+        if still_owned {
+            return Ok(());
+        }
+        tracing::warn!(
+            "run {}: lease lost to another engine, aborting",
+            self.workflow_run_id
+        );
+        self.cancellation.cancel(CancellationReason::LeaseLost);
+        Err(EngineError::Cancelled(CancellationReason::LeaseLost))
+    }
+
     /// Throttled heartbeat tick + external cancel check.
     ///
     /// Bumps `last_heartbeat` in persistence at most once every 5 seconds and

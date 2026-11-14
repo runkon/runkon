@@ -303,6 +303,10 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
     // wins; otherwise the node's resolver is polled, throttled by its poll interval.
     let start = std::time::Instant::now();
     loop {
+        // The refresh thread flags a lost lease on the token; stop polling rather than
+        // act on a decision for a run another engine now owns.
+        state.cancellation.error_if_cancelled()?;
+
         if start.elapsed() > Duration::from_secs(node.timeout_secs) {
             return handle_gate_timeout(state, &step_id, node);
         }
@@ -330,6 +334,13 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
                     }
                 }
             }
+        }
+
+        // Before acting on a decision, confirm this engine still owns the run. A host can
+        // resume the run from another engine while this one polls; acting here would then
+        // run the next step a second time.
+        if !matches!(approval, GateApprovalState::Pending) {
+            state.verify_lease()?;
         }
 
         match approval {
