@@ -180,9 +180,12 @@ fn second_gate_without_feedback_clears_the_first_gates_value() {
     let seen: Seen = Arc::default();
     let mut state = state_for(&p, &run_id, &seen);
 
-    let result = engine(decisions(&[("first", Some("edited draft")), ("second", None)]))
-        .run(&def(), &mut state)
-        .unwrap();
+    let result = engine(decisions(&[
+        ("first", Some("edited draft")),
+        ("second", None),
+    ]))
+    .run(&def(), &mut state)
+    .unwrap();
     assert!(result.all_succeeded);
 
     let seen = seen.lock().unwrap();
@@ -225,9 +228,7 @@ fn resume_past_both_decided_gates_lets_the_last_row_decide() {
     let mut state = state_for(&p, &run_id, &seen);
 
     // `between` has no row, so it runs; `after` must still see no feedback.
-    let result = engine(HashMap::new())
-        .resume(&def(), &mut state)
-        .unwrap();
+    let result = engine(HashMap::new()).resume(&def(), &mut state).unwrap();
     assert!(result.all_succeeded);
 
     assert_eq!(seen.lock().unwrap()["after"], None);

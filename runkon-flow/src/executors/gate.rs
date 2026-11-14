@@ -100,18 +100,19 @@ pub(crate) fn gate_feedback_value(
 /// The feedback value a persisted gate row carries. Bad `gate_selections` JSON is logged
 /// and treated as no selections.
 pub(crate) fn gate_feedback_from_row(row: &crate::types::WorkflowRunStep) -> Option<String> {
-    let selections = row.gate_selections.as_deref().and_then(|s| {
-        match serde_json::from_str::<Vec<String>>(s) {
-            Ok(v) => Some(v),
-            Err(e) => {
-                tracing::warn!(
-                    "Gate '{}': invalid gate_selections JSON on resume: {e}",
-                    row.step_name
-                );
-                None
-            }
-        }
-    });
+    let selections =
+        row.gate_selections
+            .as_deref()
+            .and_then(|s| match serde_json::from_str::<Vec<String>>(s) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::warn!(
+                        "Gate '{}': invalid gate_selections JSON on resume: {e}",
+                        row.step_name
+                    );
+                    None
+                }
+            });
     gate_feedback_value(row.gate_feedback.clone(), selections)
 }
 
@@ -610,7 +611,10 @@ mod tests {
     fn gate_feedback_value_prefers_non_empty_selections() {
         use super::gate_feedback_value as v;
         let sel = |s: &[&str]| Some(s.iter().map(|x| x.to_string()).collect::<Vec<_>>());
-        assert_eq!(v(Some("fb".into()), sel(&["a", "b"])).as_deref(), Some("a, b"));
+        assert_eq!(
+            v(Some("fb".into()), sel(&["a", "b"])).as_deref(),
+            Some("a, b")
+        );
         assert_eq!(v(Some("fb".into()), sel(&[])).as_deref(), Some("fb"));
         assert_eq!(v(Some("fb".into()), None).as_deref(), Some("fb"));
         assert_eq!(v(None, None), None);
