@@ -38,6 +38,15 @@ workflow review-pr {
     }
   }
 
+  script detect-db-migrations {
+    run = ".conductor/scripts/detect-db-migrations.sh"
+    env = {
+      BASE_BRANCH = "{{base_branch}}"
+      SCOPE       = "{{scope}}"
+      SINCE       = "{{since}}"
+    }
+  }
+
   parallel {
     output    = "review-findings"
     with      = ["review-diff-scope", "off-diff-findings"]
@@ -49,6 +58,7 @@ workflow review-pr {
     call review-error-handling     { retries = 1  if = "detect-file-types.has_code_changes" }
     call review-test-coverage      { retries = 1  if = "detect-file-types.has_code_changes" }
     call review-workflow-semantics { retries = 1  if = "detect-workflow-changes.has_workflow_changes" }
+    call review-db-migrations      { retries = 1  if = "detect-db-migrations.has_db_migrations" }
   }
 
   // Replies posted on the PR since the last conductor review, so findings
