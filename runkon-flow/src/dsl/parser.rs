@@ -297,15 +297,10 @@ impl Parser {
                             ));
                         }
                     }
-                    if let Some(v) = kvs.get("every") {
-                        every = Some(v.as_str().to_string());
-                    }
-                    if let Some(v) = kvs.get("cron") {
-                        cron = Some(v.as_str().to_string());
-                    }
-                    if let Some(v) = kvs.get("timezone") {
-                        timezone = Some(v.as_str().to_string());
-                    }
+                    let read = |key: &str| kvs.get(key).map(|v| v.as_str().to_string());
+                    every = read("every").or(every);
+                    cron = read("cron").or(cron);
+                    timezone = read("timezone").or(timezone);
                     if let Some(tgts) = kvs.get("targets") {
                         targets = tgts.clone().into_string_array();
                     }
@@ -1076,58 +1071,57 @@ fn build_schedule(
     cron: Option<String>,
     timezone: Option<String>,
 ) -> std::result::Result<Option<Schedule>, String> {
+    let fail = |msg: String| format!("workflow '{name}': {msg}");
     if *trigger != WorkflowTrigger::Scheduled {
-        let key = if every.is_some() {
-            Some("every")
-        } else if cron.is_some() {
-            Some("cron")
-        } else if timezone.is_some() {
-            Some("timezone")
-        } else {
-            None
-        };
+        let key = [
+            ("every", every.is_some()),
+            ("cron", cron.is_some()),
+            ("timezone", timezone.is_some()),
+        ]
+        .into_iter()
+        .find_map(|(key, present)| present.then_some(key));
         return match key {
-            Some(key) => Err(format!(
-                "workflow '{name}': '{key}' in meta needs trigger = scheduled (trigger is '{trigger}')"
-            )),
+            Some(key) => Err(fail(format!(
+                "'{key}' in meta needs trigger = scheduled (trigger is '{trigger}')"
+            ))),
             None => Ok(None),
         };
     }
 
     let spec = match (every, cron) {
         (None, None) => {
-            return Err(format!(
-            "workflow '{name}': trigger = scheduled needs a schedule: set every = \"<duration>\" \
+            return Err(fail(
+                "trigger = scheduled needs a schedule: set every = \"<duration>\" \
                  or cron = \"<5-field cron>\" in meta"
-        ))
+                    .to_string(),
+            ))
         }
         (Some(_), Some(_)) => {
-            return Err(format!(
-                "workflow '{name}': set only one of 'every' or 'cron' in meta, not both"
+            return Err(fail(
+                "set only one of 'every' or 'cron' in meta, not both".to_string(),
             ))
         }
         (Some(e), None) => {
             let seconds = parse_duration_str(&e)
-                .map_err(|err| format!("workflow '{name}': invalid 'every' value: {err}"))?;
+                .map_err(|err| fail(format!("invalid 'every' value: {err}")))?;
             if seconds == 0 {
-                return Err(format!(
-                    "workflow '{name}': 'every' must be greater than zero (got '{e}')"
-                ));
+                return Err(fail(format!(
+                    "'every' must be greater than zero (got '{e}')"
+                )));
             }
             ScheduleSpec::Every { seconds }
         }
         (None, Some(c)) => ScheduleSpec::Cron {
             expr: validate_cron(&c)
-                .map_err(|err| format!("workflow '{name}': invalid 'cron' value '{c}': {err}"))?,
+                .map_err(|err| fail(format!("invalid 'cron' value '{c}': {err}")))?,
         },
     };
 
     if let Some(tz) = &timezone {
         if tz.is_empty() || tz.chars().any(char::is_whitespace) {
-            return Err(format!(
-                "workflow '{name}': invalid 'timezone' value '{tz}': must be a non-empty \
-                 zone name without whitespace"
-            ));
+            return Err(fail(format!(
+                "invalid 'timezone' value '{tz}': must be a non-empty zone name without whitespace"
+            )));
         }
     }
 
@@ -1157,9 +1151,13 @@ fn validate_cron(expr: &str) -> std::result::Result<String, String> {
     Ok(parts.join(" "))
 }
 
+fn is_digits(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
+}
+
 fn validate_cron_field(field: &str, min: u32, max: u32) -> std::result::Result<(), String> {
     let num = |s: &str| -> std::result::Result<u32, String> {
-        if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        if !is_digits(s) {
             return Err(format!(
                 "'{s}' is not a number (use numbers, not names or macros)"
             ));
@@ -1176,7 +1174,7 @@ fn validate_cron_field(field: &str, min: u32, max: u32) -> std::result::Result<(
             None => (item, None),
         };
         if let Some(step) = step {
-            if step.is_empty() || !step.bytes().all(|b| b.is_ascii_digit()) {
+            if !is_digits(step) {
                 return Err(format!("step '{step}' is not a number"));
             }
             if step.parse::<u32>().map_or(true, |n| n == 0) {
@@ -1302,14 +1300,44 @@ workflow deploy {
         assert_eq!(def.trigger, WorkflowTrigger::Manual);
     }
 
-    fn sched_err(meta: &str) -> String {
+    fn parse_meta(meta: &str) -> std::result::Result<WorkflowDef, String> {
         let src = format!("workflow w {{\n meta {{\n {meta}\n }}\n}}\n");
-        parse_workflow_str(&src, "t.wf").unwrap_err().to_string()
+        parse_workflow_str(&src, "t.wf").map_err(|e| e.to_string())
+    }
+
+    fn meta_warnings(meta: &str) -> Vec<String> {
+        use super::{Lexer, Parser, Token};
+        let src = format!("workflow w {{\n meta {{\n {meta}\n }}\n}}\n");
+        let mut lexer = Lexer::new(&src);
+        let mut tokens = Vec::new();
+        loop {
+            let tok = lexer.next_token().unwrap();
+            let is_eof = tok == Token::Eof;
+            tokens.push(tok);
+            if is_eof {
+                break;
+            }
+        }
+        let mut parser = Parser::new(tokens);
+        parser.parse_workflow().unwrap();
+        parser.warnings
+    }
+
+    #[test]
+    fn trigger_warnings_only_for_pr() {
+        assert!(meta_warnings(r#"trigger = scheduled every = "15m""#).is_empty());
+        assert!(meta_warnings("trigger = manual").is_empty());
+        let pr = meta_warnings("trigger = pr");
+        assert_eq!(pr.len(), 1);
+        assert!(pr[0].contains("not implemented"));
+    }
+
+    fn sched_err(meta: &str) -> String {
+        parse_meta(meta).unwrap_err()
     }
 
     fn sched_ok(meta: &str) -> WorkflowDef {
-        let src = format!("workflow w {{\n meta {{\n {meta}\n }}\n}}\n");
-        parse_workflow_str(&src, "t.wf").unwrap()
+        parse_meta(meta).unwrap()
     }
 
     #[test]
