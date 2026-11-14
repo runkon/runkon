@@ -9,6 +9,7 @@ use crate::engine::{
 };
 use crate::engine_error::{EngineError, Result};
 use crate::events::EngineEvent;
+use crate::prompt_builder::{build_variable_map, substitute_variables_keep_literal};
 use crate::status::WorkflowStepStatus;
 use crate::traits::item_provider::ProviderInfo;
 use crate::traits::persistence::{FanOutItemStatus, FanOutItemUpdate, StepUpdate};
@@ -334,8 +335,10 @@ pub fn execute_foreach(
         Arc::clone(&child_runner),
     ));
 
-    // Clone node.inputs once outside the dispatch loop to avoid re-cloning on every iteration.
+    // `node.inputs` values are templates, resolved per item. Clone once outside the dispatch
+    // loop, and read the parent's variables once per step rather than once per item.
     let base_inputs = node.inputs.clone();
+    let parent_vars = build_variable_map(state);
 
     // Seed terminal counts from items that were already terminal before this dispatch
     // (e.g. partially-resumed runs).  New completions/failures/skips are tracked
@@ -560,13 +563,23 @@ pub fn execute_foreach(
                     )
                     .map_err(p_err)?;
 
-                let mut child_inputs = base_inputs.clone();
+                let mut item_vars: HashMap<String, String> = HashMap::new();
                 // Inject context entries first so struct-level fields always win.
                 for (k, v) in &item.context {
-                    child_inputs.insert(format!("item.{k}"), v.clone());
+                    item_vars.insert(format!("item.{k}"), v.clone());
                 }
-                child_inputs.insert("item.id".to_string(), item.item_id.clone());
-                child_inputs.insert("item.ref".to_string(), item.item_ref.clone());
+                item_vars.insert("item.id".to_string(), item.item_id.clone());
+                item_vars.insert("item.ref".to_string(), item.item_ref.clone());
+
+                // Item variables win over parent variables of the same name.
+                let mut vars = parent_vars.clone();
+                vars.extend(item_vars.iter().map(|(k, v)| (k.clone(), v.clone())));
+                let mut child_inputs: HashMap<String, String> = base_inputs
+                    .iter()
+                    .map(|(k, v)| (k.clone(), substitute_variables_keep_literal(v, &vars)))
+                    .collect();
+                // Keep the raw item.* entries; existing children read them directly.
+                child_inputs.extend(item_vars);
 
                 let ctx = Arc::clone(&parent_ctx);
                 let workflow_name = node.workflow.clone();
