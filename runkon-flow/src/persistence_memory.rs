@@ -443,6 +443,10 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
             }
             step.structured_output = update.structured_output;
             step.step_error = update.step_error;
+            // Keep an earlier value when the update has none, like SQLite's COALESCE.
+            if update.output_file.is_some() {
+                step.output_file = update.output_file;
+            }
         }
         Ok(())
     }
@@ -801,6 +805,7 @@ mod tests {
                 retry_count: None,
                 structured_output: None,
                 step_error: None,
+                output_file: None,
             },
         )
         .unwrap();
@@ -809,6 +814,30 @@ mod tests {
         assert_eq!(steps[0].status, WorkflowStepStatus::Completed);
         assert_eq!(steps[0].result_text.as_deref(), Some("done"));
         assert!(steps[0].ended_at.is_some());
+    }
+
+    #[test]
+    fn terminal_update_records_output_file_and_none_keeps_it() {
+        let p = InMemoryWorkflowPersistence::new();
+        let run = p.create_run(make_new_run("test")).unwrap();
+        let step_id = p.insert_step(make_new_step(&run.id, "s")).unwrap();
+        p.update_step(
+            &step_id,
+            StepUpdate::completed(0, None, None, None, None, 0, None)
+                .with_output_file(Some("/tmp/log".to_string())),
+        )
+        .unwrap();
+        let steps = p.get_steps(&run.id).unwrap();
+        assert_eq!(steps[0].output_file.as_deref(), Some("/tmp/log"));
+
+        // A later update without a path keeps the stored one, like COALESCE.
+        p.update_step(
+            &step_id,
+            StepUpdate::completed(0, None, None, None, None, 0, None),
+        )
+        .unwrap();
+        let steps = p.get_steps(&run.id).unwrap();
+        assert_eq!(steps[0].output_file.as_deref(), Some("/tmp/log"));
     }
 
     #[test]
@@ -835,6 +864,7 @@ mod tests {
                 retry_count: None,
                 structured_output: None,
                 step_error: None,
+                output_file: None,
             },
         );
         assert!(
@@ -858,6 +888,7 @@ mod tests {
                 retry_count: None,
                 structured_output: None,
                 step_error: None,
+                output_file: None,
             },
         )
         .unwrap();

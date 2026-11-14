@@ -126,6 +126,10 @@ pub struct WorkflowRunStep {
     pub gate_approved_at: Option<String>,
     pub gate_feedback: Option<String>,
     pub structured_output: Option<String>,
+    /// Meaning depends on `role`: for agent rows it is the prior-output file
+    /// (feeds `{{prior_output_file}}`); for `STEP_ROLE_SCRIPT` rows it is the
+    /// host-owned capped stderr log (#183), which must not be restored as a
+    /// prior output. Check `role` before treating this as a prior-output path.
     pub output_file: Option<String>,
     pub gate_options: Option<String>,
     pub gate_selections: Option<String>,
@@ -264,7 +268,13 @@ impl StepSuccess {
             context,
             child_run_id: step.child_run_id.clone(),
             structured_output: step.structured_output.clone(),
-            output_file: step.output_file.clone(),
+            // A script row's `output_file` is its stderr log (#183), which must
+            // not feed `{{prior_output_file}}` after a resume.
+            output_file: if step.role == crate::constants::STEP_ROLE_SCRIPT {
+                None
+            } else {
+                step.output_file.clone()
+            },
             iteration,
             metadata: HashMap::new(),
         }
@@ -486,6 +496,21 @@ mod tests {
         assert_eq!(success.output_file, Some("/tmp/out".to_string()));
         assert_eq!(success.iteration, 7);
         assert!(success.metadata.is_empty());
+
+        // A script row's output_file is its stderr log: not restored into context.
+        let script_step = WorkflowRunStep {
+            role: "script".to_string(),
+            output_file: Some("/tmp/log".to_string()),
+            ..WorkflowRunStep::default()
+        };
+        let restored = StepSuccess::from_workflow_run_step(
+            "s".to_string(),
+            &script_step,
+            vec![],
+            String::new(),
+            0,
+        );
+        assert_eq!(restored.output_file, None);
     }
 
     #[test]

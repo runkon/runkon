@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use crate::traits::run_context::RunContext;
 
@@ -28,6 +29,31 @@ pub trait ScriptEnvProvider: Send + Sync {
     /// refuses to start a run with any other prefix.
     fn input_env_prefix(&self) -> &str {
         DEFAULT_INPUT_ENV_PREFIX
+    }
+
+    /// Where to write a script step's log, or `None` (the default) to keep none.
+    ///
+    /// Called once per attempt, since every attempt has its own step row and
+    /// `step_id`. When it returns a path, the executor writes a log there on
+    /// every outcome (success, non-zero exit, timeout, FLOW_OUTPUT parse
+    /// failure): a `--- stderr ---` section and a `--- stdout (outside
+    /// FLOW_OUTPUT) ---` section, only the non-empty ones. The log is capped at
+    /// about 64 KiB; the oldest bytes are dropped and the section starts with
+    /// `… [truncated N bytes]`. The executor creates parent directories and
+    /// overwrites an existing file.
+    ///
+    /// The path is recorded in the step row's `output_file` column, not in the
+    /// step's context, so `{{prior_output_file}}` is unaffected. Nothing is
+    /// written, and no path is recorded, when both sections are empty or the
+    /// write fails.
+    fn script_log_path(
+        &self,
+        _ctx: &dyn RunContext,
+        _step_id: &str,
+        _step_name: &str,
+        _iteration: u32,
+    ) -> Option<PathBuf> {
+        None
     }
 }
 
