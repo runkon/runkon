@@ -126,6 +126,10 @@ pub struct WorkflowRunStep {
     pub gate_approved_at: Option<String>,
     pub gate_feedback: Option<String>,
     pub structured_output: Option<String>,
+    /// Meaning depends on `role`: for agent rows it is the prior-output file
+    /// (feeds `{{prior_output_file}}`); for `STEP_ROLE_SCRIPT` rows it is the
+    /// host-owned capped stderr log (#183), which must not be restored as a
+    /// prior output. Check `role` before treating this as a prior-output path.
     pub output_file: Option<String>,
     pub gate_options: Option<String>,
     pub gate_selections: Option<String>,
@@ -266,7 +270,7 @@ impl StepSuccess {
             structured_output: step.structured_output.clone(),
             // A script row's `output_file` is its stderr log (#183), which must
             // not feed `{{prior_output_file}}` after a resume.
-            output_file: if step.role == "script" {
+            output_file: if step.role == crate::constants::STEP_ROLE_SCRIPT {
                 None
             } else {
                 step.output_file.clone()

@@ -266,6 +266,7 @@ pub fn execute_foreach(
             None,
             0,
             empty_output.clone(),
+            None,
         )?;
 
         record_foreach_step_success(

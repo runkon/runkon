@@ -101,6 +101,7 @@ pub fn execute_call_workflow(
             Some(markers_json),
             attempt,
             None,
+            None,
         )?;
 
         // Bubble up child contexts BEFORE the call_workflow's own success

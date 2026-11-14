@@ -261,13 +261,47 @@ fn write_script_log(path: &Path, out: &CapturedOutput) -> std::io::Result<bool> 
             stdout_budget,
         ));
     }
+    // The log holds raw script output, which can contain tokens (`set -x`
+    // traces, error text), so create it owner-only on unix.
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
+            create_private_dir_all(parent)?;
         }
     }
-    std::fs::write(path, log)?;
+    write_private_file(path, log.as_bytes())?;
     Ok(true)
+}
+
+/// `create_dir_all` with mode 0o700 for newly created directories on unix.
+fn create_private_dir_all(dir: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
+}
+
+/// Write `data` to `path` (truncating), creating it with mode 0o600 on unix.
+/// A pre-existing file is tightened to 0o600 as well.
+fn write_private_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    file.write_all(data)
 }
 
 /// Write the log for one attempt when the host asked for one. Returns the path
@@ -467,8 +501,14 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
     }
 
     if state.exec_config.dry_run {
-        let step_id =
-            super::insert_step_record(state, &node.name, "script", pos, iteration, Some(0))?;
+        let step_id = super::insert_step_record(
+            state,
+            &node.name,
+            crate::constants::STEP_ROLE_SCRIPT,
+            pos,
+            iteration,
+            Some(0),
+        )?;
         tracing::info!("script '{}': dry-run, skipping execution", node.name);
         super::persist_completed_step(
             state,
@@ -478,6 +518,7 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
             None,
             None,
             0,
+            None,
             None,
         )?;
         record_step_success(
@@ -498,8 +539,14 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
     // configuration, so it is never retried.
     let input_prefix = state.script_env_provider.input_env_prefix().to_string();
     if let Err(e) = crate::traits::script_env_provider::validate_input_env_prefix(&input_prefix) {
-        let step_id =
-            super::insert_step_record(state, &node.name, "script", pos, iteration, Some(0))?;
+        let step_id = super::insert_step_record(
+            state,
+            &node.name,
+            crate::constants::STEP_ROLE_SCRIPT,
+            pos,
+            iteration,
+            Some(0),
+        )?;
         let err_msg = format!("Script '{}': {e}", node.name);
         tracing::warn!("{}", err_msg);
         mark_attempt_failed(state, &step_id, &err_msg, 0, None)?;
@@ -608,8 +655,14 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
     let max_attempts = 1 + node.retries;
     let mut last_error = String::new();
     for attempt in 0..max_attempts {
-        let step_id =
-            super::begin_retry_attempt(state, &node.name, "script", pos, iteration, attempt)?;
+        let step_id = super::begin_retry_attempt(
+            state,
+            &node.name,
+            crate::constants::STEP_ROLE_SCRIPT,
+            pos,
+            iteration,
+            attempt,
+        )?;
 
         let log_path = state.script_env_provider.script_log_path(
             state.run_ctx.as_ref(),
@@ -634,19 +687,16 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
 
                 // The log path goes on the step row only: `StepSuccess.output_file`
                 // stays `None` so `{{prior_output_file}}` is unchanged.
-                let generation = state.expect_lease_generation();
-                state.persistence.update_step(
+                super::persist_completed_step(
+                    state,
                     &step_id,
-                    StepUpdate::completed(
-                        generation,
-                        None,
-                        Some(format!("Script '{}' completed", node.name)),
-                        Some(context.clone()),
-                        Some(markers_json),
-                        attempt,
-                        structured_output.clone(),
-                    )
-                    .with_output_file(log_file),
+                    None,
+                    Some(format!("Script '{}' completed", node.name)),
+                    Some(context.clone()),
+                    Some(markers_json),
+                    attempt,
+                    structured_output.clone(),
+                    log_file,
                 )?;
 
                 record_step_success(
@@ -729,6 +779,24 @@ fn fail_step(
 
 #[cfg(test)]
 mod tests {
+
+    #[cfg(unix)]
+    #[test]
+    fn script_log_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a/b/step.log");
+        let out = CapturedOutput {
+            stderr: "boom".to_string(),
+            stderr_dropped: 0,
+            stray_stdout: String::new(),
+            stdout_dropped: 0,
+        };
+        assert!(write_script_log(&path, &out).unwrap());
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+    }
     use super::*;
     use crate::dsl::ScriptNode;
     use crate::engine::ExecutionState;

@@ -178,6 +178,7 @@ pub(super) fn persist_completed_step(
     markers_out: Option<String>,
     attempt: u32,
     structured_output: Option<String>,
+    output_file: Option<String>,
 ) -> crate::engine_error::Result<()> {
     use crate::traits::persistence::StepUpdate;
     let generation = state.expect_lease_generation();
@@ -191,7 +192,8 @@ pub(super) fn persist_completed_step(
             markers_out,
             attempt,
             structured_output,
-        ),
+        )
+        .with_output_file(output_file),
     )
 }
 
