@@ -1,5 +1,66 @@
 # Changelog — runkon-flow
 
+## 0.10.0 — Breaking
+
+- **Added:** `ScriptEnvProvider::script_log_path` (default `None`). When a host returns a
+  path, a script step's stderr and the stdout outside its `FLOW_OUTPUT` block are written
+  there as a log of about 64 KiB, with a `--- stderr ---` and a `--- stdout (outside
+  FLOW_OUTPUT) ---` section (only non-empty ones). The oldest bytes are dropped and the
+  section starts with `… [truncated N bytes]`. The log is written on success, non-zero
+  exit, timeout and output-parse failure, once per attempt, and its path is recorded in
+  the step row's `output_file` column. `{{prior_output_file}}` is unaffected.
+- **Changed:** a failed script step's error now keeps the last 2000 characters of stderr
+  instead of the first. Script output capture is bounded: stderr keeps the last 64 KiB
+  and stdout the last 1 MiB, so a `FLOW_OUTPUT` block cut by that cap fails to parse.
+- **Changed (breaking):** `StepUpdate` gains a public `output_file` field, persisted on
+  terminal updates (`None` keeps the stored value). Hosts that build `StepUpdate` with a
+  struct literal must add `output_file: None`.
+
+- **Fixed:** a `script` step's `retries = N` and `on_fail = <agent>` were accepted and
+  silently ignored. A failing script (non-zero exit, timeout, or an unparseable
+  `FLOW_OUTPUT` block) is now retried up to N times, each attempt recorded as its own step
+  row as for `call`. After the last failure the `on_fail` agent runs with `{{failed_step}}`,
+  `{{failure_reason}}` and `{{retry_count}}` set. `on_fail = continue` is unchanged.
+
+- **Fixed:** a `foreach` step's `inputs` values now substitute `{{item.id}}`, `{{item.ref}}`,
+  `{{item.<key>}}` and the parent's `{{name}}` variables for each item before the child
+  workflow starts. Before, the child got the placeholder text literally. An unknown
+  `{{name}}` stays literal. The raw `item.*` input keys are still passed.
+
+- **Fixed:** a gate's `prompt` now substitutes `{{name}}` workflow variables (inputs,
+  engine variables, prior steps' FLOW_OUTPUT fields, gate feedback) when the gate starts,
+  so the stored gate prompt, the resolver's `GateParams.prompt` and anything a host shows
+  from them carry the resolved text. An unknown `{{name}}` stays literal.
+
+- **Fixed:** if another engine resumed a run while the original engine was still polling a
+  gate (as a host does when it approves and resumes from another process), the original
+  engine could run the step after the gate a second time and leave its row `running`. A
+  gate now stops polling once its lease is lost and checks that its engine still holds the
+  run's lease before acting on a decision.
+- **Fixed:** an engine that loses a run's lease no longer writes `Cancelled` over the
+  terminal status the new owner set.
+
+- **Fixed:** a gate decided without feedback (an approval, a rejection, a dry-run
+  approval, or a timeout that continues) no longer leaves an earlier gate's feedback in
+  `{{gate_feedback}}`. It is now always the most recent gate's value, also after a resume,
+  and a resume now restores a gate's selections as a live run does.
+- **Added:** `{{<gate-name>.feedback}}` reads a specific gate's feedback, or its joined
+  selections, and is empty when that gate had neither.
+- **Changed (breaking):** `ExecutionState` has a new public field, `gate_feedback_by_gate`.
+  Hosts that build it with a struct literal must add `gate_feedback_by_gate:
+  Default::default()`.
+
+- **Added:** `meta { trigger = scheduled }` takes a schedule: `every = "<duration>"` or
+  `cron = "<5-field cron>"` (exactly one), and an optional `timezone`. It is validated at
+  parse time and exposed as `WorkflowDef::schedule` (`Schedule` / `ScheduleSpec`). runkon
+  never runs it; the host does.
+- **Changed:** a scheduled trigger without a schedule, with both `every` and `cron`, or a
+  schedule field on a `manual` or `pr` workflow is a parse error naming the workflow. The
+  "not implemented in v1" warning is no longer logged for `scheduled`.
+- **Changed (breaking):** `WorkflowDef` gains a public `schedule: Option<Schedule>` field.
+  Hosts that build `WorkflowDef` with a struct literal must add `schedule: None`.
+  Serialised defs without the field still deserialise.
+
 ## 0.9.0 — Breaking
 
 - **Changed (breaking):** `runkon-flow-executors`' `agent_loader` no longer hard-codes the
