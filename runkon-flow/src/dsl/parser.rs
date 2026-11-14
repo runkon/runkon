@@ -7,7 +7,8 @@ use super::types::{
     AgentRef, AlwaysNode, CallNode, CallWorkflowNode, Condition, DoNode, DoWhileNode, ForEachNode,
     GateNode, GateOptions, IfNode, InputDecl, InputType, OnChildFail, OnCycle, OnFail,
     OnFailAction, OnMaxIter, OnTimeout, ParallelNode, QualityGateConfig, Schedule, ScheduleSpec,
-    ScriptNode, UnlessNode, WhileNode, WorkflowDef, WorkflowNode, WorkflowTrigger, QUALITY_GATE_TYPE,
+    ScriptNode, UnlessNode, WhileNode, WorkflowDef, WorkflowNode, WorkflowTrigger,
+    QUALITY_GATE_TYPE,
 };
 
 // ---------------------------------------------------------------------------
@@ -1094,12 +1095,10 @@ fn build_schedule(
     }
 
     let spec = match (every, cron) {
-        (None, None) => {
-            return Err(format!(
-                "workflow '{name}': trigger = scheduled needs a schedule: set every = \"<duration>\" \
+        (None, None) => return Err(format!(
+            "workflow '{name}': trigger = scheduled needs a schedule: set every = \"<duration>\" \
                  or cron = \"<5-field cron>\" in meta"
-            ))
-        }
+        )),
         (Some(_), Some(_)) => {
             return Err(format!(
                 "workflow '{name}': set only one of 'every' or 'cron' in meta, not both"
@@ -1267,8 +1266,8 @@ pub fn parse_workflow_str(input: &str, source_path: &str) -> Result<WorkflowDef,
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_duration_str, parse_workflow_str};
     use super::validate_cron;
+    use super::{parse_duration_str, parse_workflow_str};
     use crate::dsl::{
         AgentRef, Condition, InputType, ScheduleSpec, WorkflowDef, WorkflowNode, WorkflowTrigger,
     };
@@ -1327,11 +1326,10 @@ workflow deploy {
             .unwrap();
         assert_eq!(s.cron(), Some("0 8 * * 1-5"));
         assert_eq!(s.timezone, None);
-        let s = sched_ok(
-            r#"trigger = scheduled cron = "0 8 * * 1-5" timezone = "America/New_York""#,
-        )
-        .schedule
-        .unwrap();
+        let s =
+            sched_ok(r#"trigger = scheduled cron = "0 8 * * 1-5" timezone = "America/New_York""#)
+                .schedule
+                .unwrap();
         assert_eq!(s.timezone.as_deref(), Some("America/New_York"));
     }
 
