@@ -797,12 +797,21 @@ pub fn run_workflow_engine(
             .cancellation
             .reason()
             .unwrap_or(crate::cancellation_reason::CancellationReason::UserRequested(None));
-        state.persistence.update_run_status(
-            &wf_run_id,
-            WorkflowRunStatus::Cancelled,
-            Some(&summary),
-            body_error.as_deref(),
-        )?;
+        // After LeaseLost another engine owns the run and decides its terminal status;
+        // writing Cancelled here would overwrite a run it has completed.
+        if cancel_reason == crate::cancellation_reason::CancellationReason::LeaseLost {
+            tracing::warn!(
+                "Workflow '{}' lost its lease; leaving the run status to the new owner",
+                workflow.name
+            );
+        } else {
+            state.persistence.update_run_status(
+                &wf_run_id,
+                WorkflowRunStatus::Cancelled,
+                Some(&summary),
+                body_error.as_deref(),
+            )?;
+        }
         tracing::warn!("Workflow '{}' was cancelled", workflow.name);
         emit_event(
             state,
