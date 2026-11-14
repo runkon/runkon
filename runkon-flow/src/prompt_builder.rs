@@ -186,12 +186,39 @@ pub fn build_variable_map(state: &ExecutionState) -> HashMap<String, String> {
         }
     }
 
+    // Per-gate feedback, inserted last so the engine's value wins over a script extra of
+    // the same name. A decided gate without feedback is an empty string; a gate that never
+    // ran is absent.
+    for (gate, value) in &state.gate_feedback_by_gate {
+        vars.insert(
+            format!("{gate}.feedback"),
+            value.clone().unwrap_or_default(),
+        );
+    }
+
     vars
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_variable_map_exposes_per_gate_feedback() {
+        let cp = std::sync::Arc::new(crate::test_helpers::CountingPersistence::new());
+        let mut state = crate::test_helpers::make_test_execution_state(
+            cp as std::sync::Arc<dyn crate::traits::persistence::WorkflowPersistence>,
+            "run-1".into(),
+        );
+        state
+            .gate_feedback_by_gate
+            .insert("first".into(), Some("edited draft".into()));
+        state.gate_feedback_by_gate.insert("second".into(), None);
+        let vars = build_variable_map(&state);
+        assert_eq!(vars["first.feedback"], "edited draft");
+        assert_eq!(vars["second.feedback"], "");
+        assert!(!vars.contains_key("third.feedback"));
+    }
 
     #[test]
     fn substitute_strips_unresolved() {

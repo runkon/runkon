@@ -108,3 +108,7 @@ required-features = ["test-utils"]
 [[test]]
 name = "gate_step_runs_once"
 required-features = ["test-utils"]
+
+[[test]]
+name = "gate_feedback_scope"
+required-features = ["test-utils"]
