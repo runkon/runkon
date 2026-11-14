@@ -57,10 +57,7 @@ fn run_script_once(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            return ScriptAttempt::Failed(format!(
-                "Script '{}' failed to execute: {e}",
-                node.name
-            ));
+            return ScriptAttempt::Failed(format!("Script '{}' failed to execute: {e}", node.name));
         }
     };
 
@@ -107,10 +104,7 @@ fn run_script_once(
             Err(e) => {
                 let _ = stdout_handle.join();
                 let _ = stderr_handle.join();
-                return ScriptAttempt::Failed(format!(
-                    "Script '{}' wait failed: {e}",
-                    node.name
-                ));
+                return ScriptAttempt::Failed(format!("Script '{}' wait failed: {e}", node.name));
             }
         }
     } else {
@@ -119,10 +113,7 @@ fn run_script_once(
             Err(e) => {
                 let _ = stdout_handle.join();
                 let _ = stderr_handle.join();
-                return ScriptAttempt::Failed(format!(
-                    "Script '{}' wait failed: {e}",
-                    node.name
-                ));
+                return ScriptAttempt::Failed(format!("Script '{}' wait failed: {e}", node.name));
             }
         }
     };
