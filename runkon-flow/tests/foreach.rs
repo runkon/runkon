@@ -588,6 +588,163 @@ fn test_foreach_item_context_injected_into_child_inputs() {
     );
 }
 
+/// Run a foreach over `items` with `node_inputs`, returning every child's captured inputs.
+fn run_foreach_with_inputs(
+    provider_name: &str,
+    items: Vec<(String, String, String, HashMap<String, String>)>,
+    node_inputs: &[(&str, &str)],
+    parent_inputs: &[(&str, &str)],
+    max_parallel: u32,
+) -> Vec<HashMap<String, String>> {
+    use runkon_flow::ItemProviderRegistry;
+
+    let runner = Arc::new(InputCapturingRunner::new());
+    let persistence = make_persistence();
+    let mut state = common::make_state("subst-test", Arc::clone(&persistence), HashMap::new());
+    state.child_runner =
+        Some(Arc::clone(&runner) as Arc<dyn runkon_flow::engine::ChildWorkflowRunner>);
+    state.exec_config.fail_fast = false;
+    for (k, v) in parent_inputs {
+        state.inputs.insert(k.to_string(), v.to_string());
+    }
+    let mut registry = ItemProviderRegistry::new();
+    registry.register(ContextItemProvider {
+        name: provider_name.to_string(),
+        items,
+    });
+    state.registry = Arc::new(registry);
+
+    let mut node = foreach_node(
+        "fan-out",
+        provider_name,
+        "child-wf",
+        max_parallel,
+        OnChildFail::Halt,
+    );
+    for (k, v) in node_inputs {
+        node.inputs.insert(k.to_string(), v.to_string());
+    }
+    let result = execute_foreach(&mut state, &node, 0);
+    assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+    runner.captured_inputs()
+}
+
+fn ctx_of(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+    pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
+fn by_item_id(list: &[HashMap<String, String>], id: &str) -> HashMap<String, String> {
+    list.iter()
+        .find(|m| m.get("item.id").map(String::as_str) == Some(id))
+        .unwrap_or_else(|| panic!("no child captured for item {id}"))
+        .clone()
+}
+
+#[test]
+fn test_foreach_substitutes_item_placeholders_for_tickets() {
+    let items = vec![
+        (
+            "ticket".to_string(),
+            "t1".to_string(),
+            "T-1".to_string(),
+            ctx_of(&[("title", "First"), ("state", "open")]),
+        ),
+        (
+            "ticket".to_string(),
+            "t2".to_string(),
+            "T-2".to_string(),
+            ctx_of(&[("title", "Second"), ("state", "closed")]),
+        ),
+    ];
+    let list = run_foreach_with_inputs(
+        "tickets",
+        items,
+        &[
+            ("ticket_id", "{{item.id}}"),
+            ("title", "{{item.title}}"),
+            ("label", "{{item.ref}}: {{item.state}}"),
+        ],
+        &[],
+        2,
+    );
+    assert_eq!(list.len(), 2);
+    let a = by_item_id(&list, "t1");
+    assert_eq!(a["ticket_id"], "t1");
+    assert_eq!(a["title"], "First");
+    assert_eq!(a["label"], "T-1: open");
+    let b = by_item_id(&list, "t2");
+    assert_eq!(b["ticket_id"], "t2");
+    assert_eq!(b["title"], "Second");
+    assert_eq!(b["label"], "T-2: closed");
+}
+
+#[test]
+fn test_foreach_substitutes_item_placeholders_for_worktrees() {
+    let items = vec![(
+        "worktree".to_string(),
+        "wt1".to_string(),
+        "feat-a".to_string(),
+        ctx_of(&[("ticket_id", "tk-9"), ("branch", "feat/a")]),
+    )];
+    let list = run_foreach_with_inputs(
+        "worktrees",
+        items,
+        &[
+            ("ticket_id", "{{item.ticket_id}}"),
+            ("worktree", "{{item.id}}"),
+        ],
+        &[],
+        1,
+    );
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["ticket_id"], "tk-9");
+    assert_eq!(list[0]["worktree"], "wt1");
+}
+
+#[test]
+fn test_foreach_input_mixes_parent_variable_and_item_and_keeps_unknown_literal() {
+    let items = vec![(
+        "ticket".to_string(),
+        "t1".to_string(),
+        "T-1".to_string(),
+        HashMap::new(),
+    )];
+    let list = run_foreach_with_inputs(
+        "tickets",
+        items,
+        &[("target", "{{repo}}:{{item.ref}}"), ("raw", "{{nope}}")],
+        &[("repo", "acme")],
+        1,
+    );
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["target"], "acme:T-1");
+    assert_eq!(list[0]["raw"], "{{nope}}");
+    // Raw item.* keys are still passed.
+    assert_eq!(list[0]["item.id"], "t1");
+    assert_eq!(list[0]["item.ref"], "T-1");
+}
+
+#[test]
+fn test_foreach_item_value_containing_placeholder_is_not_expanded_again() {
+    let items = vec![(
+        "ticket".to_string(),
+        "t1".to_string(),
+        "T-1".to_string(),
+        ctx_of(&[("title", "see {{repo}}")]),
+    )];
+    let list = run_foreach_with_inputs(
+        "tickets",
+        items,
+        &[("title", "{{item.title}}")],
+        &[("repo", "acme")],
+        1,
+    );
+    assert_eq!(list[0]["title"], "see {{repo}}");
+}
+
 #[test]
 fn test_foreach_ordered_dependencies_error_propagates() {
     let persistence = make_persistence();
