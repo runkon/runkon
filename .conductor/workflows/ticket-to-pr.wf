@@ -31,7 +31,7 @@ workflow ticket-to-pr {
       env = { PRIOR_OUTPUT = "{{prior_output}}" }
     }
     gate human_review {
-      prompt     = "The plan has decisions for you; the questions and the plan's defaults are in the show-plan-decisions step. Approve with your answers as feedback (approving without feedback keeps the defaults), or reject to stop the run."
+      prompt     = "The plan has decisions for you; the questions, the plan's defaults and PLAN.md's absolute path are in the show-plan-decisions step (PLAN.md is in the worktree's git directory, not the worktree). Approve with your answers as feedback (approving without feedback keeps the defaults), or reject to stop the run."
       timeout    = "72h"
       on_timeout = fail
     }
