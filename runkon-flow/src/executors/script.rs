@@ -797,6 +797,28 @@ mod tests {
         assert_eq!(mode(&path), 0o600);
         assert_eq!(mode(path.parent().unwrap()), 0o700);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn script_log_tightens_and_replaces_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("step.log");
+        std::fs::write(&path, "old content that is much longer than the new log").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let out = CapturedOutput {
+            stderr: "boom".to_string(),
+            stderr_dropped: 0,
+            stray_stdout: String::new(),
+            stdout_dropped: 0,
+        };
+        assert!(write_script_log(&path, &out).unwrap());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("boom"));
+        assert!(!content.contains("old content"));
+    }
     use super::*;
     use crate::dsl::ScriptNode;
     use crate::engine::ExecutionState;
