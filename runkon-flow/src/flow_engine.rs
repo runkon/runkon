@@ -340,6 +340,7 @@ fn make_fresh_execution_state(
         total_cache_creation_input_tokens: 0,
         has_llm_metrics: false,
         last_gate_feedback: None,
+        gate_feedback_by_gate: HashMap::new(),
         block_output: None,
         block_with: vec![],
         resume_ctx: None,

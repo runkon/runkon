@@ -85,6 +85,49 @@ fn resolve_gate_options(state: &ExecutionState, node: &GateNode) -> Result<Vec<G
 /// `gate_resolver:<gate_type>`.
 pub const GATE_RESOLVER_ACTOR_PREFIX: &str = "gate_resolver";
 
+/// A gate's value for `{{gate_feedback}}`: non-empty selections joined with ", ", else its
+/// feedback.
+pub(crate) fn gate_feedback_value(
+    feedback: Option<String>,
+    selections: Option<Vec<String>>,
+) -> Option<String> {
+    match selections {
+        Some(sel) if !sel.is_empty() => Some(sel.join(", ")),
+        _ => feedback,
+    }
+}
+
+/// The feedback value a persisted gate row carries. Bad `gate_selections` JSON is logged
+/// and treated as no selections.
+pub(crate) fn gate_feedback_from_row(row: &crate::types::WorkflowRunStep) -> Option<String> {
+    let selections = row.gate_selections.as_deref().and_then(|s| {
+        match serde_json::from_str::<Vec<String>>(s) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!(
+                    "Gate '{}': invalid gate_selections JSON on resume: {e}",
+                    row.step_name
+                );
+                None
+            }
+        }
+    });
+    gate_feedback_value(row.gate_feedback.clone(), selections)
+}
+
+/// Record a gate's decided value as both the most recent gate's and the named gate's.
+/// `None` overwrites an earlier gate's value.
+pub(crate) fn record_gate_feedback(
+    state: &mut ExecutionState,
+    gate_name: &str,
+    value: Option<String>,
+) {
+    state.last_gate_feedback = value.clone();
+    state
+        .gate_feedback_by_gate
+        .insert(gate_name.to_string(), value);
+}
+
 fn finish_approved(
     state: &mut ExecutionState,
     node: &GateNode,
@@ -92,15 +135,7 @@ fn finish_approved(
     selections: Option<Vec<String>>,
 ) -> Result<()> {
     tracing::info!("Gate '{}' approved", node.name);
-    if let Some(ref fb) = feedback {
-        state.last_gate_feedback = Some(fb.clone());
-    }
-    if let Some(sel) = selections {
-        if !sel.is_empty() {
-            // Store gate selection as feedback
-            state.last_gate_feedback = Some(sel.join(", "));
-        }
-    }
+    record_gate_feedback(state, &node.name, gate_feedback_value(feedback, selections));
     resume_run_status(state, &node.name, "after approval");
     emit_event(
         state,
@@ -119,6 +154,7 @@ fn finish_rejected(
 ) -> Result<()> {
     tracing::warn!("Gate '{}' rejected", node.name);
     state.all_succeeded = false;
+    record_gate_feedback(state, &node.name, feedback.clone());
     resume_run_status(state, &node.name, "after rejection");
     emit_event(
         state,
@@ -211,7 +247,14 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
     state.position += 1;
 
     // Skip completed gates on resume — restore feedback for downstream steps
-    if super::skip_if_already_completed(state, &node.name, iteration, &node.name) {
+    if super::skip_if_already_completed_with(state, &node.name, iteration, &node.name, |s, row| {
+        crate::engine::restore_step_row(s, row, &node.name, iteration);
+        // Also covers dry-run gate rows, which carry no gate_type.
+        if node.gate_type != QUALITY_GATE_TYPE {
+            record_gate_feedback(s, &node.name, gate_feedback_from_row(row));
+        }
+        Ok(())
+    })? {
         return Ok(());
     }
 
@@ -223,6 +266,7 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
     // Dry-run: auto-approve all gates
     if state.exec_config.dry_run {
         tracing::info!("gate '{}': dry-run auto-approved", node.name);
+        record_gate_feedback(state, &node.name, None);
         super::insert_step_with_status(
             state,
             super::StepSpec {
@@ -528,6 +572,7 @@ pub fn handle_gate_timeout(
                 },
             )?;
             state.all_succeeded = false;
+            record_gate_feedback(state, &node.name, None);
             resume_run_status(state, &node.name, "after timeout (fail)");
             Err(EngineError::Workflow(format!(
                 "Gate '{}' timed out",
@@ -549,6 +594,7 @@ pub fn handle_gate_timeout(
                     step_error: None,
                 },
             )?;
+            record_gate_feedback(state, &node.name, None);
             resume_run_status(state, &node.name, "after timeout (continue)");
             Ok(())
         }
@@ -559,6 +605,16 @@ pub fn handle_gate_timeout(
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    #[test]
+    fn gate_feedback_value_prefers_non_empty_selections() {
+        use super::gate_feedback_value as v;
+        let sel = |s: &[&str]| Some(s.iter().map(|x| x.to_string()).collect::<Vec<_>>());
+        assert_eq!(v(Some("fb".into()), sel(&["a", "b"])).as_deref(), Some("a, b"));
+        assert_eq!(v(Some("fb".into()), sel(&[])).as_deref(), Some("fb"));
+        assert_eq!(v(Some("fb".into()), None).as_deref(), Some("fb"));
+        assert_eq!(v(None, None), None);
+    }
 
     use super::*;
     use crate::dsl::{ApprovalMode, GateNode, GateOptions, OnTimeout};

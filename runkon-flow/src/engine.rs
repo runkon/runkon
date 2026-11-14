@@ -322,6 +322,10 @@ pub struct ExecutionState {
     pub total_cache_creation_input_tokens: i64,
     pub has_llm_metrics: bool,
     pub last_gate_feedback: Option<String>,
+    /// Feedback (or joined selections) of each decided gate, by gate name; the latest
+    /// iteration wins. `None` means the gate was decided without feedback. Exposed to
+    /// prompts as `{{<gate>.feedback}}`.
+    pub gate_feedback_by_gate: HashMap<String, Option<String>>,
     pub block_output: Option<String>,
     pub block_with: Vec<String>,
     pub resume_ctx: Option<ResumeContext>,
@@ -615,6 +619,7 @@ impl ExecutionState {
         child.total_cache_creation_input_tokens = 0;
         child.has_llm_metrics = false;
         child.last_gate_feedback = None;
+        child.gate_feedback_by_gate.clear();
         child.block_output = None;
         child.block_with.clear();
         child.resume_ctx = None;
@@ -1259,9 +1264,14 @@ pub fn restore_step_row(
     step_key: &str,
     iteration: u32,
 ) {
-    // Restore gate feedback if this was a gate step
-    if let Some(ref feedback) = step.gate_feedback {
-        state.last_gate_feedback = Some(feedback.clone());
+    // A gate row decides the feedback, including `None`, so an earlier gate's value
+    // never carries over a later gate decided without any.
+    if step.gate_type.is_some() {
+        crate::executors::gate::record_gate_feedback(
+            state,
+            step_key,
+            crate::executors::gate::gate_feedback_from_row(step),
+        );
     }
 
     let success = success_from_row(step, step_key, step_key, iteration);
@@ -1868,6 +1878,7 @@ mod tests {
             total_cache_creation_input_tokens: 25,
             has_llm_metrics: false,
             last_gate_feedback: Some("feedback".to_string()),
+            gate_feedback_by_gate: HashMap::from([("g".to_string(), None)]),
             block_output: Some("output".to_string()),
             block_with: vec!["with".to_string()],
             resume_ctx: None,
@@ -1919,6 +1930,7 @@ mod tests {
             "has_llm_metrics should be reset in fork_child"
         );
         assert!(child.last_gate_feedback.is_none());
+        assert!(child.gate_feedback_by_gate.is_empty());
         assert!(child.block_output.is_none());
         assert!(child.block_with.is_empty());
         assert!(child.resume_ctx.is_none());
@@ -2005,6 +2017,7 @@ mod tests {
             total_cache_creation_input_tokens: 0,
             has_llm_metrics: false,
             last_gate_feedback: None,
+            gate_feedback_by_gate: HashMap::new(),
             block_output: None,
             block_with: vec![],
             resume_ctx: None,
