@@ -1506,7 +1506,10 @@ mod tests {
             step_name: &str,
             iteration: u32,
         ) -> Option<std::path::PathBuf> {
-            Some(self.0.join(format!("{step_name}-{iteration}-{step_id}.log")))
+            Some(
+                self.0
+                    .join(format!("{step_name}-{iteration}-{step_id}.log")),
+            )
         }
     }
 
@@ -1603,7 +1606,8 @@ mod tests {
     fn malformed_flow_output_writes_log_with_the_bad_block() {
         let dir = tempfile::tempdir().unwrap();
         let (persistence, run_id, mut state) = state_with_log_dir(&dir);
-        let script = "echo 'why' >&2; printf '<<<FLOW_OUTPUT>>>\\n{not json\\n<<<END_FLOW_OUTPUT>>>\\n'";
+        let script =
+            "echo 'why' >&2; printf '<<<FLOW_OUTPUT>>>\\n{not json\\n<<<END_FLOW_OUTPUT>>>\\n'";
         assert!(execute_script(&mut state, &make_node("bad", script), 0).is_err());
 
         let steps = persistence.get_steps(&run_id).unwrap();
@@ -1624,7 +1628,11 @@ mod tests {
         let steps = persistence.get_steps(&run_id).unwrap();
         let log = std::fs::read_to_string(steps[0].output_file.as_ref().unwrap()).unwrap();
         assert!(log.len() <= LOG_CAP + 100, "log is {} bytes", log.len());
-        assert!(log.starts_with("--- stderr ---\n… [truncated "), "{}", &log[..60]);
+        assert!(
+            log.starts_with("--- stderr ---\n… [truncated "),
+            "{}",
+            &log[..60]
+        );
         assert!(log.ends_with("LAST_LINE\n"));
     }
 
