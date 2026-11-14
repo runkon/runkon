@@ -379,3 +379,44 @@ fn resume_past_a_dry_run_gate_row_clears_the_earlier_gates_value() {
     assert_eq!(vars["first.feedback"], "edited draft");
     assert_eq!(vars["second.feedback"], "");
 }
+
+#[test]
+fn resume_past_a_quality_gate_row_keeps_the_earlier_gates_value() {
+    let p = make_persistence();
+    let run_id = new_run(&p);
+    seed_decided_gate(&p, &run_id, "first", 0, Some("edited draft"), None);
+    // A completed quality-gate row carries no gate_type and never sets gate feedback.
+    seed_dry_run_gate_row(&p, &run_id, "second", 2);
+    let seen: Seen = Arc::default();
+    let mut state = state_for(&p, &run_id, &seen);
+
+    let WorkflowNode::Gate(mut g) = gate_node("second") else {
+        unreachable!()
+    };
+    g.gate_type = runkon_flow::dsl::QUALITY_GATE_TYPE.to_string();
+    g.quality_gate = Some(runkon_flow::dsl::QualityGateConfig {
+        source: "between".to_string(),
+        threshold: 50,
+        on_fail_action: runkon_flow::dsl::OnFailAction::Fail,
+    });
+    let d = make_def(
+        "wf",
+        vec![
+            waiting_gate("first"),
+            call_node("between"),
+            WorkflowNode::Gate(g),
+            call_node("after"),
+        ],
+    );
+
+    let result = engine(HashMap::new()).resume(&d, &mut state).unwrap();
+    assert!(result.all_succeeded);
+
+    assert_eq!(
+        seen.lock().unwrap()["after"].as_deref(),
+        Some("edited draft")
+    );
+    let vars = build_variable_map(&state);
+    assert_eq!(vars["gate_feedback"], "edited draft");
+    assert_eq!(vars["first.feedback"], "edited draft");
+}
