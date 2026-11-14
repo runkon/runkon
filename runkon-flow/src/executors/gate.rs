@@ -623,9 +623,11 @@ mod tests {
 
     #[test]
     fn gate_feedback_from_row_handles_bad_and_empty_selections() {
-        let mut row = crate::types::WorkflowRunStep::default();
-        row.gate_feedback = Some("plain".into());
-        row.gate_selections = Some("not json".into());
+        let mut row = crate::types::WorkflowRunStep {
+            gate_feedback: Some("plain".into()),
+            gate_selections: Some("not json".into()),
+            ..Default::default()
+        };
         assert_eq!(
             super::gate_feedback_from_row(&row).as_deref(),
             Some("plain")
