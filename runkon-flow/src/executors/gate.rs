@@ -243,6 +243,9 @@ fn poll_resolver(
 /// `timeout_secs` and run cancellation are checked only between polls, so a resolver call
 /// that blocks overshoots both by however long it runs. The engine does not bound the call;
 /// resolvers must bound their own I/O (see `GateResolver::poll`).
+///
+/// The gate prompt is rendered with the run's workflow variables when the gate starts. The
+/// rendered text is stored and passed to the resolver; an unknown `{{name}}` stays literal.
 pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32) -> Result<()> {
     let pos = state.position;
     state.position += 1;
@@ -291,9 +294,13 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
         .iter()
         .map(|o| (o.value.clone(), o.label.clone()))
         .collect();
+    let prompt = node.prompt.as_deref().map(|p| {
+        let vars = crate::prompt_builder::build_variable_map(state);
+        crate::prompt_builder::substitute_variables_keep_literal(p, &vars)
+    });
     let gate_info = GateStepInfo {
         gate_type: node.gate_type.clone(),
-        prompt: node.prompt.clone(),
+        prompt: prompt.clone(),
         timeout_secs: node.timeout_secs,
         options,
     };
@@ -324,7 +331,7 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
 
     let params = GateParams {
         gate_name: node.name.clone(),
-        prompt: node.prompt.clone(),
+        prompt,
         min_approvals: node.min_approvals,
         approval_mode: node.approval_mode.clone(),
         options: params_options,
@@ -724,6 +731,53 @@ mod tests {
         );
     }
 
+    fn gate_row_prompt(
+        state: &mut ExecutionState,
+        cp: &CountingPersistence,
+        run_id: &str,
+        prompt: &str,
+    ) -> Option<String> {
+        let mut node = gate_node(None, 0);
+        node.prompt = Some(prompt.into());
+        let _ = execute_gate(state, &node, 0);
+        cp.get_steps(run_id).unwrap()[0].gate_prompt.clone()
+    }
+
+    #[test]
+    fn gate_prompt_substitutes_workflow_variables() {
+        let (mut state, cp, run_id) = make_state(VecSink::new());
+        state
+            .inputs
+            .insert("plan_path".into(), "/abs/.git/worktrees/x/PLAN.md".into());
+        let got = gate_row_prompt(&mut state, &cp, &run_id, "Review PLAN.md at {{plan_path}}");
+        assert_eq!(
+            got.as_deref(),
+            Some("Review PLAN.md at /abs/.git/worktrees/x/PLAN.md")
+        );
+    }
+
+    #[test]
+    fn gate_prompt_substitutes_flow_output_extras() {
+        let (mut state, cp, run_id) = make_state(VecSink::new());
+        state.contexts.push(crate::types::ContextEntry {
+            step: "show-plan".into(),
+            iteration: 0,
+            context: String::new(),
+            markers: vec![],
+            structured_output: Some(r#"{"plan_path":"/p/PLAN.md"}"#.into()),
+            output_file: None,
+        });
+        let got = gate_row_prompt(&mut state, &cp, &run_id, "at {{plan_path}}");
+        assert_eq!(got.as_deref(), Some("at /p/PLAN.md"));
+    }
+
+    #[test]
+    fn gate_prompt_keeps_unknown_placeholder_literal() {
+        let (mut state, cp, run_id) = make_state(VecSink::new());
+        let got = gate_row_prompt(&mut state, &cp, &run_id, "see {{nope}}");
+        assert_eq!(got.as_deref(), Some("see {{nope}}"));
+    }
+
     #[test]
     fn unresolvable_step_ref_fails_before_any_row_or_event() {
         let cases: [(&str, Option<&str>); 5] = [
@@ -862,6 +916,51 @@ mod tests {
             .into_iter()
             .find(|s| s.step_name == "approve")
             .unwrap()
+    }
+
+    /// Runs a `pr_checks` gate with `prompt` and returns (stored row prompt, prompt the
+    /// resolver received).
+    fn resolver_and_row_prompt(
+        state: &mut ExecutionState,
+        cp: &CountingPersistence,
+        run_id: &str,
+        prompt: Option<&str>,
+    ) -> (Option<String>, Option<String>) {
+        let (_polls, seen) = install_resolver(state, |_, _| GatePoll::Approved(None));
+        let mut node = pr_checks_node();
+        node.prompt = prompt.map(String::from);
+        execute_gate(state, &node, 0).expect("resolver approves");
+        let received = seen.lock().unwrap()[0].1.clone();
+        (gate_step(cp, run_id).gate_prompt, received)
+    }
+
+    #[test]
+    fn resolver_receives_rendered_gate_prompt() {
+        let (mut state, cp, run_id) = make_state(VecSink::new());
+        state
+            .inputs
+            .insert("plan_path".into(), "/abs/PLAN.md".into());
+        let (row, received) =
+            resolver_and_row_prompt(&mut state, &cp, &run_id, Some("Review {{plan_path}}"));
+        assert_eq!(row.as_deref(), Some("Review /abs/PLAN.md"));
+        assert_eq!(received.as_deref(), Some("Review /abs/PLAN.md"));
+    }
+
+    #[test]
+    fn gate_prompt_without_placeholders_is_unchanged() {
+        let (mut state, cp, run_id) = make_state(VecSink::new());
+        let (row, received) =
+            resolver_and_row_prompt(&mut state, &cp, &run_id, Some("ship it? (y/n)"));
+        assert_eq!(row.as_deref(), Some("ship it? (y/n)"));
+        assert_eq!(received.as_deref(), Some("ship it? (y/n)"));
+    }
+
+    #[test]
+    fn gate_without_prompt_stays_none() {
+        let (mut state, cp, run_id) = make_state(VecSink::new());
+        let (row, received) = resolver_and_row_prompt(&mut state, &cp, &run_id, None);
+        assert_eq!(row, None);
+        assert_eq!(received, None);
     }
 
     #[test]
