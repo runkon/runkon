@@ -731,7 +731,12 @@ mod tests {
         );
     }
 
-    fn gate_row_prompt(state: &mut ExecutionState, cp: &CountingPersistence, run_id: &str, prompt: &str) -> Option<String> {
+    fn gate_row_prompt(
+        state: &mut ExecutionState,
+        cp: &CountingPersistence,
+        run_id: &str,
+        prompt: &str,
+    ) -> Option<String> {
         let mut node = gate_node(None, 0);
         node.prompt = Some(prompt.into());
         let _ = execute_gate(state, &node, 0);
