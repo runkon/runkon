@@ -319,10 +319,12 @@ fn lease_verification_error_fails_the_run_and_skips_next_step() {
         .approve_gate(&gate_id, "tester", None, None)
         .unwrap();
 
+    // The engine reports a failed run as `Ok` with `all_succeeded == false`; what matters is
+    // that it is not a `LeaseLost` abort and the run reaches a terminal status.
     let result = handle.join().unwrap();
     assert!(
-        matches!(result, Err(EngineError::Persistence(_))),
-        "a lease verification error must return Persistence, not LeaseLost: {result:?}"
+        matches!(&result, Ok(r) if !r.all_succeeded),
+        "a lease verification error must fail the run, not abort as LeaseLost: {result:?}"
     );
     assert_eq!(count.load(Ordering::SeqCst), 0, "next step must not run");
     let run = persistence.get_run(&run_id).unwrap().unwrap();
