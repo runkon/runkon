@@ -39,6 +39,13 @@ fi
 
 SKIP_E2E=1 git push -u origin "$current_branch"
 
+# `gh pr create` needs --title whenever it isn't given --fill, which is the case
+# whenever pr-body.sh built a description. Title it from the oldest commit's
+# subject (implement writes it in conventional form); with more than one commit,
+# --fill would otherwise title it from the branch name. sed, not head: sed reads
+# all input so git log can't hit SIGPIPE and fail the pipeline under pipefail.
+pr_title=$(git log --reverse --no-merges --format=%s "origin/$base..HEAD" | sed -n 1p)
+
 # The PR description comes from what the run produced (#3148, #3333): the plan's
 # summary and risks, implement's summary of what it changed and what verify ran.
 # pr-body.sh builds it from PRIOR_CONTEXTS; without usable contexts, fall back to
@@ -71,6 +78,9 @@ if [ -n "$pr_body" ]; then
   pr_args=(--base "$base" --body-file "$pr_body_file")
 else
   pr_args=(--fill --base "$base")
+fi
+if [ -n "$pr_title" ]; then
+  pr_args+=(--title "$pr_title")
 fi
 
 # Link the ticket so close-linked-issues.yml closes it on a release-branch merge.
