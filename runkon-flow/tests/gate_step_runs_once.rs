@@ -303,3 +303,28 @@ fn resume_after_lease_owner_cleared_runs_next_step_once() {
     );
     assert_ran_once(&persistence, &run_id, &count);
 }
+
+/// A persistence error while verifying the lease is not a confirmed loss: nobody else owns
+/// the run, so it must surface as `Persistence` and the run must end `Failed`, not be left
+/// `Running` for a new owner that does not exist.
+#[test]
+fn lease_verification_error_fails_the_run_and_skips_next_step() {
+    let persistence = make_persistence();
+    let count = Arc::new(AtomicUsize::new(0));
+    let (run_id, handle) = spawn_engine_a(&persistence, &count, Duration::from_millis(500));
+    let gate_id = wait_for_waiting_gate(&persistence, &run_id);
+
+    persistence.set_fail_acquire_lease(true);
+    persistence
+        .approve_gate(&gate_id, "tester", None, None)
+        .unwrap();
+
+    let result = handle.join().unwrap();
+    assert!(
+        matches!(result, Err(EngineError::Persistence(_))),
+        "a lease verification error must return Persistence, not LeaseLost: {result:?}"
+    );
+    assert_eq!(count.load(Ordering::SeqCst), 0, "next step must not run");
+    let run = persistence.get_run(&run_id).unwrap().unwrap();
+    assert_eq!(run.status, WorkflowRunStatus::Failed);
+}

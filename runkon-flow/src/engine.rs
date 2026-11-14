@@ -1672,6 +1672,52 @@ pub fn flow_output_instruction() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence_memory::InMemoryWorkflowPersistence;
+
+    fn leased_run() -> (InMemoryWorkflowPersistence, String, i64) {
+        let p = InMemoryWorkflowPersistence::new();
+        let run = p
+            .create_run(crate::traits::persistence::NewRun {
+                workflow_name: "wf".into(),
+                parent_run_id: String::new(),
+                dry_run: false,
+                trigger: "manual".into(),
+                definition_snapshot: None,
+                parent_workflow_run_id: None,
+            })
+            .unwrap();
+        let generation = p.acquire_lease(&run.id, "tok", 60).unwrap().unwrap();
+        (p, run.id, generation)
+    }
+
+    #[test]
+    fn lease_still_held_true_for_own_lease_with_matching_generation() {
+        let (p, id, generation) = leased_run();
+        assert!(lease_still_held(&p, &id, "tok", 60, Some(generation)).unwrap());
+        assert!(lease_still_held(&p, &id, "tok", 60, None).unwrap());
+    }
+
+    #[test]
+    fn lease_still_held_false_when_generation_mismatches() {
+        let (p, id, generation) = leased_run();
+        assert!(!lease_still_held(&p, &id, "tok", 60, Some(generation + 100)).unwrap());
+    }
+
+    #[test]
+    fn lease_still_held_false_when_another_engine_holds_it() {
+        let (p, id, _) = leased_run();
+        assert!(!lease_still_held(&p, &id, "other", 60, None).unwrap());
+    }
+
+    #[test]
+    fn lease_still_held_propagates_persistence_error() {
+        let (p, id, _) = leased_run();
+        p.set_fail_acquire_lease(true);
+        assert!(matches!(
+            lease_still_held(&p, &id, "tok", 60, None),
+            Err(EngineError::Persistence(_))
+        ));
+    }
     use crate::dsl::{InputDecl, InputType, WorkflowDef, WorkflowTrigger};
 
     fn make_bool_workflow(
