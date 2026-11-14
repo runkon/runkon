@@ -250,8 +250,9 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
     // Skip completed gates on resume — restore feedback for downstream steps
     if super::skip_if_already_completed_with(state, &node.name, iteration, &node.name, |s, row| {
         crate::engine::restore_step_row(s, row, &node.name, iteration);
-        // Also covers dry-run gate rows, which carry no gate_type.
-        if node.gate_type != QUALITY_GATE_TYPE {
+        // `restore_step_row` records rows that carry a gate_type. Dry-run gate rows carry
+        // none, so record those here, once; quality-gate rows never set gate feedback.
+        if row.gate_type.is_none() && node.gate_type != QUALITY_GATE_TYPE {
             record_gate_feedback(s, &node.name, gate_feedback_from_row(row));
         }
         Ok(())
@@ -618,6 +619,27 @@ mod tests {
         assert_eq!(v(Some("fb".into()), sel(&[])).as_deref(), Some("fb"));
         assert_eq!(v(Some("fb".into()), None).as_deref(), Some("fb"));
         assert_eq!(v(None, None), None);
+    }
+
+    #[test]
+    fn gate_feedback_from_row_handles_bad_and_empty_selections() {
+        let mut row = crate::types::WorkflowRunStep::default();
+        row.gate_feedback = Some("plain".into());
+        row.gate_selections = Some("not json".into());
+        assert_eq!(
+            super::gate_feedback_from_row(&row).as_deref(),
+            Some("plain")
+        );
+        row.gate_selections = Some("[]".into());
+        assert_eq!(
+            super::gate_feedback_from_row(&row).as_deref(),
+            Some("plain")
+        );
+        row.gate_selections = Some(r#"["a","b"]"#.into());
+        assert_eq!(super::gate_feedback_from_row(&row).as_deref(), Some("a, b"));
+        row.gate_feedback = None;
+        row.gate_selections = None;
+        assert_eq!(super::gate_feedback_from_row(&row), None);
     }
 
     use super::*;

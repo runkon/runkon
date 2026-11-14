@@ -270,3 +270,112 @@ fn rejection_reason_replaces_an_earlier_gates_value() {
     assert_eq!(vars["second.feedback"], "not good enough");
     assert_eq!(vars["first.feedback"], "edited draft");
 }
+
+/// Seed a completed gate row with no gate_type, as a dry-run auto-approval writes it.
+fn seed_dry_run_gate_row(p: &InMemoryWorkflowPersistence, run_id: &str, name: &str, pos: i64) {
+    let id = p
+        .insert_step(NewStep {
+            workflow_run_id: run_id.to_string(),
+            step_name: name.to_string(),
+            role: "reviewer".to_string(),
+            can_commit: false,
+            position: pos,
+            iteration: 0,
+            retry_count: None,
+            gate: None,
+        })
+        .unwrap();
+    p.approve_gate(&id, "dry-run", None, None).unwrap();
+}
+
+fn timeout_def(on_timeout: runkon_flow::dsl::OnTimeout) -> WorkflowDef {
+    let WorkflowNode::Gate(mut g) = gate_node("second") else {
+        unreachable!()
+    };
+    g.timeout_secs = 0;
+    g.on_timeout = on_timeout;
+    make_def(
+        "wf",
+        vec![
+            waiting_gate("first"),
+            call_node("between"),
+            WorkflowNode::Gate(g),
+            call_node("after"),
+        ],
+    )
+}
+
+#[test]
+fn timeout_continue_clears_the_earlier_gates_value() {
+    let p = make_persistence();
+    let run_id = new_run(&p);
+    let seen: Seen = Arc::default();
+    let mut state = state_for(&p, &run_id, &seen);
+
+    let result = engine(decisions(&[("first", Some("edited draft"))]))
+        .run(
+            &timeout_def(runkon_flow::dsl::OnTimeout::Continue),
+            &mut state,
+        )
+        .unwrap();
+    assert!(result.all_succeeded);
+
+    assert_eq!(seen.lock().unwrap()["after"], None);
+    let vars = build_variable_map(&state);
+    assert!(!vars.contains_key("gate_feedback"));
+    assert_eq!(vars["second.feedback"], "");
+}
+
+#[test]
+fn timeout_fail_clears_the_earlier_gates_value() {
+    let p = make_persistence();
+    let run_id = new_run(&p);
+    let seen: Seen = Arc::default();
+    let mut state = state_for(&p, &run_id, &seen);
+
+    let result = engine(decisions(&[("first", Some("edited draft"))]))
+        .run(&timeout_def(runkon_flow::dsl::OnTimeout::Fail), &mut state)
+        .unwrap();
+    assert!(!result.all_succeeded);
+
+    assert_eq!(state.last_gate_feedback, None);
+    assert_eq!(build_variable_map(&state)["second.feedback"], "");
+}
+
+#[test]
+fn dry_run_gate_clears_the_earlier_gates_value() {
+    let p = make_persistence();
+    let run_id = new_run(&p);
+    let seen: Seen = Arc::default();
+    let mut state = state_for(&p, &run_id, &seen);
+    state.exec_config.dry_run = true;
+    state.last_gate_feedback = Some("stale".to_string());
+
+    let d = make_def("wf", vec![waiting_gate("second"), call_node("after")]);
+    let result = engine(HashMap::new()).run(&d, &mut state).unwrap();
+    assert!(result.all_succeeded);
+
+    assert_eq!(seen.lock().unwrap()["after"], None);
+    let vars = build_variable_map(&state);
+    assert!(!vars.contains_key("gate_feedback"));
+    assert_eq!(vars["second.feedback"], "");
+}
+
+#[test]
+fn resume_past_a_dry_run_gate_row_clears_the_earlier_gates_value() {
+    let p = make_persistence();
+    let run_id = new_run(&p);
+    seed_decided_gate(&p, &run_id, "first", 0, Some("edited draft"), None);
+    seed_dry_run_gate_row(&p, &run_id, "second", 2);
+    let seen: Seen = Arc::default();
+    let mut state = state_for(&p, &run_id, &seen);
+
+    let result = engine(HashMap::new()).resume(&def(), &mut state).unwrap();
+    assert!(result.all_succeeded);
+
+    assert_eq!(seen.lock().unwrap()["after"], None);
+    let vars = build_variable_map(&state);
+    assert!(!vars.contains_key("gate_feedback"));
+    assert_eq!(vars["first.feedback"], "edited draft");
+    assert_eq!(vars["second.feedback"], "");
+}
