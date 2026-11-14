@@ -1052,7 +1052,18 @@ mod tests {
                 std::thread::current().id()
             ))
             .to_string_lossy()
-            .replace(|c: char| c == '(' || c == ')', "")
+            .replace(['(', ')'], "")
+    }
+
+    /// Steps ordered by attempt; the in-memory store only sorts by position, which
+    /// is shared by every attempt of a step.
+    fn attempts(
+        persistence: &Arc<InMemoryWorkflowPersistence>,
+        run_id: &str,
+    ) -> Vec<crate::types::WorkflowRunStep> {
+        let mut steps = persistence.get_steps(run_id).unwrap();
+        steps.sort_by_key(|s| s.retry_count);
+        steps
     }
 
     /// Fails on the first run (creating the marker) and succeeds on the second.
@@ -1072,7 +1083,7 @@ mod tests {
         execute_script(&mut state, &node, 0).unwrap();
         let _ = std::fs::remove_file(&marker);
 
-        let steps = persistence.get_steps(&run_id).unwrap();
+        let steps = attempts(&persistence, &run_id);
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[0].status, WorkflowStepStatus::Failed);
         assert_eq!(steps[0].retry_count, 0);
@@ -1097,7 +1108,7 @@ mod tests {
         execute_script(&mut state, &node, 0).unwrap();
         let _ = std::fs::remove_file(&marker);
 
-        let steps = persistence.get_steps(&run_id).unwrap();
+        let steps = attempts(&persistence, &run_id);
         assert_eq!(steps.len(), 2);
         assert_eq!(steps[0].status, WorkflowStepStatus::Failed);
         assert!(steps[0]
@@ -1118,7 +1129,7 @@ mod tests {
 
         execute_script(&mut state, &node, 0).unwrap();
 
-        let steps = persistence.get_steps(&run_id).unwrap();
+        let steps = attempts(&persistence, &run_id);
         assert_eq!(steps.len(), 2);
         assert!(steps.iter().all(|s| s.status == WorkflowStepStatus::Failed));
         assert_eq!(
@@ -1169,7 +1180,7 @@ mod tests {
         // fail_fast is on, so the exhausted step still fails the call.
         assert!(execute_script(&mut state, &node, 0).is_err());
 
-        let steps = persistence.get_steps(&run_id).unwrap();
+        let steps = attempts(&persistence, &run_id);
         let script_rows: Vec<_> = steps.iter().filter(|s| s.role == "script").collect();
         assert_eq!(script_rows.len(), 3);
         assert!(script_rows
