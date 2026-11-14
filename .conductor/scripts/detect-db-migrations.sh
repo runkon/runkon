@@ -47,8 +47,12 @@ while IFS= read -r -d '' file; do
   # Changed lines, plus hunk headers: git puts the enclosing column-0 line
   # (the CREATE TABLE of a DDL string, an fn, a const) after the second @@,
   # which catches a bare column line edited inside the DDL.
+  # The last grep must read all its input (no -q): under pipefail an early
+  # exit would SIGPIPE an upstream grep and a real match would read as none.
+  # Every stage failing to match is a plain "no match", which is what the
+  # `if` wants.
   if grep -E '^([+-]|@@ )' "$hunk_tmp" | grep -vE '^(\+\+\+|---) ' \
-      | grep -qE "${SCHEMA_PATTERN}|${SQL_PATTERN}"; then
+      | grep -E "${SCHEMA_PATTERN}|${SQL_PATTERN}" > /dev/null; then
     matched+=("$file")
   fi
 done < "$diff_tmp"
