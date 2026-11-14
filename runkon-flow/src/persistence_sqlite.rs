@@ -2244,6 +2244,61 @@ mod tests {
         assert!(ctx.is_none() && markers.is_none() && so.is_none());
     }
 
+    fn step_output_file(p: &SqliteWorkflowPersistence) -> Option<String> {
+        p.lock()
+            .unwrap()
+            .query_row(
+                "SELECT output_file FROM workflow_run_steps WHERE id = 'step-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn terminal_update_stores_output_file() {
+        use crate::traits::persistence::StepUpdate;
+        let (p, _run_id, step_id) = make_step_db();
+        p.update_step(
+            &step_id,
+            StepUpdate::completed(1, None, None, None, None, 0, None)
+                .with_output_file(Some("/tmp/script.log".to_string())),
+        )
+        .unwrap();
+        assert_eq!(step_output_file(&p).as_deref(), Some("/tmp/script.log"));
+    }
+
+    #[test]
+    fn terminal_update_without_output_file_leaves_column_null() {
+        use crate::traits::persistence::StepUpdate;
+        let (p, _run_id, step_id) = make_step_db();
+        p.update_step(
+            &step_id,
+            StepUpdate::completed(1, None, None, None, None, 0, None),
+        )
+        .unwrap();
+        assert_eq!(step_output_file(&p), None);
+    }
+
+    #[test]
+    fn terminal_update_without_output_file_keeps_stored_path() {
+        use crate::traits::persistence::StepUpdate;
+        let (p, _run_id, step_id) = make_step_db();
+        p.lock()
+            .unwrap()
+            .execute(
+                "UPDATE workflow_run_steps SET output_file = '/tmp/existing' WHERE id = 'step-1'",
+                [],
+            )
+            .unwrap();
+        p.update_step(
+            &step_id,
+            StepUpdate::completed(1, None, None, None, None, 0, None),
+        )
+        .unwrap();
+        assert_eq!(step_output_file(&p).as_deref(), Some("/tmp/existing"));
+    }
+
     #[test]
     fn update_step_terminal_without_outputs_on_terminal_row_is_noop() {
         let (p, _run_id, step_id) = make_recovered_step_db();
