@@ -918,6 +918,51 @@ mod tests {
             .unwrap()
     }
 
+    /// Runs a `pr_checks` gate with `prompt` and returns (stored row prompt, prompt the
+    /// resolver received).
+    fn resolver_and_row_prompt(
+        state: &mut ExecutionState,
+        cp: &CountingPersistence,
+        run_id: &str,
+        prompt: Option<&str>,
+    ) -> (Option<String>, Option<String>) {
+        let (_polls, seen) = install_resolver(state, |_, _| GatePoll::Approved(None));
+        let mut node = pr_checks_node();
+        node.prompt = prompt.map(String::from);
+        execute_gate(state, &node, 0).expect("resolver approves");
+        let received = seen.lock().unwrap()[0].1.clone();
+        (gate_step(cp, run_id).gate_prompt, received)
+    }
+
+    #[test]
+    fn resolver_receives_rendered_gate_prompt() {
+        let (mut state, cp, run_id) = make_state(VecSink::new());
+        state
+            .inputs
+            .insert("plan_path".into(), "/abs/PLAN.md".into());
+        let (row, received) =
+            resolver_and_row_prompt(&mut state, &cp, &run_id, Some("Review {{plan_path}}"));
+        assert_eq!(row.as_deref(), Some("Review /abs/PLAN.md"));
+        assert_eq!(received.as_deref(), Some("Review /abs/PLAN.md"));
+    }
+
+    #[test]
+    fn gate_prompt_without_placeholders_is_unchanged() {
+        let (mut state, cp, run_id) = make_state(VecSink::new());
+        let (row, received) =
+            resolver_and_row_prompt(&mut state, &cp, &run_id, Some("ship it? (y/n)"));
+        assert_eq!(row.as_deref(), Some("ship it? (y/n)"));
+        assert_eq!(received.as_deref(), Some("ship it? (y/n)"));
+    }
+
+    #[test]
+    fn gate_without_prompt_stays_none() {
+        let (mut state, cp, run_id) = make_state(VecSink::new());
+        let (row, received) = resolver_and_row_prompt(&mut state, &cp, &run_id, None);
+        assert_eq!(row, None);
+        assert_eq!(received, None);
+    }
+
     #[test]
     fn manual_decision_wins_over_resolver_decision() {
         let (mut state, cp, run_id) = make_state(VecSink::new());
