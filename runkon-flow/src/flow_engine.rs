@@ -2285,6 +2285,7 @@ mod tests {
                     retry_count: None,
                     structured_output: None,
                     step_error: None,
+                    output_file: None,
                 },
             )
             .unwrap();
@@ -2393,6 +2394,7 @@ mod tests {
                     retry_count: None,
                     structured_output: None,
                     step_error: None,
+                    output_file: None,
                 },
             )
             .unwrap();
@@ -2585,6 +2587,7 @@ mod tests {
                         retry_count: None,
                         structured_output: None,
                         step_error: None,
+                        output_file: None,
                     },
                 )
                 .unwrap();
@@ -2706,6 +2709,7 @@ mod tests {
                     retry_count: None,
                     structured_output: None,
                     step_error: None,
+                    output_file: None,
                 },
             )
             .unwrap();
@@ -2795,6 +2799,7 @@ mod tests {
                     retry_count: None,
                     structured_output: None,
                     step_error: None,
+                    output_file: None,
                 },
             )
             .unwrap();
@@ -2827,6 +2832,7 @@ mod tests {
                             retry_count: None,
                             structured_output: None,
                             step_error: None,
+                            output_file: None,
                         },
                     )
                     .unwrap();

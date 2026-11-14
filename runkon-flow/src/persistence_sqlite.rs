@@ -50,7 +50,8 @@ static SQL_UPDATE_TERMINAL: std::sync::LazyLock<String> = std::sync::LazyLock::n
          ended_at = :ended_at, result_text = :result_text, context_out = :context_out, \
          markers_out = :markers_out, \
          retry_count = COALESCE(:retry_count, retry_count), \
-         structured_output = :structured_output, step_error = :step_error \
+         structured_output = :structured_output, step_error = :step_error, \
+         output_file = COALESCE(:output_file, output_file) \
          WHERE id = :id \
          AND {GENERATION_FENCE_SQL} \
          AND status NOT IN ({TERMINAL_STATUSES_SQL})"
@@ -970,6 +971,7 @@ impl WorkflowPersistence for SqliteWorkflowPersistence {
                         ":retry_count": update.retry_count,
                         ":structured_output": update.structured_output,
                         ":step_error": update.step_error,
+                        ":output_file": update.output_file,
                         ":id": step_id,
                         ":generation": update.generation,
                     ],
@@ -1893,6 +1895,7 @@ mod tests {
                 retry_count: Some(0),
                 structured_output: None,
                 step_error: None,
+                output_file: None,
             },
         )
         .expect("update_step must succeed");
@@ -2006,6 +2009,7 @@ mod tests {
                 retry_count: None,
                 structured_output: None,
                 step_error: None,
+                output_file: None,
             },
         );
         assert!(
@@ -2039,6 +2043,7 @@ mod tests {
                 retry_count: None,
                 structured_output: None,
                 step_error: None,
+                output_file: None,
             },
         );
         assert!(
@@ -2070,6 +2075,7 @@ mod tests {
                 retry_count: None,
                 structured_output: None,
                 step_error: None,
+                output_file: None,
             },
         )
         .expect("first update to completed must succeed");
@@ -2099,6 +2105,7 @@ mod tests {
                 retry_count: None,
                 structured_output: None,
                 step_error: Some("cancelled".to_string()),
+                output_file: None,
             },
         );
         assert!(
@@ -2162,6 +2169,7 @@ mod tests {
             retry_count: None,
             structured_output: Some(so.to_string()),
             step_error: None,
+            output_file: None,
         }
     }
 
@@ -2234,6 +2242,61 @@ mod tests {
         let (status, _, ctx, markers, so) = step_outputs(&p);
         assert_eq!(status, "failed");
         assert!(ctx.is_none() && markers.is_none() && so.is_none());
+    }
+
+    fn step_output_file(p: &SqliteWorkflowPersistence) -> Option<String> {
+        p.lock()
+            .unwrap()
+            .query_row(
+                "SELECT output_file FROM workflow_run_steps WHERE id = 'step-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn terminal_update_stores_output_file() {
+        use crate::traits::persistence::StepUpdate;
+        let (p, _run_id, step_id) = make_step_db();
+        p.update_step(
+            &step_id,
+            StepUpdate::completed(1, None, None, None, None, 0, None)
+                .with_output_file(Some("/tmp/script.log".to_string())),
+        )
+        .unwrap();
+        assert_eq!(step_output_file(&p).as_deref(), Some("/tmp/script.log"));
+    }
+
+    #[test]
+    fn terminal_update_without_output_file_leaves_column_null() {
+        use crate::traits::persistence::StepUpdate;
+        let (p, _run_id, step_id) = make_step_db();
+        p.update_step(
+            &step_id,
+            StepUpdate::completed(1, None, None, None, None, 0, None),
+        )
+        .unwrap();
+        assert_eq!(step_output_file(&p), None);
+    }
+
+    #[test]
+    fn terminal_update_without_output_file_keeps_stored_path() {
+        use crate::traits::persistence::StepUpdate;
+        let (p, _run_id, step_id) = make_step_db();
+        p.lock()
+            .unwrap()
+            .execute(
+                "UPDATE workflow_run_steps SET output_file = '/tmp/existing' WHERE id = 'step-1'",
+                [],
+            )
+            .unwrap();
+        p.update_step(
+            &step_id,
+            StepUpdate::completed(1, None, None, None, None, 0, None),
+        )
+        .unwrap();
+        assert_eq!(step_output_file(&p).as_deref(), Some("/tmp/existing"));
     }
 
     #[test]
@@ -2310,6 +2373,7 @@ mod tests {
                 retry_count: None,
                 structured_output: None,
                 step_error: None,
+                output_file: None,
             },
         );
         assert!(

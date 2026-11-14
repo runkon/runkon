@@ -266,6 +266,7 @@ pub fn execute_foreach(
             None,
             0,
             empty_output.clone(),
+            None,
         )?;
 
         record_foreach_step_success(
@@ -657,6 +658,7 @@ pub fn execute_foreach(
                 retry_count: Some(0),
                 structured_output: structured_output.clone(),
                 step_error: None,
+                output_file: None,
             },
         )?;
 
@@ -686,6 +688,7 @@ pub fn execute_foreach(
                 retry_count: Some(0),
                 structured_output,
                 step_error: Some(error_msg.clone()),
+                output_file: None,
             },
         )?;
 
@@ -1204,6 +1207,7 @@ mod tests {
                                 r#"{{"value":"output-for-{item_id}"}}"#
                             )),
                             step_error: None,
+                            output_file: None,
                         },
                     )
                     .unwrap();
@@ -1390,6 +1394,7 @@ mod tests {
                                 retry_count: Some(0),
                                 structured_output: Some(r#"{"result":"ok"}"#.into()),
                                 step_error: None,
+                                output_file: None,
                             },
                         )
                         .unwrap();

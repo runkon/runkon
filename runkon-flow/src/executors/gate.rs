@@ -462,6 +462,7 @@ pub fn execute_quality_gate(
                 retry_count: None,
                 structured_output: None,
                 step_error: None,
+                output_file: None,
             },
         )
     };
@@ -578,6 +579,7 @@ pub fn handle_gate_timeout(
                     retry_count: None,
                     structured_output: None,
                     step_error: Some(format!("Gate '{}' timed out", node.name)),
+                    output_file: None,
                 },
             )?;
             state.all_succeeded = false;
@@ -601,6 +603,7 @@ pub fn handle_gate_timeout(
                     retry_count: None,
                     structured_output: None,
                     step_error: None,
+                    output_file: None,
                 },
             )?;
             record_gate_feedback(state, &node.name, None);

@@ -2,6 +2,7 @@ pub const STEP_ROLE_FOREACH: &str = "foreach";
 pub const STEP_ROLE_WORKFLOW: &str = "workflow";
 pub const STEP_ROLE_GATE: &str = "gate";
 pub const STEP_ROLE_AGENT: &str = "agent";
+pub const STEP_ROLE_SCRIPT: &str = "script";
 
 /// Column list for `workflow_runs` SELECT queries (used by row mappers in both
 /// conductor-core and runkon-flow). Single source of truth — importers use
