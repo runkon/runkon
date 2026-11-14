@@ -9,7 +9,8 @@ use crate::dsl::{
     detect_workflow_cycles, ValidationError, WorkflowDef, WorkflowNode, QUALITY_GATE_TYPE,
 };
 use crate::engine::{
-    run_workflow_engine, ChildWorkflowContext, ChildWorkflowRunner, ExecutionState,
+    lease_still_held, run_workflow_engine, ChildWorkflowContext, ChildWorkflowRunner,
+    ExecutionState,
 };
 use crate::engine_error::EngineError;
 use crate::events::EventSink;
@@ -69,12 +70,15 @@ fn refresh_lease_loop(ctx: RefreshContext) {
         if ctx.stop.load(Ordering::Relaxed) {
             return;
         }
-        match ctx
-            .persistence
-            .acquire_lease(&ctx.run_id, &ctx.token, ctx.ttl_seconds)
-        {
-            Ok(Some(_)) => {} // renewed successfully
-            Ok(None) => {
+        match lease_still_held(
+            ctx.persistence.as_ref(),
+            &ctx.run_id,
+            &ctx.token,
+            ctx.ttl_seconds,
+            None,
+        ) {
+            Ok(true) => {} // renewed successfully
+            Ok(false) => {
                 tracing::warn!(
                     "run {}: lease reclaimed by another engine, aborting",
                     ctx.run_id

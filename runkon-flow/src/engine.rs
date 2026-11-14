@@ -434,6 +434,27 @@ pub trait ChildWorkflowRunner: Send + Sync {
     ) -> Result<Option<crate::types::WorkflowRun>>;
 }
 
+/// Re-acquire the run's lease with `token` and report whether this engine still owns it.
+///
+/// `Ok(true)` when the lease was renewed (and, if `expected_generation` is given, still
+/// has that generation); `Ok(false)` when another engine holds it or the generation
+/// changed; `Err` when persistence failed, so ownership is unknown. Shared by the lease
+/// refresh thread and [`ExecutionState::verify_lease`].
+pub(crate) fn lease_still_held(
+    persistence: &dyn WorkflowPersistence,
+    run_id: &str,
+    token: &str,
+    ttl_seconds: i64,
+    expected_generation: Option<i64>,
+) -> Result<bool> {
+    Ok(
+        match persistence.acquire_lease(run_id, token, ttl_seconds)? {
+            Some(gen) => expected_generation.is_none_or(|e| gen == e),
+            None => false,
+        },
+    )
+}
+
 impl ExecutionState {
     /// Create a fresh heartbeat counter, initialized to 0 so the first tick fires immediately.
     pub fn new_heartbeat() -> Arc<AtomicI64> {
@@ -452,12 +473,20 @@ impl ExecutionState {
 
     /// Confirm this engine still holds the run's lease.
     ///
-    /// Re-acquires the lease with this engine's own token. That renews it when we still
-    /// own it, and returns `None` or a different generation when another engine took the
-    /// run over (for example a host that cleared the lease owner and resumed the run
-    /// while this engine was waiting on a gate). On loss, or on a persistence error
-    /// (same policy as the refresh thread), cancels the token with `LeaseLost` and
-    /// returns `Err(Cancelled(LeaseLost))`.
+    /// Re-acquires the lease with this engine's own token (see [`lease_still_held`], shared
+    /// with the refresh thread). That renews it when we still own it, and reports loss
+    /// when another engine took the run over (for example a host that cleared the lease
+    /// owner and resumed the run while this engine was waiting on a gate).
+    ///
+    /// - Confirmed loss: cancels the token with `LeaseLost` and returns
+    ///   `Err(Cancelled(LeaseLost))`. The new owner decides the run's terminal status.
+    /// - Persistence error: the loss is only suspected, so returns the error instead.
+    ///   Nobody else is known to own the run, and mapping it to `LeaseLost` would skip
+    ///   the terminal-status write and leave the run `Running`.
+    ///
+    /// Unlike the refresh thread's `signal_lease_abort`, this does not set the shutdown
+    /// flag or cancel registry steps: it runs on the engine thread itself, inside the
+    /// only in-flight step (the gate), and the returned `Err` unwinds that step directly.
     ///
     /// Lets a long wait (a gate) check ownership right before it acts on a decision,
     /// instead of waiting up to `lease_refresh_interval` for the refresh thread.
@@ -469,26 +498,24 @@ impl ExecutionState {
         else {
             return Ok(());
         };
-        let still_owned = match self.persistence.acquire_lease(
+        let held = lease_still_held(
+            self.persistence.as_ref(),
             &self.workflow_run_id,
             token,
             self.exec_config.lease_ttl_secs,
-        ) {
-            Ok(Some(gen)) => gen == expected,
-            Ok(None) => false,
-            Err(e) => {
-                tracing::warn!(
-                    "run {}: lease verification DB error: {e}, aborting",
-                    self.workflow_run_id
-                );
-                false
-            }
-        };
-        if still_owned {
+            Some(expected),
+        )
+        .map_err(|e| {
+            EngineError::Persistence(format!(
+                "run {}: lease verification failed: {e}",
+                self.workflow_run_id
+            ))
+        })?;
+        if held {
             return Ok(());
         }
         tracing::warn!(
-            "run {}: lease lost to another engine, aborting",
+            "run {}: lease reclaimed by another engine, aborting",
             self.workflow_run_id
         );
         self.cancellation.cancel(CancellationReason::LeaseLost);
