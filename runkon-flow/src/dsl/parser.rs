@@ -1095,10 +1095,12 @@ fn build_schedule(
     }
 
     let spec = match (every, cron) {
-        (None, None) => return Err(format!(
+        (None, None) => {
+            return Err(format!(
             "workflow '{name}': trigger = scheduled needs a schedule: set every = \"<duration>\" \
                  or cron = \"<5-field cron>\" in meta"
-        )),
+        ))
+        }
         (Some(_), Some(_)) => {
             return Err(format!(
                 "workflow '{name}': set only one of 'every' or 'cron' in meta, not both"
