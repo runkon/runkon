@@ -3,16 +3,25 @@
 # human_review gate after plan (#153, port of devinrosen/conductor-ai#3128). A gate's prompt is fixed text, so the
 # questions go in this step's context, where whoever answers the gate reads them.
 # Env: PRIOR_OUTPUT — the plan step's structured output (task-plan schema).
+# PLAN.md is in the worktree's git directory, so its absolute path also goes in
+# the context and is emitted as plan_path (#194, port of conductor-ai#3334).
 # Never fails the step: the gate still runs, pointing at PLAN.md if needed.
 set -uo pipefail
 
 emit() {
-  jq -cn --arg ctx "$1" '{markers: [], context: $ctx}' \
+  jq -cn --arg ctx "$1" --arg p "${plan_path}" '{markers: [], context: $ctx, plan_path: $p}' \
     | { printf '<<<FLOW_OUTPUT>>>\n'; cat; printf '<<<END_FLOW_OUTPUT>>>\n'; }
 }
 
-plan_path="$(git rev-parse --git-dir 2>/dev/null)/PLAN.md"
-see_plan="See \"Decisions for the user\" in ${plan_path}."
+if plan_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) && [ -n "$plan_dir" ]; then
+  plan_path="${plan_dir}/PLAN.md"
+  plan_where="${plan_path}"
+else
+  plan_path=""
+  echo "show-plan-decisions: not in a git repository, can't resolve PLAN.md's path" >&2
+  plan_where="the worktree's git directory (run \`git rev-parse --absolute-git-dir\` in the worktree to find it)"
+fi
+see_plan="See \"Decisions for the user\" in ${plan_where}."
 
 if ! jq_err=$(jq -e 'type == "object"' <<< "${PRIOR_OUTPUT:-}" 2>&1 >/dev/null); then
   echo "show-plan-decisions: the plan's output isn't a JSON object: ${jq_err:-empty PRIOR_OUTPUT}" >&2
@@ -34,5 +43,7 @@ fi
 emit "The plan needs your decision before implementing:
 
 ${decisions}
+
+The full plan is at ${plan_where}.
 
 Approve the gate with your answers as feedback, or approve without feedback to keep the defaults. Reject to stop the run."
