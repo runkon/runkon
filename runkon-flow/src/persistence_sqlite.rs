@@ -50,7 +50,8 @@ static SQL_UPDATE_TERMINAL: std::sync::LazyLock<String> = std::sync::LazyLock::n
          ended_at = :ended_at, result_text = :result_text, context_out = :context_out, \
          markers_out = :markers_out, \
          retry_count = COALESCE(:retry_count, retry_count), \
-         structured_output = :structured_output, step_error = :step_error \
+         structured_output = :structured_output, step_error = :step_error, \
+         output_file = COALESCE(:output_file, output_file) \
          WHERE id = :id \
          AND {GENERATION_FENCE_SQL} \
          AND status NOT IN ({TERMINAL_STATUSES_SQL})"
@@ -970,6 +971,7 @@ impl WorkflowPersistence for SqliteWorkflowPersistence {
                         ":retry_count": update.retry_count,
                         ":structured_output": update.structured_output,
                         ":step_error": update.step_error,
+                        ":output_file": update.output_file,
                         ":id": step_id,
                         ":generation": update.generation,
                     ],
@@ -1893,6 +1895,7 @@ mod tests {
                 retry_count: Some(0),
                 structured_output: None,
                 step_error: None,
+                output_file: None,
             },
         )
         .expect("update_step must succeed");
@@ -2006,6 +2009,7 @@ mod tests {
                 retry_count: None,
                 structured_output: None,
                 step_error: None,
+                output_file: None,
             },
         );
         assert!(
@@ -2039,6 +2043,7 @@ mod tests {
                 retry_count: None,
                 structured_output: None,
                 step_error: None,
+                output_file: None,
             },
         );
         assert!(
@@ -2070,6 +2075,7 @@ mod tests {
                 retry_count: None,
                 structured_output: None,
                 step_error: None,
+                output_file: None,
             },
         )
         .expect("first update to completed must succeed");
@@ -2099,6 +2105,7 @@ mod tests {
                 retry_count: None,
                 structured_output: None,
                 step_error: Some("cancelled".to_string()),
+                output_file: None,
             },
         );
         assert!(
@@ -2162,6 +2169,7 @@ mod tests {
             retry_count: None,
             structured_output: Some(so.to_string()),
             step_error: None,
+            output_file: None,
         }
     }
 
@@ -2310,6 +2318,7 @@ mod tests {
                 retry_count: None,
                 structured_output: None,
                 step_error: None,
+                output_file: None,
             },
         );
         assert!(

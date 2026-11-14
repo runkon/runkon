@@ -105,6 +105,7 @@ pub(super) fn insert_step_with_status(
             retry_count,
             structured_output: None,
             step_error: None,
+            output_file: None,
         },
     )?;
     Ok(step_id)

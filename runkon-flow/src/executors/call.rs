@@ -264,6 +264,7 @@ fn execute_call_inner(
                             agent_label,
                             node.timeout.as_deref().unwrap_or("?"),
                         )),
+                        output_file: None,
                     },
                 )?;
                 return Err(EngineError::Cancelled(CancellationReason::Timeout));
@@ -349,6 +350,7 @@ fn execute_call_inner(
                         retry_count: Some(attempt as i64),
                         structured_output: None,
                         step_error: None,
+                        output_file: None,
                     },
                 )?;
                 return Err(EngineError::Cancelled(reason));

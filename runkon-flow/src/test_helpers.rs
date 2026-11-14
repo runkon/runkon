@@ -407,5 +407,6 @@ pub fn bare_step_update(
         retry_count: Some(0),
         structured_output: None,
         step_error: step_error.map(str::to_string),
+        output_file: None,
     }
 }

@@ -99,6 +99,7 @@ fn seed(
             retry_count: None,
             structured_output: None,
             step_error: None,
+            output_file: None,
         },
     )
     .unwrap();

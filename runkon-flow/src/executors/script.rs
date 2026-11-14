@@ -1,4 +1,6 @@
+use std::collections::VecDeque;
 use std::io::Read;
+use std::path::Path;
 
 use crate::dsl::ScriptNode;
 use crate::engine::{handle_on_fail, record_step_success, ExecutionState};
@@ -8,6 +10,30 @@ use crate::traits::persistence::StepUpdate;
 
 use wait_timeout::ChildExt;
 
+/// How much of a script's stderr is kept in memory: the newest bytes.
+const STDERR_CAPTURE_CAP: usize = 64 * 1024;
+/// How much of a script's stdout is kept in memory: the newest bytes. Larger
+/// than stderr's because it carries the FLOW_OUTPUT block, whose `context` and
+/// extras can legitimately pass 64 KiB. A block cut by this cap fails to parse.
+const STDOUT_CAPTURE_CAP: usize = 1024 * 1024;
+/// Cap on a script log file (both sections together), in bytes.
+const LOG_CAP: usize = 64 * 1024;
+/// Share of [`LOG_CAP`] the stderr section may take when stdout needs room too.
+const LOG_STDERR_BUDGET: usize = 48 * 1024;
+/// How many characters of stderr a failed step's `step_error` keeps (the last).
+const STEP_ERROR_STDERR_CHARS: usize = 2000;
+
+/// What a script printed, as kept for its log.
+struct CapturedOutput {
+    stderr: String,
+    /// Bytes of stderr dropped by the capture cap.
+    stderr_dropped: u64,
+    /// Stdout outside the FLOW_OUTPUT block.
+    stray_stdout: String,
+    /// Bytes of stdout dropped by the capture cap.
+    stdout_dropped: u64,
+}
+
 /// How one run of the script ended.
 enum ScriptAttempt {
     Succeeded {
@@ -15,40 +41,251 @@ enum ScriptAttempt {
         context: String,
         structured_output: Option<String>,
         duration_ms: i64,
+        output: CapturedOutput,
     },
     /// A spawn error, timeout, non-zero exit or unparseable output block.
-    Failed(String),
+    /// `output` is `None` when the script never ran to produce any.
+    Failed {
+        error: String,
+        output: Option<CapturedOutput>,
+    },
 }
 
-/// Join a pipe reader thread and decode its bytes as UTF-8. A panicked reader
-/// or invalid UTF-8 is logged and yields an empty string.
-fn join_pipe(handle: std::thread::JoinHandle<Vec<u8>>, stream_name: &str) -> String {
+impl ScriptAttempt {
+    fn failed(error: String) -> Self {
+        Self::Failed {
+            error,
+            output: None,
+        }
+    }
+}
+
+/// A byte buffer that keeps only the newest `cap` bytes pushed into it and
+/// counts the bytes it dropped.
+struct TailBuffer {
+    buf: VecDeque<u8>,
+    cap: usize,
+    dropped: u64,
+}
+
+impl TailBuffer {
+    fn new(cap: usize) -> Self {
+        Self {
+            buf: VecDeque::new(),
+            cap,
+            dropped: 0,
+        }
+    }
+
+    fn push(&mut self, chunk: &[u8]) {
+        if chunk.len() >= self.cap {
+            self.dropped += (self.buf.len() + chunk.len() - self.cap) as u64;
+            self.buf.clear();
+            self.buf.extend(&chunk[chunk.len() - self.cap..]);
+            return;
+        }
+        let over = (self.buf.len() + chunk.len()).saturating_sub(self.cap);
+        self.buf.drain(..over);
+        self.dropped += over as u64;
+        self.buf.extend(chunk);
+    }
+}
+
+/// The kept tail of a pipe and how many bytes were dropped before it.
+struct Captured {
+    bytes: Vec<u8>,
+    dropped: u64,
+}
+
+/// Drop the continuation bytes a tail cut may have left at the front, so a cut
+/// code point doesn't make the whole tail invalid UTF-8.
+fn skip_partial_char(bytes: &[u8], dropped: u64) -> &[u8] {
+    if dropped == 0 {
+        return bytes;
+    }
+    let skip = bytes
+        .iter()
+        .take(3)
+        .take_while(|b| (**b & 0b1100_0000) == 0b1000_0000)
+        .count();
+    &bytes[skip..]
+}
+
+/// Join a pipe reader thread and decode its bytes. A panicked reader yields an
+/// empty string. Invalid UTF-8 is replaced when `lossy`, otherwise logged and
+/// yields an empty string.
+fn join_pipe(
+    handle: std::thread::JoinHandle<Captured>,
+    stream_name: &str,
+    lossy: bool,
+) -> (String, u64) {
     match handle.join() {
-        Ok(buf) => String::from_utf8(buf).unwrap_or_else(|e| {
-            tracing::warn!("script: {stream_name} is not valid UTF-8: {e}");
-            String::new()
-        }),
+        Ok(captured) => {
+            let bytes = skip_partial_char(&captured.bytes, captured.dropped);
+            let text = if lossy {
+                String::from_utf8_lossy(bytes).into_owned()
+            } else {
+                String::from_utf8(bytes.to_vec()).unwrap_or_else(|e| {
+                    tracing::warn!("script: {stream_name} is not valid UTF-8: {e}");
+                    String::new()
+                })
+            };
+            (text, captured.dropped)
+        }
         Err(_) => {
             tracing::warn!("script: {stream_name} reader thread panicked");
-            String::new()
+            (String::new(), 0)
         }
     }
 }
 
 /// Spawn a reader thread BEFORE waiting for the child to avoid pipe deadlock.
 /// If the child writes more than the OS pipe buffer size to either stream
-/// while the parent is blocked in wait(), the child would hang forever.
+/// while the parent is blocked in wait(), the child would hang forever. The
+/// thread reads to EOF but keeps only the newest `cap` bytes.
 fn spawn_reader_thread<R: Read + Send + 'static>(
     mut pipe: R,
     stream_name: &'static str,
-) -> std::thread::JoinHandle<Vec<u8>> {
+    cap: usize,
+) -> std::thread::JoinHandle<Captured> {
     std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Err(e) = pipe.read_to_end(&mut buf) {
-            tracing::warn!("script: failed to read {stream_name} pipe: {e}");
+        let mut tail = TailBuffer::new(cap);
+        let mut chunk = [0u8; 8192];
+        loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => tail.push(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => {
+                    tracing::warn!("script: failed to read {stream_name} pipe: {e}");
+                    break;
+                }
+            }
         }
-        buf
+        let dropped = tail.dropped;
+        Captured {
+            bytes: Vec::from(tail.buf),
+            dropped,
+        }
     })
+}
+
+/// Join both readers into a [`CapturedOutput`], returning the full decoded
+/// stdout alongside it for FLOW_OUTPUT parsing.
+fn join_output(
+    stdout_handle: std::thread::JoinHandle<Captured>,
+    stderr_handle: std::thread::JoinHandle<Captured>,
+) -> (String, CapturedOutput) {
+    let (stdout, stdout_dropped) = join_pipe(stdout_handle, "stdout", false);
+    let (stderr, stderr_dropped) = join_pipe(stderr_handle, "stderr", true);
+    let output = CapturedOutput {
+        stderr,
+        stderr_dropped,
+        stray_stdout: crate::helpers::strip_flow_output_block(&stdout),
+        stdout_dropped,
+    };
+    (stdout, output)
+}
+
+/// The last `max_chars` characters of `s`.
+fn last_chars(s: &str, max_chars: usize) -> &str {
+    let count = s.chars().count();
+    match s.char_indices().nth(count.saturating_sub(max_chars)) {
+        Some((i, _)) => &s[i..],
+        None => "",
+    }
+}
+
+/// The last `budget` bytes of `s`, cut at a character boundary, and how many
+/// bytes that left out.
+fn tail_str(s: &str, budget: usize) -> (&str, usize) {
+    if s.len() <= budget {
+        return (s, 0);
+    }
+    let mut start = s.len() - budget;
+    while !s.is_char_boundary(start) {
+        start += 1;
+    }
+    (&s[start..], start)
+}
+
+/// One log section: its header, a truncation marker when bytes were dropped
+/// (by the capture cap or by `budget`), and the newest bytes that fit.
+fn log_section(header: &str, text: &str, reader_dropped: u64, budget: usize) -> String {
+    let (tail, cut) = tail_str(text, budget);
+    let dropped = reader_dropped + cut as u64;
+    let mut section = format!("--- {header} ---\n");
+    if dropped > 0 {
+        section.push_str(&format!("… [truncated {dropped} bytes]\n"));
+    }
+    section.push_str(tail);
+    if !section.ends_with('\n') {
+        section.push('\n');
+    }
+    section
+}
+
+/// Write the script log to `path`. Returns `Ok(false)` without creating a file
+/// when there is nothing to log. The log is about [`LOG_CAP`] bytes: each
+/// section keeps its newest bytes, and a stream that needs less than its share
+/// leaves the rest to the other.
+fn write_script_log(path: &Path, out: &CapturedOutput) -> std::io::Result<bool> {
+    let has_stderr = !out.stderr.trim().is_empty() || out.stderr_dropped > 0;
+    let has_stdout = !out.stray_stdout.trim().is_empty() || out.stdout_dropped > 0;
+    if !has_stderr && !has_stdout {
+        return Ok(false);
+    }
+    let stderr_len = out.stderr.len();
+    let stdout_len = out.stray_stdout.len();
+    let stderr_budget = if stdout_len <= LOG_CAP - LOG_STDERR_BUDGET {
+        LOG_CAP - stdout_len
+    } else {
+        stderr_len.min(LOG_STDERR_BUDGET)
+    };
+    let stdout_budget = LOG_CAP - stderr_len.min(stderr_budget);
+
+    let mut log = String::new();
+    if has_stderr {
+        log.push_str(&log_section(
+            "stderr",
+            &out.stderr,
+            out.stderr_dropped,
+            stderr_budget,
+        ));
+    }
+    if has_stdout {
+        log.push_str(&log_section(
+            "stdout (outside FLOW_OUTPUT)",
+            &out.stray_stdout,
+            out.stdout_dropped,
+            stdout_budget,
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    std::fs::write(path, log)?;
+    Ok(true)
+}
+
+/// Write the log for one attempt when the host asked for one. Returns the path
+/// to record on the step row: only a file that was written. A write failure is
+/// logged and never fails the step.
+fn write_attempt_log(path: Option<&Path>, output: Option<&CapturedOutput>) -> Option<String> {
+    let (path, output) = (path?, output?);
+    match write_script_log(path, output) {
+        Ok(true) => Some(path.to_string_lossy().into_owned()),
+        Ok(false) => None,
+        Err(e) => {
+            tracing::warn!(
+                "script: failed to write log {}: {e}",
+                path.to_string_lossy()
+            );
+            None
+        }
+    }
 }
 
 /// Run the script once. Persists nothing and leaves `step_results` alone.
@@ -72,28 +309,28 @@ fn run_script_once(
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            return ScriptAttempt::Failed(format!("Script '{}' failed to execute: {e}", node.name));
+            return ScriptAttempt::failed(format!("Script '{}' failed to execute: {e}", node.name));
         }
     };
 
     let stdout_handle = match child.stdout.take() {
-        Some(p) => spawn_reader_thread(p, "stdout"),
+        Some(p) => spawn_reader_thread(p, "stdout", STDOUT_CAPTURE_CAP),
         None => {
             let _ = child.kill();
             let _ = child.wait();
-            return ScriptAttempt::Failed(format!(
+            return ScriptAttempt::failed(format!(
                 "script '{}': stdout pipe unavailable after spawn",
                 node.name
             ));
         }
     };
     let stderr_handle = match child.stderr.take() {
-        Some(p) => spawn_reader_thread(p, "stderr"),
+        Some(p) => spawn_reader_thread(p, "stderr", STDERR_CAPTURE_CAP),
         None => {
             let _ = child.kill();
             let _ = child.wait();
             let _ = stdout_handle.join();
-            return ScriptAttempt::Failed(format!(
+            return ScriptAttempt::failed(format!(
                 "script '{}': stderr pipe unavailable after spawn",
                 node.name
             ));
@@ -109,53 +346,55 @@ fn run_script_once(
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = stdout_handle.join();
-                let _ = stderr_handle.join();
-                return ScriptAttempt::Failed(format!(
-                    "Script '{}' timed out after {}s",
-                    node.name, timeout_secs
-                ));
+                let (_, output) = join_output(stdout_handle, stderr_handle);
+                return ScriptAttempt::Failed {
+                    error: format!("Script '{}' timed out after {}s", node.name, timeout_secs),
+                    output: Some(output),
+                };
             }
             Err(e) => {
-                let _ = stdout_handle.join();
-                let _ = stderr_handle.join();
-                return ScriptAttempt::Failed(format!("Script '{}' wait failed: {e}", node.name));
+                let (_, output) = join_output(stdout_handle, stderr_handle);
+                return ScriptAttempt::Failed {
+                    error: format!("Script '{}' wait failed: {e}", node.name),
+                    output: Some(output),
+                };
             }
         }
     } else {
         match child.wait() {
             Ok(s) => s,
             Err(e) => {
-                let _ = stdout_handle.join();
-                let _ = stderr_handle.join();
-                return ScriptAttempt::Failed(format!("Script '{}' wait failed: {e}", node.name));
+                let (_, output) = join_output(stdout_handle, stderr_handle);
+                return ScriptAttempt::Failed {
+                    error: format!("Script '{}' wait failed: {e}", node.name),
+                    output: Some(output),
+                };
             }
         }
     };
     let duration_ms = start.elapsed().as_millis() as i64;
 
-    let stdout = join_pipe(stdout_handle, "stdout");
+    let (stdout, output) = join_output(stdout_handle, stderr_handle);
 
     if !status.success() {
         let exit_code = status.code().unwrap_or(-1);
 
-        let stderr = join_pipe(stderr_handle, "stderr");
+        // The reason a script fails is usually at the end of its stderr.
+        let captured_stderr = last_chars(output.stderr.trim(), STEP_ERROR_STDERR_CHARS);
 
-        let captured_stderr = stderr.trim().chars().take(2000).collect::<String>();
-
-        return ScriptAttempt::Failed(if captured_stderr.is_empty() {
+        let error = if captured_stderr.is_empty() {
             format!("Script '{}' exited with code {}", node.name, exit_code)
         } else {
             format!(
                 "Script '{}' exited with code {}\n{}",
                 node.name, exit_code, captured_stderr
             )
-        });
+        };
+        return ScriptAttempt::Failed {
+            error,
+            output: Some(output),
+        };
     }
-
-    // Discard stderr on success — join the thread so it doesn't leak,
-    // but don't convert to String to avoid unnecessary allocation.
-    let _ = stderr_handle.join();
 
     tracing::info!(
         "script '{}': completed successfully in {}ms",
@@ -194,10 +433,15 @@ fn run_script_once(
                          <<<END_FLOW_OUTPUT>>>"
                     ),
                 };
-                return ScriptAttempt::Failed(format!(
-                    "Script '{}' ({}) printed {detail}",
-                    node.name, node.run
-                ));
+                // Log the whole stdout: the bad block is what to look at.
+                let output = CapturedOutput {
+                    stray_stdout: stdout,
+                    ..output
+                };
+                return ScriptAttempt::Failed {
+                    error: format!("Script '{}' ({}) printed {detail}", node.name, node.run),
+                    output: Some(output),
+                };
             }
             let ctx: String = stdout.chars().take(2000).collect();
             (vec![], ctx, None)
@@ -209,6 +453,7 @@ fn run_script_once(
         context,
         structured_output,
         duration_ms,
+        output,
     }
 }
 
@@ -257,7 +502,7 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
             super::insert_step_record(state, &node.name, "script", pos, iteration, Some(0))?;
         let err_msg = format!("Script '{}': {e}", node.name);
         tracing::warn!("{}", err_msg);
-        mark_attempt_failed(state, &step_id, &err_msg, 0)?;
+        mark_attempt_failed(state, &step_id, &err_msg, 0, None)?;
         return fail_step(state, node, err_msg, iteration, 1);
     }
 
@@ -366,27 +611,42 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
         let step_id =
             super::begin_retry_attempt(state, &node.name, "script", pos, iteration, attempt)?;
 
+        let log_path = state.script_env_provider.script_log_path(
+            state.run_ctx.as_ref(),
+            &step_id,
+            &node.name,
+            iteration,
+        );
+
         match run_script_once(node, &script_cmd, &env_vars, &working_dir) {
             ScriptAttempt::Succeeded {
                 markers,
                 context,
                 structured_output,
                 duration_ms,
+                output,
             } => {
+                let log_file = write_attempt_log(log_path.as_deref(), Some(&output));
                 let markers_json = crate::helpers::serialize_or_empty_array(
                     &markers,
                     &format!("script '{}'", node.name),
                 );
 
-                super::persist_completed_step(
-                    state,
+                // The log path goes on the step row only: `StepSuccess.output_file`
+                // stays `None` so `{{prior_output_file}}` is unchanged.
+                let generation = state.expect_lease_generation();
+                state.persistence.update_step(
                     &step_id,
-                    None,
-                    Some(format!("Script '{}' completed", node.name)),
-                    Some(context.clone()),
-                    Some(markers_json),
-                    attempt,
-                    structured_output.clone(),
+                    StepUpdate::completed(
+                        generation,
+                        None,
+                        Some(format!("Script '{}' completed", node.name)),
+                        Some(context.clone()),
+                        Some(markers_json),
+                        attempt,
+                        structured_output.clone(),
+                    )
+                    .with_output_file(log_file),
                 )?;
 
                 record_step_success(
@@ -409,7 +669,11 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
 
                 return Ok(());
             }
-            ScriptAttempt::Failed(err_msg) => {
+            ScriptAttempt::Failed {
+                error: err_msg,
+                output,
+            } => {
+                let log_file = write_attempt_log(log_path.as_deref(), output.as_ref());
                 tracing::warn!(
                     "script '{}' (attempt {}/{}): {}",
                     node.name,
@@ -417,7 +681,7 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
                     max_attempts,
                     err_msg
                 );
-                mark_attempt_failed(state, &step_id, &err_msg, attempt)?;
+                mark_attempt_failed(state, &step_id, &err_msg, attempt, log_file)?;
                 last_error = err_msg;
             }
         }
@@ -432,11 +696,13 @@ fn mark_attempt_failed(
     step_id: &str,
     err_msg: &str,
     retry_count: u32,
+    output_file: Option<String>,
 ) -> Result<()> {
     let generation = state.expect_lease_generation();
     state.persistence.update_step(
         step_id,
-        StepUpdate::failed(generation, err_msg.to_string(), retry_count),
+        StepUpdate::failed(generation, err_msg.to_string(), retry_count)
+            .with_output_file(output_file),
     )?;
     Ok(())
 }
@@ -1219,5 +1485,200 @@ mod tests {
         assert_eq!(calls[0]["failed_step"], "doomed");
         assert!(calls[0]["failure_reason"].contains("exited with code 3"));
         assert_eq!(calls[0]["retry_count"], "2");
+    }
+
+    /// Returns `<dir>/<step_name>-<iteration>-<step_id>.log` for every attempt.
+    struct LogPathProvider(std::path::PathBuf);
+
+    impl crate::traits::script_env_provider::ScriptEnvProvider for LogPathProvider {
+        fn env(
+            &self,
+            _ctx: &dyn crate::traits::run_context::RunContext,
+            _as_identity: Option<&str>,
+        ) -> HashMap<String, String> {
+            HashMap::new()
+        }
+
+        fn script_log_path(
+            &self,
+            _ctx: &dyn crate::traits::run_context::RunContext,
+            step_id: &str,
+            step_name: &str,
+            iteration: u32,
+        ) -> Option<std::path::PathBuf> {
+            Some(self.0.join(format!("{step_name}-{iteration}-{step_id}.log")))
+        }
+    }
+
+    fn state_with_log_dir(
+        dir: &tempfile::TempDir,
+    ) -> (Arc<InMemoryWorkflowPersistence>, String, ExecutionState) {
+        let (persistence, run_id) = make_persistence();
+        let mut state = make_state(Arc::clone(&persistence), run_id.clone());
+        state.script_env_provider = Arc::new(LogPathProvider(dir.path().to_path_buf()));
+        (persistence, run_id, state)
+    }
+
+    #[test]
+    fn tail_buffer_keeps_the_newest_bytes_and_counts_the_rest() {
+        let mut t = TailBuffer::new(4);
+        t.push(b"ab");
+        assert_eq!(Vec::from(t.buf.clone()), b"ab");
+        assert_eq!(t.dropped, 0);
+        t.push(b"cd");
+        assert_eq!(Vec::from(t.buf.clone()), b"abcd");
+        assert_eq!(t.dropped, 0);
+        t.push(b"ef");
+        assert_eq!(Vec::from(t.buf.clone()), b"cdef");
+        assert_eq!(t.dropped, 2);
+        t.push(b"0123456789");
+        assert_eq!(Vec::from(t.buf.clone()), b"6789");
+        assert_eq!(t.dropped, 2 + 4 + 6);
+    }
+
+    #[test]
+    fn last_chars_and_tail_str_respect_char_boundaries() {
+        assert_eq!(last_chars("héllo", 3), "llo");
+        assert_eq!(last_chars("abc", 10), "abc");
+        let (tail, cut) = tail_str("aéb", 2);
+        assert_eq!((tail, cut), ("b", 3));
+        assert_eq!(tail_str("abc", 5), ("abc", 0));
+    }
+
+    #[test]
+    fn success_writes_log_and_records_path_on_the_row_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (persistence, run_id, mut state) = state_with_log_dir(&dir);
+        let script = concat!(
+            "echo 'warn: fallback' >&2; echo 'stray line'; ",
+            "printf '<<<FLOW_OUTPUT>>>\\n{\"markers\":[\"m\"],\"context\":\"c\"}\\n<<<END_FLOW_OUTPUT>>>\\n'"
+        );
+        execute_script(&mut state, &make_node("logs", script), 0).unwrap();
+
+        let steps = persistence.get_steps(&run_id).unwrap();
+        let path = steps[0].output_file.clone().expect("log path recorded");
+        let log = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            log,
+            "--- stderr ---\nwarn: fallback\n--- stdout (outside FLOW_OUTPUT) ---\nstray line\n"
+        );
+        assert!(path.contains(&steps[0].id));
+        assert_eq!(state.contexts.last().unwrap().output_file, None);
+        assert!(!build_variable_map(&state).contains_key("prior_output_file"));
+    }
+
+    #[test]
+    fn failure_writes_log_and_step_error_ends_with_the_tail_of_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let (persistence, run_id, mut state) = state_with_log_dir(&dir);
+        let script = "i=0; while [ $i -lt 500 ]; do printf 'xxxxxxxxx'; i=$((i+1)); done >&2; \
+                      echo ' REASON_AT_END' >&2; exit 2";
+        assert!(execute_script(&mut state, &make_node("bad", script), 0).is_err());
+
+        let steps = persistence.get_steps(&run_id).unwrap();
+        let err = steps[0].step_error.clone().unwrap();
+        assert!(err.ends_with("REASON_AT_END"), "{err}");
+        let header = "Script 'bad' exited with code 2\n";
+        assert_eq!(err.chars().count(), header.chars().count() + 2000);
+        let log = std::fs::read_to_string(steps[0].output_file.as_ref().unwrap()).unwrap();
+        assert!(log.starts_with("--- stderr ---\n"));
+        assert!(log.ends_with("REASON_AT_END\n"));
+    }
+
+    #[test]
+    fn timeout_writes_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let (persistence, run_id, mut state) = state_with_log_dir(&dir);
+        let mut node = make_node("slow", "echo before >&2; sleep 5");
+        node.timeout = Some(1);
+        assert!(execute_script(&mut state, &node, 0).is_err());
+
+        let steps = persistence.get_steps(&run_id).unwrap();
+        assert_eq!(steps[0].status, WorkflowStepStatus::Failed);
+        let log = std::fs::read_to_string(steps[0].output_file.as_ref().unwrap()).unwrap();
+        assert!(log.contains("before"), "{log}");
+    }
+
+    #[test]
+    fn malformed_flow_output_writes_log_with_the_bad_block() {
+        let dir = tempfile::tempdir().unwrap();
+        let (persistence, run_id, mut state) = state_with_log_dir(&dir);
+        let script = "echo 'why' >&2; printf '<<<FLOW_OUTPUT>>>\\n{not json\\n<<<END_FLOW_OUTPUT>>>\\n'";
+        assert!(execute_script(&mut state, &make_node("bad", script), 0).is_err());
+
+        let steps = persistence.get_steps(&run_id).unwrap();
+        assert_eq!(steps[0].status, WorkflowStepStatus::Failed);
+        let log = std::fs::read_to_string(steps[0].output_file.as_ref().unwrap()).unwrap();
+        assert!(log.contains("--- stderr ---\nwhy\n"), "{log}");
+        assert!(log.contains("{not json"), "{log}");
+    }
+
+    #[test]
+    fn large_stderr_is_capped_with_a_truncation_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let (persistence, run_id, mut state) = state_with_log_dir(&dir);
+        let script = "i=0; while [ $i -lt 30000 ]; do echo 0123456789 >&2; i=$((i+1)); done; \
+                      echo LAST_LINE >&2";
+        execute_script(&mut state, &make_node("noisy", script), 0).unwrap();
+
+        let steps = persistence.get_steps(&run_id).unwrap();
+        let log = std::fs::read_to_string(steps[0].output_file.as_ref().unwrap()).unwrap();
+        assert!(log.len() <= LOG_CAP + 100, "log is {} bytes", log.len());
+        assert!(log.starts_with("--- stderr ---\n… [truncated "), "{}", &log[..60]);
+        assert!(log.ends_with("LAST_LINE\n"));
+    }
+
+    #[test]
+    fn default_provider_writes_no_file_and_records_no_path() {
+        let (persistence, run_id) = make_persistence();
+        let mut state = make_state(Arc::clone(&persistence), run_id.clone());
+        execute_script(&mut state, &make_node("quiet", "echo hi >&2"), 0).unwrap();
+        let steps = persistence.get_steps(&run_id).unwrap();
+        assert_eq!(steps[0].output_file, None);
+    }
+
+    #[test]
+    fn silent_script_writes_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (persistence, run_id, mut state) = state_with_log_dir(&dir);
+        execute_script(&mut state, &make_node("silent", "true"), 0).unwrap();
+        let steps = persistence.get_steps(&run_id).unwrap();
+        assert_eq!(steps[0].output_file, None);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn restored_script_row_does_not_feed_prior_output_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let (persistence, run_id, mut state) = state_with_log_dir(&dir);
+        execute_script(&mut state, &make_node("logs", "echo w >&2"), 0).unwrap();
+        let steps = persistence.get_steps(&run_id).unwrap();
+        assert!(steps[0].output_file.is_some());
+        let restored = crate::types::StepSuccess::from_workflow_run_step(
+            "logs".to_string(),
+            &steps[0],
+            vec![],
+            String::new(),
+            0,
+        );
+        assert_eq!(restored.output_file, None);
+    }
+
+    #[test]
+    fn each_retry_attempt_records_its_own_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let (persistence, run_id, mut state) = state_with_log_dir(&dir);
+        let mut node = make_node("flaky", "echo nope >&2; exit 1");
+        node.retries = 1;
+        assert!(execute_script(&mut state, &node, 0).is_err());
+
+        let steps = persistence.get_steps(&run_id).unwrap();
+        let paths: Vec<_> = steps
+            .iter()
+            .filter(|s| s.role == "script")
+            .map(|s| s.output_file.clone().expect("each attempt has a log"))
+            .collect();
+        assert_eq!(paths.len(), 2);
+        assert_ne!(paths[0], paths[1]);
     }
 }

@@ -119,9 +119,19 @@ pub struct StepUpdate {
     pub retry_count: Option<i64>,
     pub structured_output: Option<String>,
     pub step_error: Option<String>,
+    /// Path of a file the step produced, such as a script step's stderr log
+    /// (#183). Persisted on terminal updates with COALESCE semantics: `None`
+    /// keeps the value already stored.
+    pub output_file: Option<String>,
 }
 
 impl StepUpdate {
+    /// Set the `output_file` recorded with this update.
+    pub fn with_output_file(mut self, output_file: Option<String>) -> Self {
+        self.output_file = output_file;
+        self
+    }
+
     /// Convenience constructor for a successful step completion.
     pub fn completed(
         generation: i64,
@@ -142,6 +152,7 @@ impl StepUpdate {
             retry_count: Some(attempt as i64),
             structured_output,
             step_error: None,
+            output_file: None,
         }
     }
 
@@ -168,6 +179,7 @@ impl StepUpdate {
             retry_count: Some(attempt as i64),
             structured_output: None,
             step_error: Some(err_msg),
+            output_file: None,
         }
     }
 }

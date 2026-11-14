@@ -63,27 +63,46 @@ pub fn find_block_start(text: &str, marker: &str) -> Option<usize> {
 /// can't be mistaken for the real block's start or end. The start marker must
 /// also be followed by `{`, `[` or a code fence.
 pub fn find_flow_output_block(text: &str) -> Option<&str> {
-    find_flow_output_span(text).map(|(_, block)| block)
+    find_flow_output_span(text).map(|(_, _, block)| block)
 }
 
-/// The byte offset of the start marker and the trimmed contents of the block
-/// that [`find_flow_output_block`] returns. Shared so the block and its
-/// location can never disagree.
-fn find_flow_output_span(text: &str) -> Option<(usize, &str)> {
+/// `text` with the block [`find_flow_output_block`] would pick removed, from
+/// its start marker through the end of its `<<<END_FLOW_OUTPUT>>>` line.
+/// Returns `text` unchanged when there is no complete block.
+pub fn strip_flow_output_block(text: &str) -> String {
+    let Some((start, end, _)) = find_flow_output_span(text) else {
+        return text.to_string();
+    };
+    let after = &text[end..];
+    let after = match after.find('\n') {
+        Some(nl) => &after[nl + 1..],
+        None => "",
+    };
+    format!("{}{}", &text[..start], after)
+}
+
+/// The byte offsets of the start marker and of the end of the end marker, and
+/// the trimmed contents of the block that [`find_flow_output_block`] returns.
+/// Shared so the block and its location can never disagree.
+fn find_flow_output_span(text: &str) -> Option<(usize, usize, &str)> {
     let marker_pos = find_block_start(text, FLOW_OUTPUT_START)?;
     let start = marker_pos + FLOW_OUTPUT_START.len();
     let end = text[start..]
         .match_indices(FLOW_OUTPUT_END)
         .map(|(pos, _)| start + pos)
         .find(|&pos| starts_line(text, pos))?;
-    Some((marker_pos, text[start..end].trim()))
+    Some((
+        marker_pos,
+        end + FLOW_OUTPUT_END.len(),
+        text[start..end].trim(),
+    ))
 }
 
 /// The block [`find_flow_output_block`] returns together with the 1-based line
 /// of `text` on which it begins (the line of its `<<<FLOW_OUTPUT>>>` marker),
 /// from a single lookup. `None` when there is no complete block.
 pub fn find_flow_output_block_with_line(text: &str) -> Option<(usize, &str)> {
-    let (marker_pos, block) = find_flow_output_span(text)?;
+    let (marker_pos, _, block) = find_flow_output_span(text)?;
     Some((text[..marker_pos].matches('\n').count() + 1, block))
 }
 
@@ -967,6 +986,31 @@ Real output:
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn strip_flow_output_block_keeps_text_around_the_block() {
+        let text = "before\n<<<FLOW_OUTPUT>>>\n{\"markers\":[]}\n<<<END_FLOW_OUTPUT>>>\nafter\n";
+        assert_eq!(super::strip_flow_output_block(text), "before\nafter\n");
+    }
+
+    #[test]
+    fn strip_flow_output_block_without_a_block_is_unchanged() {
+        let text = "just output\n<<<FLOW_OUTPUT>>>\n{\"markers\":[]}\n";
+        assert_eq!(super::strip_flow_output_block(text), text);
+        assert_eq!(super::strip_flow_output_block(""), "");
+    }
+
+    #[test]
+    fn strip_flow_output_block_ignores_a_marker_quoted_mid_line() {
+        let text = "see <<<FLOW_OUTPUT>>> {x} <<<END_FLOW_OUTPUT>>> docs\n";
+        assert_eq!(super::strip_flow_output_block(text), text);
+    }
+
+    #[test]
+    fn strip_flow_output_block_handles_a_block_at_the_end_without_newline() {
+        let text = "x\n<<<FLOW_OUTPUT>>>\n{}\n<<<END_FLOW_OUTPUT>>>";
+        assert_eq!(super::strip_flow_output_block(text), "x\n");
+    }
     use super::{collect_leaf_step_keys, parse_duration, serialize_or_empty_array};
     use crate::dsl::{
         AgentRef, AlwaysNode, CallNode, CallWorkflowNode, Condition, DoNode, ForEachNode, GateNode,
