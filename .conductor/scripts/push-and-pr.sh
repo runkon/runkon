@@ -55,6 +55,9 @@ if ! pr_body=$(build_pr_body 2>"$pr_body_err"); then
   pr_body=""
   if [ -s "$pr_body_err" ]; then
     echo "WARNING: could not parse PRIOR_CONTEXTS ($(head -c 300 "$pr_body_err")); using the commit bodies for the PR description" >&2
+  else
+    # pr-body.sh exits 1 with no stderr for an unset, empty or unsubstituted template.
+    echo "WARNING: PRIOR_CONTEXTS is unset, empty or an unsubstituted template; using the commit bodies for the PR description" >&2
   fi
 elif [ -z "$pr_body" ]; then
   echo "WARNING: no plan or implement summary in PRIOR_CONTEXTS; using the commit bodies for the PR description" >&2
