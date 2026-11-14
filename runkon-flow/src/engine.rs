@@ -434,6 +434,27 @@ pub trait ChildWorkflowRunner: Send + Sync {
     ) -> Result<Option<crate::types::WorkflowRun>>;
 }
 
+/// Re-acquire the run's lease with `token` and report whether this engine still owns it.
+///
+/// `Ok(true)` when the lease was renewed (and, if `expected_generation` is given, still
+/// has that generation); `Ok(false)` when another engine holds it or the generation
+/// changed; `Err` when persistence failed, so ownership is unknown. Shared by the lease
+/// refresh thread and [`ExecutionState::verify_lease`].
+pub(crate) fn lease_still_held(
+    persistence: &dyn WorkflowPersistence,
+    run_id: &str,
+    token: &str,
+    ttl_seconds: i64,
+    expected_generation: Option<i64>,
+) -> Result<bool> {
+    Ok(
+        match persistence.acquire_lease(run_id, token, ttl_seconds)? {
+            Some(gen) => expected_generation.is_none_or(|e| gen == e),
+            None => false,
+        },
+    )
+}
+
 impl ExecutionState {
     /// Create a fresh heartbeat counter, initialized to 0 so the first tick fires immediately.
     pub fn new_heartbeat() -> Arc<AtomicI64> {
@@ -448,6 +469,57 @@ impl ExecutionState {
     pub fn expect_lease_generation(&self) -> i64 {
         self.lease_generation
             .expect("lease_generation must be set after FlowEngine::run/resume entry")
+    }
+
+    /// Confirm this engine still holds the run's lease.
+    ///
+    /// Re-acquires the lease with this engine's own token (see [`lease_still_held`], shared
+    /// with the refresh thread). That renews it when we still own it, and reports loss
+    /// when another engine took the run over (for example a host that cleared the lease
+    /// owner and resumed the run while this engine was waiting on a gate).
+    ///
+    /// - Confirmed loss: cancels the token with `LeaseLost` and returns
+    ///   `Err(Cancelled(LeaseLost))`. The new owner decides the run's terminal status.
+    /// - Persistence error: the loss is only suspected, so returns the error instead.
+    ///   Nobody else is known to own the run, and mapping it to `LeaseLost` would skip
+    ///   the terminal-status write and leave the run `Running`.
+    ///
+    /// Unlike the refresh thread's `signal_lease_abort`, this does not set the shutdown
+    /// flag or cancel registry steps: it runs on the engine thread itself, inside the
+    /// only in-flight step (the gate), and the returned `Err` unwinds that step directly.
+    ///
+    /// Lets a long wait (a gate) check ownership right before it acts on a decision,
+    /// instead of waiting up to `lease_refresh_interval` for the refresh thread.
+    /// A no-op when the state holds no owner token.
+    pub fn verify_lease(&self) -> Result<()> {
+        use crate::cancellation_reason::CancellationReason;
+
+        let (Some(token), Some(expected)) = (self.owner_token.as_deref(), self.lease_generation)
+        else {
+            return Ok(());
+        };
+        let held = lease_still_held(
+            self.persistence.as_ref(),
+            &self.workflow_run_id,
+            token,
+            self.exec_config.lease_ttl_secs,
+            Some(expected),
+        )
+        .map_err(|e| {
+            EngineError::Persistence(format!(
+                "run {}: lease verification failed: {e}",
+                self.workflow_run_id
+            ))
+        })?;
+        if held {
+            return Ok(());
+        }
+        tracing::warn!(
+            "run {}: lease reclaimed by another engine, aborting",
+            self.workflow_run_id
+        );
+        self.cancellation.cancel(CancellationReason::LeaseLost);
+        Err(EngineError::Cancelled(CancellationReason::LeaseLost))
     }
 
     /// Throttled heartbeat tick + external cancel check.
@@ -752,12 +824,21 @@ pub fn run_workflow_engine(
             .cancellation
             .reason()
             .unwrap_or(crate::cancellation_reason::CancellationReason::UserRequested(None));
-        state.persistence.update_run_status(
-            &wf_run_id,
-            WorkflowRunStatus::Cancelled,
-            Some(&summary),
-            body_error.as_deref(),
-        )?;
+        // After LeaseLost another engine owns the run and decides its terminal status;
+        // writing Cancelled here would overwrite a run it has completed.
+        if cancel_reason == crate::cancellation_reason::CancellationReason::LeaseLost {
+            tracing::warn!(
+                "Workflow '{}' lost its lease; leaving the run status to the new owner",
+                workflow.name
+            );
+        } else {
+            state.persistence.update_run_status(
+                &wf_run_id,
+                WorkflowRunStatus::Cancelled,
+                Some(&summary),
+                body_error.as_deref(),
+            )?;
+        }
         tracing::warn!("Workflow '{}' was cancelled", workflow.name);
         emit_event(
             state,
@@ -1591,6 +1672,52 @@ pub fn flow_output_instruction() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persistence_memory::InMemoryWorkflowPersistence;
+
+    fn leased_run() -> (InMemoryWorkflowPersistence, String, i64) {
+        let p = InMemoryWorkflowPersistence::new();
+        let run = p
+            .create_run(crate::traits::persistence::NewRun {
+                workflow_name: "wf".into(),
+                parent_run_id: String::new(),
+                dry_run: false,
+                trigger: "manual".into(),
+                definition_snapshot: None,
+                parent_workflow_run_id: None,
+            })
+            .unwrap();
+        let generation = p.acquire_lease(&run.id, "tok", 60).unwrap().unwrap();
+        (p, run.id, generation)
+    }
+
+    #[test]
+    fn lease_still_held_true_for_own_lease_with_matching_generation() {
+        let (p, id, generation) = leased_run();
+        assert!(lease_still_held(&p, &id, "tok", 60, Some(generation)).unwrap());
+        assert!(lease_still_held(&p, &id, "tok", 60, None).unwrap());
+    }
+
+    #[test]
+    fn lease_still_held_false_when_generation_mismatches() {
+        let (p, id, generation) = leased_run();
+        assert!(!lease_still_held(&p, &id, "tok", 60, Some(generation + 100)).unwrap());
+    }
+
+    #[test]
+    fn lease_still_held_false_when_another_engine_holds_it() {
+        let (p, id, _) = leased_run();
+        assert!(!lease_still_held(&p, &id, "other", 60, None).unwrap());
+    }
+
+    #[test]
+    fn lease_still_held_propagates_persistence_error() {
+        let (p, id, _) = leased_run();
+        p.set_fail_acquire_lease(true);
+        assert!(matches!(
+            lease_still_held(&p, &id, "tok", 60, None),
+            Err(EngineError::Persistence(_))
+        ));
+    }
     use crate::dsl::{InputDecl, InputType, WorkflowDef, WorkflowTrigger};
 
     fn make_bool_workflow(
