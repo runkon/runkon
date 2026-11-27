@@ -989,9 +989,15 @@ mod tests {
             state.cancellation.reason(),
             Some(CancellationReason::UserRequested(Some("stop".to_string())))
         );
-        assert!(state.all_succeeded, "the engine flips all_succeeded, not the block");
         assert!(
-            !state.step_results.keys().any(|k| k.starts_with("parallel:")),
+            state.all_succeeded,
+            "the engine flips all_succeeded, not the block"
+        );
+        assert!(
+            !state
+                .step_results
+                .keys()
+                .any(|k| k.starts_with("parallel:")),
             "no synthetic parallel result on cancel"
         );
         let steps = persistence.get_steps(&run_id).unwrap();
