@@ -408,7 +408,10 @@ mod tests {
     fn placeholder_names_lists_variables_only() {
         assert_eq!(placeholder_names("a {{x}} b {{ y }}"), vec!["x", "y"]);
         assert_eq!(placeholder_names("{{...}} {{ and {{a.b}}"), vec!["a.b"]);
-        assert_eq!(placeholder_names("{{#if x}}{{y}}{{else}}{{z}}{{/if}}"), vec!["y", "z"]);
+        assert_eq!(
+            placeholder_names("{{#if x}}{{y}}{{else}}{{z}}{{/if}}"),
+            vec!["y", "z"]
+        );
         assert!(placeholder_names("plain").is_empty());
     }
 

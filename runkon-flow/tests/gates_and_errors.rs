@@ -1164,7 +1164,9 @@ fn env_script_def() -> runkon_flow::dsl::WorkflowDef {
 
 #[test]
 fn script_env_unapplied_default_fails_run_start() {
-    let engine = FlowEngineBuilder::new().build().expect("engine build failed");
+    let engine = FlowEngineBuilder::new()
+        .build()
+        .expect("engine build failed");
     let def = env_script_def();
     let persistence = make_persistence();
     let mut state = make_state("env-check", Arc::clone(&persistence), HashMap::new());
@@ -1174,17 +1176,24 @@ fn script_env_unapplied_default_fails_run_start() {
         panic!("expected EngineError::Workflow, got {err:?}");
     };
     assert!(
-        msg.contains("unresolved variable {{auto_rereview}} in env AUTO_REREVIEW of step check-ready"),
+        msg.contains(
+            "unresolved variable {{auto_rereview}} in env AUTO_REREVIEW of step check-ready"
+        ),
         "{msg}"
     );
 
     state.exec_config.dry_run = true;
-    assert!(engine.run(&def, &mut state).is_err(), "dry run must fail too");
+    assert!(
+        engine.run(&def, &mut state).is_err(),
+        "dry run must fail too"
+    );
 }
 
 #[test]
 fn script_env_supplied_input_runs() {
-    let engine = FlowEngineBuilder::new().build().expect("engine build failed");
+    let engine = FlowEngineBuilder::new()
+        .build()
+        .expect("engine build failed");
     let def = env_script_def();
     let persistence = make_persistence();
     let mut state = make_state("env-check", Arc::clone(&persistence), HashMap::new());

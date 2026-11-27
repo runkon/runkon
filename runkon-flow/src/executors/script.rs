@@ -949,13 +949,21 @@ mod tests {
 
     fn env_node(env: &[(&str, &str)]) -> ScriptNode {
         let mut node = make_node("check", "true");
-        node.env = env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        node.env = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         node
     }
 
     #[test]
     fn env_check_flags_defaulted_input_missing_from_inputs() {
-        let decls = [decl("auto_rereview", false, Some("true"), InputType::String)];
+        let decls = [decl(
+            "auto_rereview",
+            false,
+            Some("true"),
+            InputType::String,
+        )];
         let node = env_node(&[("AUTO_REREVIEW", "{{auto_rereview}}")]);
         let found = check_script_env(&node, &decls, &HashMap::new());
         assert_eq!(found.len(), 1);
