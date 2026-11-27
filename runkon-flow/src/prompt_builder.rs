@@ -562,6 +562,21 @@ mod tests {
     }
 
     #[test]
+    fn else_nested_in_false_parent_stays_suppressed() {
+        let t = "{{#if y}}{{#if x}}A{{else}}B{{/if}}{{else}}C{{/if}}";
+        // Outer false: neither inner arm may leak, only the outer else shows.
+        let outer_false = vmap(&[("x", "v"), ("y", "")]);
+        assert_eq!(substitute_variables(t, &outer_false), "C");
+        let both_false = vmap(&[("x", ""), ("y", "")]);
+        assert_eq!(substitute_variables(t, &both_false), "C");
+        // Outer true: the inner conditional picks its own arm.
+        let inner_false = vmap(&[("x", ""), ("y", "v")]);
+        assert_eq!(substitute_variables(t, &inner_false), "B");
+        let both_true = vmap(&[("x", "v"), ("y", "v")]);
+        assert_eq!(substitute_variables(t, &both_true), "A");
+    }
+
+    #[test]
     fn unbalanced_conditionals_stay_literal() {
         let vars = vmap(&[("x", "v")]);
         assert_eq!(substitute_variables("{{#if x}}A", &vars), "{{#if x}}A");

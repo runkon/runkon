@@ -895,6 +895,30 @@ mod tests {
         assert_eq!(step.context_out.as_deref(), Some("step ctx"));
     }
 
+    /// `{{#if}}` sees the raw value while a rendered `{{var}}` is shell-quoted.
+    #[test]
+    fn script_if_branch_and_quoted_value() {
+        let (persistence, run_id) = make_persistence();
+        let mut state = make_state(Arc::clone(&persistence), run_id.clone());
+        state
+            .inputs
+            .insert("greeting".to_string(), "it's a $HOME `x`".to_string());
+        state.inputs.insert("empty".to_string(), String::new());
+        let node = make_node(
+            "quote",
+            "printf '%s|' {{#if greeting}}{{greeting}}{{else}}none{{/if}} {{#if empty}}E{{else}}empty-branch{{/if}}",
+        );
+        execute_script(&mut state, &node, 0).unwrap();
+
+        let steps = persistence.get_steps(&run_id).unwrap();
+        assert_eq!(steps[0].status, WorkflowStepStatus::Completed);
+        let ctx = steps[0].context_out.as_deref().unwrap_or("");
+        assert!(
+            ctx.contains("it's a $HOME `x`|empty-branch|"),
+            "value must arrive as one literal argument, correct branches taken: {ctx:?}"
+        );
+    }
+
     /// When the script produces no FLOW_OUTPUT block, context falls back to
     /// raw stdout truncated to 2000 characters.
     #[test]
