@@ -1011,6 +1011,78 @@ mod tests {
         );
     }
 
+    /// #209: a FailFast scope cancel is not a run cancel. A fail_fast block whose
+    /// branch fails still reaches the min_success tally and fails, even though a
+    /// sibling came back `Cancelled(FailFast)`.
+    #[test]
+    fn parallel_fail_fast_sibling_cancel_still_counts_as_failure() {
+        struct FailExec;
+        impl ActionExecutor for FailExec {
+            fn name(&self) -> &str {
+                "fail_exec"
+            }
+            fn execute(
+                &self,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &crate::traits::action_executor::StepInfo,
+                _params: &ActionParams,
+            ) -> Result<ActionOutput, EngineError> {
+                Err(EngineError::Workflow("boom".to_string()))
+            }
+        }
+        struct SlowFailExec;
+        impl ActionExecutor for SlowFailExec {
+            fn name(&self) -> &str {
+                "slow_fail_exec"
+            }
+            fn execute(
+                &self,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &crate::traits::action_executor::StepInfo,
+                _params: &ActionParams,
+            ) -> Result<ActionOutput, EngineError> {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                Err(EngineError::Workflow("flaky".to_string()))
+            }
+        }
+
+        let mut named = HashMap::new();
+        named.insert(
+            "fail_exec".to_string(),
+            Box::new(FailExec) as Box<dyn ActionExecutor>,
+        );
+        named.insert(
+            "slow_fail_exec".to_string(),
+            Box::new(SlowFailExec) as Box<dyn ActionExecutor>,
+        );
+        let registry = crate::traits::action_executor::ActionRegistry::new(named, None);
+        let (persistence, run_id) = make_persistence_with_run();
+        let mut state = make_state(Arc::clone(&persistence), run_id, registry);
+
+        // The slow sibling's retry (or its first attempt, if it hasn't started)
+        // sees the FailFast scope cancel and returns Cancelled(FailFast).
+        let mut node = user_cancel_node(&["fail_exec", "slow_fail_exec"], true);
+        node.call_retries.insert("1".to_string(), 2);
+        let result = execute_parallel(&mut state, &node, 0);
+
+        assert!(
+            result.is_ok(),
+            "a fail_fast failure is not a cancelled run; got {result:?}"
+        );
+        assert!(
+            !state.cancellation.is_cancelled(),
+            "FailFast must stay scoped to the block"
+        );
+        assert!(!state.all_succeeded, "the block's failure must be counted");
+        let synthetic = state
+            .step_results
+            .iter()
+            .find(|(k, _)| k.starts_with("parallel:"))
+            .map(|(_, v)| v.status.clone())
+            .expect("synthetic parallel result recorded");
+        assert_eq!(synthetic, WorkflowStepStatus::Failed);
+    }
+
     /// #209: a sibling between retries stops once a branch has cancelled the run.
     #[test]
     fn parallel_branch_user_cancel_stops_sibling_retries() {
