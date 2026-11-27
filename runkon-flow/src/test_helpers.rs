@@ -313,6 +313,16 @@ impl crate::traits::persistence::WorkflowPersistence for CountingPersistence {
     ) -> Result<(), crate::engine_error::EngineError> {
         self.inner.update_run_status(id, s, result_summary, err)
     }
+    fn set_run_waiting(
+        &self,
+        id: &str,
+        b: &crate::types::BlockedOn,
+    ) -> Result<bool, crate::engine_error::EngineError> {
+        self.inner.set_run_waiting(id, b)
+    }
+    fn clear_run_waiting(&self, id: &str) -> Result<bool, crate::engine_error::EngineError> {
+        self.inner.clear_run_waiting(id)
+    }
     fn insert_step(
         &self,
         s: crate::traits::persistence::NewStep,

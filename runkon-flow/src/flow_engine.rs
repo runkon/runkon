@@ -654,6 +654,15 @@ impl FlowEngine {
             Err(e) => return Err(e),
         }
 
+        // A run that died at a gate may be `Waiting`. If the gate was decided meanwhile it is
+        // skipped below, so clear the stale status; a still-pending gate sets it again.
+        if let Err(e) = state.persistence.clear_run_waiting(&state.workflow_run_id) {
+            tracing::warn!(
+                "resume: failed to clear waiting status on run '{}': {e}",
+                state.workflow_run_id
+            );
+        }
+
         let steps = state
             .persistence
             .get_steps(&state.workflow_run_id)
@@ -3594,6 +3603,36 @@ mod tests {
             matches!(err, EngineError::AlreadyOwned(_)),
             "resume() with a pre-held lease should fail with AlreadyOwned; got {err:?}"
         );
+    }
+
+    // A resumed run that was left `Waiting` at a gate does not stay waiting.
+    #[test]
+    fn resume_clears_a_stale_waiting_status() {
+        use crate::persistence_memory::InMemoryWorkflowPersistence;
+        use crate::traits::persistence::WorkflowPersistence;
+        use crate::types::BlockedOn;
+
+        let persistence = Arc::new(InMemoryWorkflowPersistence::new());
+        let run = make_test_run(&persistence);
+        persistence
+            .set_run_waiting(
+                &run.id,
+                &BlockedOn::PrChecks {
+                    gate_name: "g".to_string(),
+                },
+            )
+            .unwrap();
+
+        // resume() dispatches through the state's registry, not the builder's.
+        let (_alpha_count, _beta_count, mut state) =
+            make_counting_state(Arc::clone(&persistence), run.id.clone());
+        let engine = FlowEngineBuilder::new().build().unwrap();
+        let def = make_def("wf", vec![call_node("alpha")]);
+
+        engine.resume(&def, &mut state).unwrap();
+        let got = persistence.get_run(&run.id).unwrap().unwrap();
+        assert_eq!(got.status, WorkflowRunStatus::Completed);
+        assert!(got.blocked_on.is_none());
     }
 
     // AC: existing single-engine workflow still completes normally.

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::engine_error::EngineError;
 use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
-use crate::types::{WorkflowRun, WorkflowRunStep};
+use crate::types::{BlockedOn, WorkflowRun, WorkflowRunStep};
 
 pub use crate::traits::gate_approval_store::{
     gate_approval_state_from_fields, GateApprovalState, GateApprovalStore,
@@ -245,8 +245,8 @@ pub trait WorkflowPersistence: GateApprovalStore + Send + Sync {
     ) -> Result<Vec<WorkflowRun>, EngineError>;
     /// Update run status.
     ///
-    /// NOTE: must not be called with `WorkflowRunStatus::Waiting` — use the engine's
-    /// `set_waiting_blocked_on` path instead.
+    /// NOTE: must not be called with `WorkflowRunStatus::Waiting` — use
+    /// [`set_run_waiting`](Self::set_run_waiting) instead. Always clears `blocked_on`.
     fn update_run_status(
         &self,
         run_id: &str,
@@ -254,6 +254,18 @@ pub trait WorkflowPersistence: GateApprovalStore + Send + Sync {
         result_summary: Option<&str>,
         error: Option<&str>,
     ) -> Result<(), EngineError>;
+    /// Move a run to `Waiting` and record what it is blocked on.
+    ///
+    /// This is the only way into `Waiting`. It changes the run only when its status is
+    /// `pending`, `running` or `waiting`, so it never overwrites a cancel or a terminal
+    /// status. Returns `Ok(false)` when no row changed (run missing, `cancelling` or
+    /// terminal).
+    fn set_run_waiting(&self, run_id: &str, blocked_on: &BlockedOn) -> Result<bool, EngineError>;
+    /// Move a `Waiting` run back to `Running` and clear `blocked_on`.
+    ///
+    /// Changes the run only when its status is `waiting`; a `cancelling` written while a
+    /// gate waited is left alone. Returns whether a row changed.
+    fn clear_run_waiting(&self, run_id: &str) -> Result<bool, EngineError>;
 
     // --- Steps ---
 
