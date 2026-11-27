@@ -1033,11 +1033,38 @@ mod tests {
             }
         }
 
+        /// Cancels only once the sibling's first attempt has started, so the test
+        /// checks "no retry after cancel" rather than racing the sibling's start.
+        struct CancelAfterSiblingStarts(Arc<AtomicU32>);
+        impl ActionExecutor for CancelAfterSiblingStarts {
+            fn name(&self) -> &str {
+                "user_cancel_exec"
+            }
+            fn execute(
+                &self,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &crate::traits::action_executor::StepInfo,
+                _params: &ActionParams,
+            ) -> Result<ActionOutput, EngineError> {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+                while self.0.load(Ordering::SeqCst) == 0 {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "sibling never started"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                Err(EngineError::Cancelled(CancellationReason::UserRequested(
+                    Some("stop".to_string()),
+                )))
+            }
+        }
+
         let calls = Arc::new(AtomicU32::new(0));
         let mut named = HashMap::new();
         named.insert(
             "user_cancel_exec".to_string(),
-            Box::new(UserCancelExec) as Box<dyn ActionExecutor>,
+            Box::new(CancelAfterSiblingStarts(Arc::clone(&calls))) as Box<dyn ActionExecutor>,
         );
         named.insert(
             "slow_fail_exec".to_string(),
