@@ -1,5 +1,49 @@
 # Changelog — runkon-flow
 
+## 0.11.0 — Breaking
+
+- **Fixed:** a literal `{{` no longer pairs with the next `}}` and deletes the text
+  between them. `{{` is a placeholder only when the text up to the next `}}` is a
+  variable name (`[A-Za-z_][A-Za-z0-9_.-]*`, spaces trimmed). Text such as `{{...}}`,
+  `{{<gate>.feedback}}`, `{{item.*}}` or a lone `{{` is now kept literally, where it used
+  to be stripped along with everything up to the next `}}`. The rule applies in every
+  path: agent prompts and snippets (runkon-flow-executors), script `run` and `env`, gate
+  prompts, and `call workflow` and `foreach` inputs. An unknown well-formed `{{name}}`
+  behaves as before.
+- **Changed:** prompts that relied on the old stripping now show that text, and
+  `{{ name }}` with spaces now resolves.
+- **Added:** `{{#if name}} … {{else}} … {{/if}}` conditional blocks (nestable; true when
+  the variable is set and non-empty; unbalanced tags are kept literally) in every
+  substitution path, where the markers used to be stripped and the body always shown.
+  Also added `prompt_builder::is_variable_name` and `prompt_builder::substitute_with`.
+
+- **Fixed:** a run waiting at a gate now has status `waiting`, with `blocked_on`
+  describing the gate (`human_approval`, `human_review`, `pr_approval`, `pr_checks`, or
+  the new generic `gate` variant for other gate types). After approve, reject or timeout
+  it returns to `running`, or to a terminal status, with `blocked_on` cleared. A resumed
+  run no longer stays `waiting` after skipping an already-decided gate. A gate decision
+  no longer overwrites a `cancelling` written while the gate waited. The in-memory
+  backend's `update_run_status` now clears `blocked_on`, like SQLite.
+- **Changed (breaking):** `WorkflowPersistence` gains the required methods
+  `set_run_waiting` and `clear_run_waiting`; hosts with their own implementation must add
+  them. `BlockedOn` gains the `Gate { gate_name, gate_type, prompt, options }` variant, so
+  exhaustive `match`es on it must handle the new case.
+
+- **Fixed:** a `parallel` branch whose action executor returns `Cancelled(UserRequested)`
+  now cancels the run. Siblings stop before their next attempt, the block returns
+  `Err(Cancelled)`, and the run ends `cancelled` instead of `failed`, without the
+  `only N/M succeeded` and `finished with failures` warnings. An external cancel that
+  lands while a parallel block is running also ends the run `cancelled`.
+
+- **Fixed:** a script step's `env` that references a declared workflow input which should
+  have a value (required, has a `default`, or boolean) but is missing from the run's inputs
+  now fails the run at start with `unresolved variable {{name}} in env KEY of step <step>`.
+  It used to reach the script as an empty string. Dry runs are checked too. Optional inputs
+  with no default, and unknown names, behave as before.
+- **Added:** `executors::script::check_script_env`, `check_workflow_script_env` and
+  `UnresolvedEnvVar` let hosts run the check without executing anything, and
+  `prompt_builder::placeholder_names` lists the `{{name}}` variables in a template.
+
 ## 0.10.0 — Breaking
 
 - **Added:** `ScriptEnvProvider::script_log_path` (default `None`). When a host returns a
