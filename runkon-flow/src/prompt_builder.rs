@@ -475,7 +475,13 @@ mod tests {
     #[test]
     fn non_name_braces_stay_literal() {
         let vars = vmap(&[("x", "1")]);
-        for lit in ["{{...}}", "{{<gate>.feedback}}", "{{item.*}}", "{{}}", "{{ }}"] {
+        for lit in [
+            "{{...}}",
+            "{{<gate>.feedback}}",
+            "{{item.*}}",
+            "{{}}",
+            "{{ }}",
+        ] {
             assert_eq!(substitute_variables(lit, &vars), lit);
             let before = format!("{lit} then {{{{x}}}}");
             assert_eq!(
@@ -562,13 +568,13 @@ mod tests {
     #[test]
     fn unbalanced_conditionals_stay_literal() {
         let vars = vmap(&[("x", "v")]);
-        assert_eq!(
-            substitute_variables("{{#if x}}A", &vars),
-            "{{#if x}}A"
-        );
+        assert_eq!(substitute_variables("{{#if x}}A", &vars), "{{#if x}}A");
         assert_eq!(substitute_variables("A{{/if}}", &vars), "A{{/if}}");
         assert_eq!(substitute_variables("A{{else}}B", &vars), "A{{else}}B");
-        assert_eq!(substitute_variables("{{#if}}A{{/if}}", &vars), "{{#if}}A{{/if}}");
+        assert_eq!(
+            substitute_variables("{{#if}}A{{/if}}", &vars),
+            "{{#if}}A{{/if}}"
+        );
         assert_eq!(
             substitute_variables("{{#each x}}{{x}}{{/each}}", &vars),
             "{{#each x}}v{{/each}}"

@@ -1084,7 +1084,10 @@ mod tests {
         };
 
         let prompt = build(&inputs);
-        assert!(prompt.contains("literal `{{`, this is a dry run."), "got: {prompt}");
+        assert!(
+            prompt.contains("literal `{{`, this is a dry run."),
+            "got: {prompt}"
+        );
         assert!(prompt.contains("step line 0\n"), "got: {prompt}");
         assert!(prompt.contains("step line 19\n"), "got: {prompt}");
         assert!(prompt.contains("Base: release/1"), "got: {prompt}");
