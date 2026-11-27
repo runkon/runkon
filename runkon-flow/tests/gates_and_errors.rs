@@ -1133,3 +1133,73 @@ fn run_child_polls_resolver() {
     assert_eq!(polls.load(Ordering::SeqCst), 2);
     assert_gate_released_by_resolver(&persistence, &run_id);
 }
+
+// ---------------------------------------------------------------------------
+// Script env: a declared input with a default that the host failed to apply
+// ---------------------------------------------------------------------------
+
+fn env_script_def() -> runkon_flow::dsl::WorkflowDef {
+    use runkon_flow::dsl::{InputDecl, InputType, ScriptNode};
+    let mut def = make_def(
+        "env-check",
+        vec![WorkflowNode::Script(ScriptNode {
+            name: "check-ready".to_string(),
+            run: "true".to_string(),
+            env: HashMap::from([("AUTO_REREVIEW".to_string(), "{{auto_rereview}}".to_string())]),
+            timeout: None,
+            retries: 0,
+            on_fail: None,
+            as_identity: None,
+        })],
+    );
+    def.inputs = vec![InputDecl {
+        name: "auto_rereview".to_string(),
+        required: false,
+        default: Some("true".to_string()),
+        description: None,
+        input_type: InputType::String,
+    }];
+    def
+}
+
+#[test]
+fn script_env_unapplied_default_fails_run_start() {
+    let engine = FlowEngineBuilder::new()
+        .build()
+        .expect("engine build failed");
+    let def = env_script_def();
+    let persistence = make_persistence();
+    let mut state = make_state("env-check", Arc::clone(&persistence), HashMap::new());
+
+    let err = engine.run(&def, &mut state).expect_err("run must fail");
+    let EngineError::Workflow(msg) = err else {
+        panic!("expected EngineError::Workflow, got {err:?}");
+    };
+    assert!(
+        msg.contains(
+            "unresolved variable {{auto_rereview}} in env AUTO_REREVIEW of step check-ready"
+        ),
+        "{msg}"
+    );
+
+    state.exec_config.dry_run = true;
+    assert!(
+        engine.run(&def, &mut state).is_err(),
+        "dry run must fail too"
+    );
+}
+
+#[test]
+fn script_env_supplied_input_runs() {
+    let engine = FlowEngineBuilder::new()
+        .build()
+        .expect("engine build failed");
+    let def = env_script_def();
+    let persistence = make_persistence();
+    let mut state = make_state("env-check", Arc::clone(&persistence), HashMap::new());
+    state
+        .inputs
+        .insert("auto_rereview".to_string(), "true".to_string());
+    let result = engine.run(&def, &mut state).expect("run should succeed");
+    assert!(result.all_succeeded);
+}

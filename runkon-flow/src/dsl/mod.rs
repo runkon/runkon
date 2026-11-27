@@ -5,7 +5,7 @@ mod lexer;
 mod parser;
 mod script_utils;
 mod types;
-mod validation;
+pub(crate) mod validation;
 
 // Re-export everything that is currently public
 pub use api::{
