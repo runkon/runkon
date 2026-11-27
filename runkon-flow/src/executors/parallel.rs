@@ -76,6 +76,9 @@ fn save_branch_result(
         }
         Err(e) => {
             match &pr.missing_output {
+                _ if matches!(e, EngineError::Cancelled(_)) => {
+                    tracing::info!("parallel: '{}' cancelled: {e}", pr.agent_name)
+                }
                 Some(m) => tracing::warn!(
                     "parallel: '{}' failed: {} (child_run_id={:?})",
                     pr.agent_name,
@@ -204,7 +207,8 @@ pub fn execute_parallel(
     let shared_inputs = super::build_inputs_map(state);
 
     // Parallel-scope token: child of the run root. Cancelling it signals running branches
-    // to exit early when fail_fast fires.
+    // to exit early when fail_fast fires. A branch's user cancel goes to the run token
+    // instead, so the scope's own reason never masks it.
     let scope_token = state.cancellation.child();
 
     for call_input in call_inputs {
@@ -317,7 +321,9 @@ pub fn execute_parallel(
 
             for attempt in 0..max_attempts {
                 if scope.is_cancelled() {
-                    result = Err(EngineError::Cancelled(CancellationReason::FailFast));
+                    result = Err(EngineError::Cancelled(
+                        scope.reason().unwrap_or(CancellationReason::FailFast),
+                    ));
                     break;
                 }
                 params.retries_remaining = max_attempts - attempt - 1;
@@ -405,6 +411,7 @@ pub fn execute_parallel(
     let mut successes = 0u32;
     let mut failures = 0u32;
     let mut results_count = 0u32;
+    let mut cancelled_branches = 0u32;
     loop {
         match completion_rx.recv_timeout(std::time::Duration::from_millis(500)) {
             Ok((step_id, agent_name, agent_step_key, result, attempt, missing_output)) => {
@@ -417,9 +424,21 @@ pub fn execute_parallel(
                     attempt,
                     missing_output,
                 };
-                let failed = pr.result.is_err();
-                if failed && node.fail_fast {
-                    scope_token.cancel(CancellationReason::FailFast);
+                match &pr.result {
+                    Err(EngineError::Cancelled(reason)) => {
+                        cancelled_branches += 1;
+                        if let CancellationReason::UserRequested(msg) = reason {
+                            // The host stopped the run from inside a branch: cancel the run,
+                            // not just this block, so it ends cancelled rather than failed.
+                            state
+                                .cancellation
+                                .cancel(CancellationReason::UserRequested(msg.clone()));
+                        } else if node.fail_fast {
+                            scope_token.cancel(CancellationReason::FailFast);
+                        }
+                    }
+                    Err(_) if node.fail_fast => scope_token.cancel(CancellationReason::FailFast),
+                    _ => {}
                 }
                 let saved = save_branch_result(
                     state,
@@ -452,6 +471,14 @@ pub fn execute_parallel(
                 }
             }
         }
+    }
+
+    // A cancelled run is not a failed run: skip the min_success tally and its warnings.
+    if cancelled_branches > 0 && state.cancellation.is_cancelled() {
+        tracing::info!(
+            "parallel: run cancelled; {successes} succeeded, {cancelled_branches} cancelled"
+        );
+        return state.cancellation.error_if_cancelled();
     }
 
     // Apply min_success policy (skipped-on-resume agents count as successes)
@@ -891,6 +918,144 @@ mod tests {
         assert!(
             !state.all_succeeded,
             "all_succeeded should be false when fail_fast fires"
+        );
+    }
+
+    struct UserCancelExec;
+    impl ActionExecutor for UserCancelExec {
+        fn name(&self) -> &str {
+            "user_cancel_exec"
+        }
+        fn execute(
+            &self,
+            _ctx: &dyn crate::traits::run_context::RunContext,
+            _info: &crate::traits::action_executor::StepInfo,
+            _params: &ActionParams,
+        ) -> Result<ActionOutput, EngineError> {
+            Err(EngineError::Cancelled(CancellationReason::UserRequested(
+                Some("stop".to_string()),
+            )))
+        }
+    }
+
+    fn user_cancel_node(calls: &[&str], fail_fast: bool) -> ParallelNode {
+        ParallelNode {
+            fail_fast,
+            min_success: None,
+            calls: calls
+                .iter()
+                .map(|c| AgentRef::Name((*c).to_string()))
+                .collect(),
+            output: None,
+            call_outputs: HashMap::new(),
+            with: vec![],
+            call_with: HashMap::new(),
+            call_if: HashMap::new(),
+            call_retries: HashMap::new(),
+            call_require_output: Default::default(),
+        }
+    }
+
+    /// #209: a branch's user cancel cancels the run instead of counting as a failure.
+    #[test]
+    fn parallel_branch_user_cancel_cancels_run() {
+        let mut named = HashMap::new();
+        named.insert(
+            "user_cancel_exec".to_string(),
+            Box::new(UserCancelExec) as Box<dyn ActionExecutor>,
+        );
+        named.insert(
+            "markers_exec".to_string(),
+            Box::new(MarkersExecutor {
+                markers: vec![],
+                context: String::new(),
+            }) as Box<dyn ActionExecutor>,
+        );
+        let registry = crate::traits::action_executor::ActionRegistry::new(named, None);
+        let (persistence, run_id) = make_persistence_with_run();
+        let mut state = make_state(Arc::clone(&persistence), run_id.clone(), registry);
+
+        let node = user_cancel_node(&["user_cancel_exec", "markers_exec"], true);
+        let result = execute_parallel(&mut state, &node, 0);
+
+        assert!(
+            matches!(
+                &result,
+                Err(EngineError::Cancelled(CancellationReason::UserRequested(Some(m)))) if m == "stop"
+            ),
+            "expected Cancelled(UserRequested(stop)); got {result:?}"
+        );
+        assert_eq!(
+            state.cancellation.reason(),
+            Some(CancellationReason::UserRequested(Some("stop".to_string())))
+        );
+        assert!(state.all_succeeded, "the engine flips all_succeeded, not the block");
+        assert!(
+            !state.step_results.keys().any(|k| k.starts_with("parallel:")),
+            "no synthetic parallel result on cancel"
+        );
+        let steps = persistence.get_steps(&run_id).unwrap();
+        assert_eq!(steps.len(), 2);
+        assert!(
+            steps.iter().all(|s| matches!(
+                s.status,
+                WorkflowStepStatus::Completed | WorkflowStepStatus::Failed
+            )),
+            "every branch row must be terminal: {steps:?}"
+        );
+    }
+
+    /// #209: a sibling between retries stops once a branch has cancelled the run.
+    #[test]
+    fn parallel_branch_user_cancel_stops_sibling_retries() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        struct SlowFailExec(Arc<AtomicU32>);
+        impl ActionExecutor for SlowFailExec {
+            fn name(&self) -> &str {
+                "slow_fail_exec"
+            }
+            fn execute(
+                &self,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &crate::traits::action_executor::StepInfo,
+                _params: &ActionParams,
+            ) -> Result<ActionOutput, EngineError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                Err(EngineError::Workflow("flaky".to_string()))
+            }
+        }
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let mut named = HashMap::new();
+        named.insert(
+            "user_cancel_exec".to_string(),
+            Box::new(UserCancelExec) as Box<dyn ActionExecutor>,
+        );
+        named.insert(
+            "slow_fail_exec".to_string(),
+            Box::new(SlowFailExec(Arc::clone(&calls))) as Box<dyn ActionExecutor>,
+        );
+        let registry = crate::traits::action_executor::ActionRegistry::new(named, None);
+        let (persistence, run_id) = make_persistence_with_run();
+        let mut state = make_state(Arc::clone(&persistence), run_id, registry);
+
+        let mut node = user_cancel_node(&["user_cancel_exec", "slow_fail_exec"], false);
+        node.call_retries.insert("1".to_string(), 2);
+        let result = execute_parallel(&mut state, &node, 0);
+
+        assert!(
+            matches!(
+                result,
+                Err(EngineError::Cancelled(CancellationReason::UserRequested(_)))
+            ),
+            "expected Cancelled(UserRequested); got {result:?}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the sibling must not retry after the run was cancelled"
         );
     }
 

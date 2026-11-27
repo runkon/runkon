@@ -655,3 +655,85 @@ fn invalid_input_env_prefix_refuses_the_run_before_any_step() {
         .expect("get_steps failed");
     assert!(steps.is_empty(), "no step may run: {steps:?}");
 }
+
+// ---------------------------------------------------------------------------
+// a parallel branch that cancels the run (#209)
+// ---------------------------------------------------------------------------
+
+/// Stops the run the way a host does when it cancels from inside an action.
+struct UserCancelExecutor;
+
+impl ActionExecutor for UserCancelExecutor {
+    fn name(&self) -> &str {
+        "stopper"
+    }
+
+    fn execute(
+        &self,
+        _ctx: &dyn runkon_flow::traits::run_context::RunContext,
+        _info: &runkon_flow::traits::action_executor::StepInfo,
+        _params: &runkon_flow::traits::action_executor::ActionParams,
+    ) -> Result<
+        runkon_flow::traits::action_executor::ActionOutput,
+        runkon_flow::engine_error::EngineError,
+    > {
+        Err(runkon_flow::engine_error::EngineError::Cancelled(
+            runkon_flow::cancellation_reason::CancellationReason::UserRequested(Some(
+                "dry-run stop".into(),
+            )),
+        ))
+    }
+}
+
+#[test]
+fn parallel_branch_user_cancel_ends_run_cancelled() {
+    let def = runkon_flow::dsl::parse_workflow_str(
+        r#"workflow w {
+  parallel {
+    call stopper
+    call clean
+  }
+  call after
+}"#,
+        "test.wf",
+    )
+    .expect("DSL should parse");
+    let engine = FlowEngineBuilder::new()
+        .action(Box::new(UserCancelExecutor))
+        .action(Box::new(MockExecutor::new("clean")))
+        .action(Box::new(MockExecutor::new("after")))
+        .build()
+        .expect("engine build failed");
+    let persistence = make_persistence();
+    let mut state = make_state(
+        "parallel-user-cancel",
+        Arc::clone(&persistence),
+        named_executors([
+            Box::new(UserCancelExecutor) as Box<dyn ActionExecutor>,
+            Box::new(MockExecutor::new("clean")) as Box<dyn ActionExecutor>,
+            Box::new(MockExecutor::new("after")) as Box<dyn ActionExecutor>,
+        ]),
+    );
+    // fail_fast is the path that used to `break` before the cancellation check.
+    state.exec_config.fail_fast = true;
+
+    let result = engine.run(&def, &mut state).expect("run should return");
+
+    assert!(!result.all_succeeded);
+    let run = persistence
+        .get_run(&result.workflow_run_id)
+        .expect("get_run failed")
+        .expect("run should exist");
+    assert_eq!(
+        run.status,
+        runkon_flow::status::WorkflowRunStatus::Cancelled,
+        "a branch's user cancel must end the run cancelled, not failed"
+    );
+    let steps = persistence
+        .get_steps(&result.workflow_run_id)
+        .expect("get_steps failed");
+    assert!(
+        steps.iter().all(|s| s.step_name != "after"),
+        "the step after the block must never run: {steps:?}"
+    );
+}
