@@ -2740,7 +2740,7 @@ mod tests {
         use crate::status::WorkflowRunStatus;
         for status in [WorkflowRunStatus::Cancelling, WorkflowRunStatus::Completed] {
             let (p, id) = waiting_test_db();
-            p.update_run_status(&id, status, None, None).unwrap();
+            p.update_run_status(&id, status.clone(), None, None).unwrap();
             assert!(!p.set_run_waiting(&id, &gate_blocked_on()).unwrap());
             let run = p.get_run(&id).unwrap().unwrap();
             assert_eq!(run.status, status);
@@ -2753,7 +2753,7 @@ mod tests {
         use crate::status::WorkflowRunStatus;
         for status in [WorkflowRunStatus::Running, WorkflowRunStatus::Cancelling] {
             let (p, id) = waiting_test_db();
-            p.update_run_status(&id, status, None, None).unwrap();
+            p.update_run_status(&id, status.clone(), None, None).unwrap();
             assert!(!p.clear_run_waiting(&id).unwrap());
             assert_eq!(p.get_run(&id).unwrap().unwrap().status, status);
         }
