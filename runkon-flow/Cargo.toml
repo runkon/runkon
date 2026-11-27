@@ -112,3 +112,7 @@ required-features = ["test-utils"]
 [[test]]
 name = "gate_feedback_scope"
 required-features = ["test-utils"]
+
+[[test]]
+name = "gate_waiting_status"
+required-features = ["test-utils"]
