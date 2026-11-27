@@ -240,6 +240,21 @@ pub fn substitute_variables_keep_literal(template: &str, vars: &HashMap<String, 
     substitute_variables_impl(template, vars, Unresolved::KeepLiteral)
 }
 
+/// The names of every `{{name}}` variable placeholder in `template`, in order.
+///
+/// Uses the same placeholder rule as [`substitute_variables`] (`{{...}}` and a lone
+/// `{{` are not placeholders). `{{#if}}`, `{{else}}` and `{{/if}}` tags are not
+/// included; a variable inside an `{{#if}}` body is.
+pub fn placeholder_names(template: &str) -> Vec<&str> {
+    tokenize(template)
+        .into_iter()
+        .filter_map(|t| match t {
+            Tok::Tag(Tag::Var(name), _) => Some(name),
+            _ => None,
+        })
+        .collect()
+}
+
 /// POSIX sh single-quote escape a value so it cannot break out of a shell command.
 ///
 /// Wraps `s` in single quotes and replaces embedded `'` with `'\''`.
@@ -388,6 +403,14 @@ pub fn build_variable_map(state: &ExecutionState) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn placeholder_names_lists_variables_only() {
+        assert_eq!(placeholder_names("a {{x}} b {{ y }}"), vec!["x", "y"]);
+        assert_eq!(placeholder_names("{{...}} {{ and {{a.b}}"), vec!["a.b"]);
+        assert_eq!(placeholder_names("{{#if x}}{{y}}{{else}}{{z}}{{/if}}"), vec!["y", "z"]);
+        assert!(placeholder_names("plain").is_empty());
+    }
 
     #[test]
     fn build_variable_map_exposes_per_gate_feedback() {
