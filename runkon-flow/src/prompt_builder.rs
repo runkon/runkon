@@ -145,11 +145,7 @@ pub fn substitute_with<'v>(
                 Some((_, e @ None)) => *e = Some(i),
                 _ => literal[i] = true,
             },
-            Tok::Tag(Tag::EndIf, _) => {
-                if stack.pop().is_none() {
-                    literal[i] = true;
-                }
-            }
+            Tok::Tag(Tag::EndIf, _) => literal[i] = stack.pop().is_none(),
             _ => {}
         }
     }
@@ -579,9 +575,14 @@ mod tests {
             substitute_variables("{{#each x}}{{x}}{{/each}}", &vars),
             "{{#each x}}v{{/each}}"
         );
+        // A second `{{else}}` in one block is literal text, here inside the skipped branch.
         assert_eq!(
             substitute_variables("{{#if x}}A{{else}}B{{else}}C{{/if}}", &vars),
-            "A{{else}}B{{else}}C"
+            "A"
+        );
+        assert_eq!(
+            substitute_variables("{{#if y}}A{{else}}B{{else}}C{{/if}}", &vars),
+            "B{{else}}C"
         );
     }
 
