@@ -394,25 +394,12 @@ pub fn load_and_concat_snippets(
 // ---------------------------------------------------------------------------
 
 fn substitute_variables(template: &str, vars: &HashMap<&str, &str>) -> String {
-    let mut result = String::with_capacity(template.len());
-    let mut remaining = template;
-    while let Some(open) = remaining.find("{{") {
-        result.push_str(&remaining[..open]);
-        remaining = &remaining[open + 2..];
-        if let Some(close) = remaining.find("}}") {
-            let key = &remaining[..close];
-            remaining = &remaining[close + 2..];
-            if let Some(val) = vars.get(key) {
-                result.push_str(val);
-            }
-            // unresolved → strip (drop it)
-        } else {
-            result.push_str("{{");
-            break;
-        }
-    }
-    result.push_str(remaining);
-    result
+    runkon_flow::prompt_builder::substitute_with(
+        template,
+        |k| vars.get(k).copied(),
+        |v, out| out.push_str(v),
+        runkon_flow::prompt_builder::Unresolved::Strip,
+    )
 }
 
 /// Generate schema-specific output instructions to append to an agent prompt.
@@ -1063,6 +1050,52 @@ mod tests {
 
         assert_eq!(agent_def.name, "worker");
         assert!(prompt.contains("Process build."), "got: {prompt}");
+    }
+
+    #[test]
+    fn load_agent_and_build_prompt_keeps_text_after_literal_braces() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().to_str().unwrap().to_string();
+
+        let mut brief = String::from("If it still shows a literal `{{`, this is a dry run.\n");
+        for i in 0..20 {
+            brief.push_str(&format!("step line {i}\n"));
+        }
+        brief.push_str("Base: {{feature_base_branch}}\n");
+        brief.push_str("{{#if gate_feedback}}Feedback: {{gate_feedback}}{{/if}}\n");
+        write_file(&tmp, ".conductor/agents/worker.md", &brief);
+
+        let mut inputs = HashMap::new();
+        inputs.insert("feature_base_branch".to_string(), "release/1".to_string());
+
+        let build = |inputs: &HashMap<String, String>| {
+            let params = BuildPromptParams {
+                config_dir: &cd(),
+                inputs,
+                snippet_refs: &[],
+                retry_error: None,
+                dry_run: false,
+                schema: None,
+                default_runtime: None,
+            };
+            load_agent_and_build_prompt(&dir, &dir, &[], "my-wf", "worker", &params)
+                .unwrap()
+                .1
+        };
+
+        let prompt = build(&inputs);
+        assert!(
+            prompt.contains("literal `{{`, this is a dry run."),
+            "got: {prompt}"
+        );
+        assert!(prompt.contains("step line 0\n"), "got: {prompt}");
+        assert!(prompt.contains("step line 19\n"), "got: {prompt}");
+        assert!(prompt.contains("Base: release/1"), "got: {prompt}");
+        assert!(!prompt.contains("Feedback:"), "got: {prompt}");
+
+        inputs.insert("gate_feedback".to_string(), "do X".to_string());
+        let prompt = build(&inputs);
+        assert!(prompt.contains("Feedback: do X"), "got: {prompt}");
     }
 
     #[test]
