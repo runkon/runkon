@@ -1317,7 +1317,8 @@ mod tests {
         for status in [WorkflowRunStatus::Cancelling, WorkflowRunStatus::Completed] {
             let p = InMemoryWorkflowPersistence::new();
             let run = p.create_run(make_new_run("wf")).unwrap();
-            p.update_run_status(&run.id, status.clone(), None, None).unwrap();
+            p.update_run_status(&run.id, status.clone(), None, None)
+                .unwrap();
             assert!(!p.set_run_waiting(&run.id, &gate_blocked_on()).unwrap());
             let got = p.get_run(&run.id).unwrap().unwrap();
             assert_eq!(got.status, status);
@@ -1332,7 +1333,8 @@ mod tests {
         for status in [WorkflowRunStatus::Running, WorkflowRunStatus::Cancelling] {
             let p = InMemoryWorkflowPersistence::new();
             let run = p.create_run(make_new_run("wf")).unwrap();
-            p.update_run_status(&run.id, status.clone(), None, None).unwrap();
+            p.update_run_status(&run.id, status.clone(), None, None)
+                .unwrap();
             assert!(!p.clear_run_waiting(&run.id).unwrap());
             assert_eq!(p.get_run(&run.id).unwrap().unwrap().status, status);
         }
