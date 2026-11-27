@@ -6,18 +6,49 @@ use crate::dsl::{GateNode, GateOptions, OnFailAction, OnTimeout, QUALITY_GATE_TY
 use crate::engine::{emit_event, ExecutionState};
 use crate::engine_error::{EngineError, Result};
 use crate::events::EngineEvent;
-use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
+use crate::status::WorkflowStepStatus;
 use crate::traits::gate_resolver::{GateParams, GatePoll, GateResolver};
 use crate::traits::persistence::{GateApprovalState, GateOption, GateStepInfo, StepUpdate};
+use crate::types::BlockedOn;
 
-fn resume_run_status(state: &ExecutionState, gate_name: &str, context: &str) {
-    if let Err(e) = state.persistence.update_run_status(
-        &state.workflow_run_id,
-        WorkflowRunStatus::Running,
-        None,
-        None,
-    ) {
-        tracing::warn!("Gate '{gate_name}': failed to update run status {context}: {e}");
+/// Map a gate to the `blocked_on` value recorded while its run waits.
+fn blocked_on_for(
+    node: &GateNode,
+    prompt: Option<String>,
+    options: &[GateOption],
+) -> BlockedOn {
+    let gate_name = node.name.clone();
+    let options: Vec<String> = options.iter().map(|o| o.value.clone()).collect();
+    match node.gate_type.as_str() {
+        "human_approval" => BlockedOn::HumanApproval {
+            gate_name,
+            prompt,
+            options,
+        },
+        "human_review" => BlockedOn::HumanReview {
+            gate_name,
+            prompt,
+            options,
+        },
+        "pr_approval" => BlockedOn::PrApproval {
+            gate_name,
+            approvals_needed: node.min_approvals,
+        },
+        "pr_checks" => BlockedOn::PrChecks { gate_name },
+        other => BlockedOn::Gate {
+            gate_name,
+            gate_type: other.to_string(),
+            prompt,
+            options,
+        },
+    }
+}
+
+/// Return a waiting run to `Running` and clear `blocked_on`. Leaves a `cancelling` or
+/// terminal status alone.
+fn clear_run_waiting(state: &ExecutionState, gate_name: &str, context: &str) {
+    if let Err(e) = state.persistence.clear_run_waiting(&state.workflow_run_id) {
+        tracing::warn!("Gate '{gate_name}': failed to clear run waiting status {context}: {e}");
     }
 }
 
@@ -137,7 +168,7 @@ fn finish_approved(
 ) -> Result<()> {
     tracing::info!("Gate '{}' approved", node.name);
     record_gate_feedback(state, &node.name, gate_feedback_value(feedback, selections));
-    resume_run_status(state, &node.name, "after approval");
+    clear_run_waiting(state, &node.name, "after approval");
     emit_event(
         state,
         EngineEvent::GateResolved {
@@ -156,7 +187,7 @@ fn finish_rejected(
     tracing::warn!("Gate '{}' rejected", node.name);
     state.all_succeeded = false;
     record_gate_feedback(state, &node.name, feedback.clone());
-    resume_run_status(state, &node.name, "after rejection");
+    clear_run_waiting(state, &node.name, "after rejection");
     emit_event(
         state,
         EngineEvent::GateResolved {
@@ -298,6 +329,7 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
         let vars = crate::prompt_builder::build_variable_map(state);
         crate::prompt_builder::substitute_variables_keep_literal(p, &vars)
     });
+    let blocked_on = blocked_on_for(node, prompt.clone(), &options);
     let gate_info = GateStepInfo {
         gate_type: node.gate_type.clone(),
         prompt: prompt.clone(),
@@ -319,6 +351,20 @@ pub fn execute_gate(state: &mut ExecutionState, node: &GateNode, iteration: u32)
             gate: Some(gate_info),
         },
     )?;
+
+    // Report the wait on the run before the event, so a host reacting to the event already
+    // sees `Waiting`. Best effort: the gate works without it.
+    match state
+        .persistence
+        .set_run_waiting(&state.workflow_run_id, &blocked_on)
+    {
+        Ok(true) => {}
+        Ok(false) => tracing::warn!(
+            "Gate '{}': run was not set to waiting (not pending, running or waiting)",
+            node.name
+        ),
+        Err(e) => tracing::warn!("Gate '{}': failed to set run waiting: {e}", node.name),
+    }
 
     emit_event(
         state,
@@ -584,7 +630,7 @@ pub fn handle_gate_timeout(
             )?;
             state.all_succeeded = false;
             record_gate_feedback(state, &node.name, None);
-            resume_run_status(state, &node.name, "after timeout (fail)");
+            clear_run_waiting(state, &node.name, "after timeout (fail)");
             Err(EngineError::Workflow(format!(
                 "Gate '{}' timed out",
                 node.name
@@ -607,7 +653,7 @@ pub fn handle_gate_timeout(
                 },
             )?;
             record_gate_feedback(state, &node.name, None);
-            resume_run_status(state, &node.name, "after timeout (continue)");
+            clear_run_waiting(state, &node.name, "after timeout (continue)");
             Ok(())
         }
     }
@@ -711,6 +757,80 @@ mod tests {
 
     fn step_ref(s: &str) -> Option<GateOptions> {
         Some(GateOptions::StepRef(s.into()))
+    }
+
+    #[test]
+    fn blocked_on_for_maps_each_gate_type() {
+        let opts = vec![GateOption {
+            value: "a".into(),
+            label: "Alpha".into(),
+        }];
+        let mut node = gate_node(None, 0);
+        node.min_approvals = 2;
+        let p = || Some("ship it?".to_string());
+
+        node.gate_type = "human_approval".into();
+        assert!(matches!(
+            blocked_on_for(&node, p(), &opts),
+            BlockedOn::HumanApproval { gate_name, prompt, options }
+                if gate_name == "approve" && prompt.as_deref() == Some("ship it?") && options == ["a"]
+        ));
+        node.gate_type = "human_review".into();
+        assert!(matches!(
+            blocked_on_for(&node, p(), &opts),
+            BlockedOn::HumanReview { .. }
+        ));
+        node.gate_type = "pr_approval".into();
+        assert!(matches!(
+            blocked_on_for(&node, p(), &opts),
+            BlockedOn::PrApproval { approvals_needed: 2, .. }
+        ));
+        node.gate_type = "pr_checks".into();
+        assert!(matches!(
+            blocked_on_for(&node, p(), &opts),
+            BlockedOn::PrChecks { .. }
+        ));
+        node.gate_type = "slack_reaction".into();
+        assert!(matches!(
+            blocked_on_for(&node, p(), &opts),
+            BlockedOn::Gate { gate_type, .. } if gate_type == "slack_reaction"
+        ));
+    }
+
+    #[test]
+    fn timeout_returns_the_run_to_running_with_blocked_on_cleared() {
+        use crate::status::WorkflowRunStatus;
+        for on_timeout in [OnTimeout::Fail, OnTimeout::Continue] {
+            let (mut state, cp, run_id) = make_state(VecSink::new());
+            let mut node = gate_node(None, 0);
+            node.on_timeout = on_timeout;
+            let _ = execute_gate(&mut state, &node, 0);
+            let run = cp.get_run(&run_id).unwrap().unwrap();
+            assert_eq!(run.status, WorkflowRunStatus::Running);
+            assert!(run.blocked_on.is_none());
+        }
+    }
+
+    #[test]
+    fn timeout_does_not_overwrite_a_cancelling_run() {
+        use crate::status::WorkflowRunStatus;
+        let (state, cp, run_id) = make_state(VecSink::new());
+        cp.update_run_status(&run_id, WorkflowRunStatus::Cancelling, None, None)
+            .unwrap();
+        clear_run_waiting(&state, "approve", "test");
+        let run = cp.get_run(&run_id).unwrap().unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Cancelling);
+    }
+
+    #[test]
+    fn dry_run_gate_leaves_run_status_alone() {
+        use crate::status::WorkflowRunStatus;
+        let (mut state, cp, run_id) = make_state(VecSink::new());
+        state.exec_config.dry_run = true;
+        execute_gate(&mut state, &gate_node(None, 0), 0).unwrap();
+        let run = cp.get_run(&run_id).unwrap().unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Pending);
+        assert!(run.blocked_on.is_none());
     }
 
     #[test]

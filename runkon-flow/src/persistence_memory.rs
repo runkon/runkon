@@ -10,6 +10,7 @@ use crate::cancellation_reason::CancellationReason;
 use crate::engine_error::EngineError;
 use crate::extensions::Extensions;
 use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
+use crate::types::BlockedOn;
 use crate::traits::gate_approval_store::{
     gate_approval_state_from_fields, GateApprovalState, GateApprovalStore,
 };
@@ -326,7 +327,7 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
     ) -> Result<(), EngineError> {
         if matches!(status, WorkflowRunStatus::Waiting) {
             return Err(EngineError::Persistence(
-                "Use set_waiting_blocked_on to transition to Waiting status".into(),
+                "Use set_run_waiting to transition to Waiting status".into(),
             ));
         }
         let mut store = self.lock()?;
@@ -342,10 +343,42 @@ impl WorkflowPersistence for InMemoryWorkflowPersistence {
         run.status = status;
         run.result_summary = result_summary.map(String::from);
         run.error = error.map(String::from);
+        run.blocked_on = None;
         if is_terminal {
             run.ended_at = Some(now);
         }
         Ok(())
+    }
+
+    fn set_run_waiting(&self, run_id: &str, blocked_on: &BlockedOn) -> Result<bool, EngineError> {
+        let mut store = self.lock()?;
+        match store.runs.get_mut(run_id) {
+            Some(run)
+                if matches!(
+                    run.status,
+                    WorkflowRunStatus::Pending
+                        | WorkflowRunStatus::Running
+                        | WorkflowRunStatus::Waiting
+                ) =>
+            {
+                run.status = WorkflowRunStatus::Waiting;
+                run.blocked_on = Some(blocked_on.clone());
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    fn clear_run_waiting(&self, run_id: &str) -> Result<bool, EngineError> {
+        let mut store = self.lock()?;
+        match store.runs.get_mut(run_id) {
+            Some(run) if run.status == WorkflowRunStatus::Waiting => {
+                run.status = WorkflowRunStatus::Running;
+                run.blocked_on = None;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     }
 
     fn insert_step(&self, new_step: NewStep) -> Result<String, EngineError> {
@@ -1252,5 +1285,68 @@ mod tests {
         // A different token should be able to claim the expired lease.
         let gen2 = p.acquire_lease(&run.id, "token-second", 30).unwrap();
         assert_eq!(gen2, Some(2));
+    }
+
+    fn gate_blocked_on() -> BlockedOn {
+        BlockedOn::HumanReview {
+            gate_name: "review".to_string(),
+            prompt: Some("ok?".to_string()),
+            options: vec![],
+        }
+    }
+
+    #[test]
+    fn set_run_waiting_round_trips_and_clear_resets() {
+        let p = InMemoryWorkflowPersistence::new();
+        let run = p.create_run(make_new_run("wf")).unwrap();
+        assert!(p.set_run_waiting(&run.id, &gate_blocked_on()).unwrap());
+        let got = p.get_run(&run.id).unwrap().unwrap();
+        assert_eq!(got.status, WorkflowRunStatus::Waiting);
+        assert!(matches!(
+            got.blocked_on,
+            Some(BlockedOn::HumanReview { ref gate_name, .. }) if gate_name == "review"
+        ));
+        assert!(p.clear_run_waiting(&run.id).unwrap());
+        let got = p.get_run(&run.id).unwrap().unwrap();
+        assert_eq!(got.status, WorkflowRunStatus::Running);
+        assert!(got.blocked_on.is_none());
+    }
+
+    #[test]
+    fn set_run_waiting_refuses_cancelling_and_terminal_runs() {
+        for status in [WorkflowRunStatus::Cancelling, WorkflowRunStatus::Completed] {
+            let p = InMemoryWorkflowPersistence::new();
+            let run = p.create_run(make_new_run("wf")).unwrap();
+            p.update_run_status(&run.id, status, None, None).unwrap();
+            assert!(!p.set_run_waiting(&run.id, &gate_blocked_on()).unwrap());
+            let got = p.get_run(&run.id).unwrap().unwrap();
+            assert_eq!(got.status, status);
+            assert!(got.blocked_on.is_none());
+        }
+        let p = InMemoryWorkflowPersistence::new();
+        assert!(!p.set_run_waiting("missing", &gate_blocked_on()).unwrap());
+    }
+
+    #[test]
+    fn clear_run_waiting_only_changes_waiting_runs() {
+        for status in [WorkflowRunStatus::Running, WorkflowRunStatus::Cancelling] {
+            let p = InMemoryWorkflowPersistence::new();
+            let run = p.create_run(make_new_run("wf")).unwrap();
+            p.update_run_status(&run.id, status, None, None).unwrap();
+            assert!(!p.clear_run_waiting(&run.id).unwrap());
+            assert_eq!(p.get_run(&run.id).unwrap().unwrap().status, status);
+        }
+    }
+
+    #[test]
+    fn update_run_status_clears_blocked_on() {
+        let p = InMemoryWorkflowPersistence::new();
+        let run = p.create_run(make_new_run("wf")).unwrap();
+        p.set_run_waiting(&run.id, &gate_blocked_on()).unwrap();
+        p.update_run_status(&run.id, WorkflowRunStatus::Failed, None, Some("x"))
+            .unwrap();
+        let got = p.get_run(&run.id).unwrap().unwrap();
+        assert_eq!(got.status, WorkflowRunStatus::Failed);
+        assert!(got.blocked_on.is_none());
     }
 }
