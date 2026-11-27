@@ -12,11 +12,7 @@ use crate::traits::persistence::{GateApprovalState, GateOption, GateStepInfo, St
 use crate::types::BlockedOn;
 
 /// Map a gate to the `blocked_on` value recorded while its run waits.
-fn blocked_on_for(
-    node: &GateNode,
-    prompt: Option<String>,
-    options: &[GateOption],
-) -> BlockedOn {
+fn blocked_on_for(node: &GateNode, prompt: Option<String>, options: &[GateOption]) -> BlockedOn {
     let gate_name = node.name.clone();
     let options: Vec<String> = options.iter().map(|o| o.value.clone()).collect();
     match node.gate_type.as_str() {
@@ -783,7 +779,10 @@ mod tests {
         node.gate_type = "pr_approval".into();
         assert!(matches!(
             blocked_on_for(&node, p(), &opts),
-            BlockedOn::PrApproval { approvals_needed: 2, .. }
+            BlockedOn::PrApproval {
+                approvals_needed: 2,
+                ..
+            }
         ));
         node.gate_type = "pr_checks".into();
         assert!(matches!(

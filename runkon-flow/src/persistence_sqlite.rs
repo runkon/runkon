@@ -870,8 +870,7 @@ impl WorkflowPersistence for SqliteWorkflowPersistence {
     ) -> Result<(), EngineError> {
         if matches!(status, WorkflowRunStatus::Waiting) {
             return Err(EngineError::Persistence(
-                "Use set_run_waiting() to transition a workflow run to Waiting status"
-                    .into(),
+                "Use set_run_waiting() to transition a workflow run to Waiting status".into(),
             ));
         }
         let conn = self.lock()?;
@@ -2719,7 +2718,11 @@ mod tests {
         let run = p.get_run(&id).unwrap().unwrap();
         assert_eq!(run.status, WorkflowRunStatus::Waiting);
         match run.blocked_on {
-            Some(crate::types::BlockedOn::HumanReview { gate_name, prompt, options }) => {
+            Some(crate::types::BlockedOn::HumanReview {
+                gate_name,
+                prompt,
+                options,
+            }) => {
                 assert_eq!(gate_name, "review");
                 assert_eq!(prompt.as_deref(), Some("ok?"));
                 assert_eq!(options, vec!["a".to_string()]);

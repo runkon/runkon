@@ -260,8 +260,7 @@ pub trait WorkflowPersistence: GateApprovalStore + Send + Sync {
     /// `pending`, `running` or `waiting`, so it never overwrites a cancel or a terminal
     /// status. Returns `Ok(false)` when no row changed (run missing, `cancelling` or
     /// terminal).
-    fn set_run_waiting(&self, run_id: &str, blocked_on: &BlockedOn)
-        -> Result<bool, EngineError>;
+    fn set_run_waiting(&self, run_id: &str, blocked_on: &BlockedOn) -> Result<bool, EngineError>;
     /// Move a `Waiting` run back to `Running` and clear `blocked_on`.
     ///
     /// Changes the run only when its status is `waiting`; a `cancelling` written while a
