@@ -234,6 +234,14 @@ pub struct InputDecl {
     pub input_type: InputType,
 }
 
+impl InputDecl {
+    /// Whether a run is expected to carry a value for this input: it is required,
+    /// has a `default`, or is a boolean. Optional inputs with no default may be absent.
+    pub fn expects_value(&self) -> bool {
+        self.required || self.default.is_some() || self.input_type == InputType::Boolean
+    }
+}
+
 /// A node in the workflow execution graph.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

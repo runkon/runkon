@@ -63,10 +63,9 @@ pub fn check_script_env(
             continue;
         }
         for name in crate::prompt_builder::placeholder_names(&node.env[key]) {
-            let expected = input_decls.iter().any(|d| {
-                d.name == name
-                    && (d.required || d.default.is_some() || d.input_type == InputType::Boolean)
-            });
+            let expected = input_decls
+                .iter()
+                .any(|d| d.name == name && d.expects_value());
             if expected && !inputs.contains_key(name) {
                 let found = UnresolvedEnvVar {
                     step: node.name.clone(),
