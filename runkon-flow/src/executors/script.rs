@@ -2,7 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::path::Path;
 
-use crate::dsl::{InputDecl, InputType, ScriptNode, WorkflowDef};
+use crate::dsl::{InputDecl, ScriptNode, WorkflowDef};
 use crate::engine::{handle_on_fail, record_step_success, ExecutionState};
 use crate::engine_error::Result;
 use crate::prompt_builder::build_variable_map;
@@ -891,7 +891,7 @@ mod tests {
         assert!(!content.contains("old content"));
     }
     use super::*;
-    use crate::dsl::{ScriptNode, WorkflowNode};
+    use crate::dsl::{InputType, ScriptNode, WorkflowNode};
     use crate::engine::ExecutionState;
     use crate::persistence_memory::InMemoryWorkflowPersistence;
     use crate::status::WorkflowStepStatus;

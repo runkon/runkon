@@ -829,6 +829,21 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn input_decl_expects_value() {
+        let decl = |required, default: Option<&str>, input_type| InputDecl {
+            name: "x".to_string(),
+            required,
+            default: default.map(str::to_string),
+            description: None,
+            input_type,
+        };
+        assert!(decl(true, None, InputType::String).expects_value());
+        assert!(decl(false, Some("d"), InputType::String).expects_value());
+        assert!(decl(false, None, InputType::Boolean).expects_value());
+        assert!(!decl(false, None, InputType::String).expects_value());
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
 
     fn simple_wf(body: Vec<WorkflowNode>) -> WorkflowDef {
