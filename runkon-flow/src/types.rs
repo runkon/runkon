@@ -12,6 +12,9 @@ use crate::status::{WorkflowRunStatus, WorkflowStepStatus};
 pub(crate) type StepKey = (String, u32);
 
 /// Describes what a workflow run is currently blocked on when in `Waiting` status.
+///
+/// `gate_name` is the gate step's `step_name`. Hosts find the step row by run id plus
+/// `step_name` with status `waiting`.
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -34,6 +37,14 @@ pub enum BlockedOn {
     },
     PrChecks {
         gate_name: String,
+    },
+    /// A gate whose type has no dedicated variant (for example a custom resolver type).
+    Gate {
+        gate_name: String,
+        gate_type: String,
+        prompt: Option<String>,
+        #[serde(default)]
+        options: Vec<String>,
     },
 }
 

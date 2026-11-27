@@ -870,8 +870,7 @@ impl WorkflowPersistence for SqliteWorkflowPersistence {
     ) -> Result<(), EngineError> {
         if matches!(status, WorkflowRunStatus::Waiting) {
             return Err(EngineError::Persistence(
-                "Use set_waiting_blocked_on() to transition a workflow run to Waiting status"
-                    .into(),
+                "Use set_run_waiting() to transition a workflow run to Waiting status".into(),
             ));
         }
         let conn = self.lock()?;
@@ -899,6 +898,30 @@ impl WorkflowPersistence for SqliteWorkflowPersistence {
         )
         .map_err(db_err)?;
         Ok(())
+    }
+
+    fn set_run_waiting(&self, run_id: &str, blocked_on: &BlockedOn) -> Result<bool, EngineError> {
+        let json = serde_json::to_string(blocked_on)
+            .map_err(|e| EngineError::Persistence(format!("serialize blocked_on: {e}")))?;
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE workflow_runs SET status = 'waiting', blocked_on = :blocked_on \
+             WHERE id = :id AND status IN ('pending', 'running', 'waiting')",
+            named_params![":blocked_on": json, ":id": run_id],
+        )
+        .map_err(db_err)?;
+        Ok(conn.changes() > 0)
+    }
+
+    fn clear_run_waiting(&self, run_id: &str) -> Result<bool, EngineError> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE workflow_runs SET status = 'running', blocked_on = NULL \
+             WHERE id = :id AND status = 'waiting'",
+            named_params![":id": run_id],
+        )
+        .map_err(db_err)?;
+        Ok(conn.changes() > 0)
     }
 
     fn insert_step(&self, new_step: NewStep) -> Result<String, EngineError> {
@@ -2659,5 +2682,94 @@ mod tests {
         assert_eq!(status, "failed");
         assert_eq!(ended_at, Some("2023-01-01T12:00:00Z".to_string()));
         assert_eq!(result_text, Some("error 4".to_string()));
+    }
+
+    fn waiting_test_db() -> (SqliteWorkflowPersistence, String) {
+        use crate::traits::persistence::NewRun;
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        super::create_canonical_schema(&conn).unwrap();
+        let p = SqliteWorkflowPersistence::from_shared_connection(Arc::new(Mutex::new(conn)));
+        let run = p
+            .create_run(NewRun {
+                workflow_name: "wait-wf".to_string(),
+                parent_run_id: String::new(),
+                dry_run: false,
+                trigger: "manual".to_string(),
+                definition_snapshot: None,
+                parent_workflow_run_id: None,
+            })
+            .unwrap();
+        (p, run.id)
+    }
+
+    fn gate_blocked_on() -> crate::types::BlockedOn {
+        crate::types::BlockedOn::HumanReview {
+            gate_name: "review".to_string(),
+            prompt: Some("ok?".to_string()),
+            options: vec!["a".to_string()],
+        }
+    }
+
+    #[test]
+    fn set_run_waiting_round_trips_blocked_on_and_clear_resets() {
+        use crate::status::WorkflowRunStatus;
+        let (p, id) = waiting_test_db();
+        assert!(p.set_run_waiting(&id, &gate_blocked_on()).unwrap());
+        let run = p.get_run(&id).unwrap().unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Waiting);
+        match run.blocked_on {
+            Some(crate::types::BlockedOn::HumanReview {
+                gate_name,
+                prompt,
+                options,
+            }) => {
+                assert_eq!(gate_name, "review");
+                assert_eq!(prompt.as_deref(), Some("ok?"));
+                assert_eq!(options, vec!["a".to_string()]);
+            }
+            other => panic!("unexpected blocked_on: {other:?}"),
+        }
+        assert!(p.clear_run_waiting(&id).unwrap());
+        let run = p.get_run(&id).unwrap().unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Running);
+        assert!(run.blocked_on.is_none());
+    }
+
+    #[test]
+    fn set_run_waiting_refuses_cancelling_and_terminal_runs() {
+        use crate::status::WorkflowRunStatus;
+        for status in [WorkflowRunStatus::Cancelling, WorkflowRunStatus::Completed] {
+            let (p, id) = waiting_test_db();
+            p.update_run_status(&id, status.clone(), None, None)
+                .unwrap();
+            assert!(!p.set_run_waiting(&id, &gate_blocked_on()).unwrap());
+            let run = p.get_run(&id).unwrap().unwrap();
+            assert_eq!(run.status, status);
+            assert!(run.blocked_on.is_none());
+        }
+    }
+
+    #[test]
+    fn clear_run_waiting_only_changes_waiting_runs() {
+        use crate::status::WorkflowRunStatus;
+        for status in [WorkflowRunStatus::Running, WorkflowRunStatus::Cancelling] {
+            let (p, id) = waiting_test_db();
+            p.update_run_status(&id, status.clone(), None, None)
+                .unwrap();
+            assert!(!p.clear_run_waiting(&id).unwrap());
+            assert_eq!(p.get_run(&id).unwrap().unwrap().status, status);
+        }
+    }
+
+    #[test]
+    fn update_run_status_clears_blocked_on_on_a_waiting_run() {
+        use crate::status::WorkflowRunStatus;
+        let (p, id) = waiting_test_db();
+        p.set_run_waiting(&id, &gate_blocked_on()).unwrap();
+        p.update_run_status(&id, WorkflowRunStatus::Failed, None, Some("x"))
+            .unwrap();
+        let run = p.get_run(&id).unwrap().unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::Failed);
+        assert!(run.blocked_on.is_none());
     }
 }
