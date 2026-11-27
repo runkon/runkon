@@ -408,6 +408,23 @@ impl FlowEngine {
         )
         .map_err(|e| EngineError::Workflow(format!("workflow '{}': {e}", def.name)))?;
 
+        // A declared input that should have a value but is missing from the run's inputs
+        // (a host that never applied its default, conductor-ai#3449) would reach a script
+        // as an empty string. Fail here, naming the variable, env key and step.
+        let unresolved = crate::executors::script::check_workflow_script_env(def, &state.inputs);
+        if !unresolved.is_empty() {
+            let joined = unresolved
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            tracing::warn!("workflow '{}': {}", def.name, joined);
+            return Err(EngineError::Workflow(format!(
+                "workflow '{}': {}",
+                def.name, joined
+            )));
+        }
+
         let lease_ttl_secs = state.exec_config.lease_ttl_secs;
         let refresh_interval = state.exec_config.lease_refresh_interval;
 

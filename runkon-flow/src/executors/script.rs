@@ -1,14 +1,99 @@
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::io::Read;
 use std::path::Path;
 
-use crate::dsl::ScriptNode;
+use crate::dsl::{InputDecl, ScriptNode, WorkflowDef};
 use crate::engine::{handle_on_fail, record_step_success, ExecutionState};
 use crate::engine_error::Result;
 use crate::prompt_builder::build_variable_map;
 use crate::traits::persistence::StepUpdate;
 
 use wait_timeout::ChildExt;
+
+/// Variables that neither workflow inputs nor the `env = { ... }` block may
+/// set: overriding them would change what the script loads or who it acts as.
+const SENSITIVE_ENV_VARS: &[&str] = &[
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "PYTHONPATH",
+    "RUBYLIB",
+    "NODE_PATH",
+    // Protect the bot-identity token resolved by `as = "..."` from being
+    // silently overwritten by a workflow-authored env block.
+    "GH_TOKEN",
+];
+
+/// A script step `env` value that references a declared input with no value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnresolvedEnvVar {
+    pub step: String,
+    pub env_key: String,
+    pub variable: String,
+}
+
+impl std::fmt::Display for UnresolvedEnvVar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "unresolved variable {{{{{}}}}} in env {} of step {}",
+            self.variable, self.env_key, self.step
+        )
+    }
+}
+
+/// Check one script step's `env` without executing it.
+///
+/// Reports each `{{name}}` in an env value where `name` is a declared input that
+/// should have a value (required, has a `default`, or boolean) but is missing from
+/// `inputs`. Optional inputs with no default and undeclared names are not reported.
+/// The engine runs this at run start; `execute_script` called directly does not.
+pub fn check_script_env(
+    node: &ScriptNode,
+    input_decls: &[InputDecl],
+    inputs: &HashMap<String, String>,
+) -> Vec<UnresolvedEnvVar> {
+    let mut keys: Vec<&String> = node.env.keys().collect();
+    keys.sort();
+    let mut out = Vec::new();
+    for key in keys {
+        if key.contains('=') || key.contains('\0') || SENSITIVE_ENV_VARS.contains(&key.as_str()) {
+            continue;
+        }
+        for name in crate::prompt_builder::placeholder_names(&node.env[key]) {
+            let expected = input_decls
+                .iter()
+                .any(|d| d.name == name && d.expects_value());
+            if expected && !inputs.contains_key(name) {
+                let found = UnresolvedEnvVar {
+                    step: node.name.clone(),
+                    env_key: key.clone(),
+                    variable: name.to_string(),
+                };
+                if !out.contains(&found) {
+                    out.push(found);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Run [`check_script_env`] on every script step of a workflow (body and `always`,
+/// including steps nested in control-flow bodies).
+pub fn check_workflow_script_env(
+    def: &WorkflowDef,
+    inputs: &HashMap<String, String>,
+) -> Vec<UnresolvedEnvVar> {
+    use crate::dsl::validation::collect_script_nodes;
+    collect_script_nodes(&def.body)
+        .into_iter()
+        .chain(collect_script_nodes(&def.always))
+        .flat_map(|n| check_script_env(n, &def.inputs, inputs))
+        .collect()
+}
 
 /// How much of a script's stderr is kept in memory: the newest bytes.
 const STDERR_CAPTURE_CAP: usize = 64 * 1024;
@@ -583,22 +668,6 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
         env_vars.extend(provider_env);
     }
 
-    // Variables that neither workflow inputs nor the `env = { ... }` block may
-    // set: overriding them would change what the script loads or who it acts as.
-    const SENSITIVE_ENV_VARS: &[&str] = &[
-        "LD_PRELOAD",
-        "LD_LIBRARY_PATH",
-        "DYLD_LIBRARY_PATH",
-        "PATH",
-        "DYLD_INSERT_LIBRARIES",
-        "PYTHONPATH",
-        "RUBYLIB",
-        "NODE_PATH",
-        // Protect the bot-identity token resolved by `as = "..."` from being
-        // silently overwritten by a workflow-authored env block.
-        "GH_TOKEN",
-    ];
-
     // Inject all current workflow inputs as env vars, prefixed with the
     // provider's `input_env_prefix()` (`FLOW_` by default).
     // Validate that keys consist only of alphanumeric characters and underscores to
@@ -822,7 +891,7 @@ mod tests {
         assert!(!content.contains("old content"));
     }
     use super::*;
-    use crate::dsl::ScriptNode;
+    use crate::dsl::{InputType, ScriptNode, WorkflowNode};
     use crate::engine::ExecutionState;
     use crate::persistence_memory::InMemoryWorkflowPersistence;
     use crate::status::WorkflowStepStatus;
@@ -865,6 +934,87 @@ mod tests {
             on_fail: None,
             as_identity: None,
         }
+    }
+
+    fn decl(name: &str, required: bool, default: Option<&str>, ty: InputType) -> InputDecl {
+        InputDecl {
+            name: name.to_string(),
+            required,
+            default: default.map(str::to_string),
+            description: None,
+            input_type: ty,
+        }
+    }
+
+    fn env_node(env: &[(&str, &str)]) -> ScriptNode {
+        let mut node = make_node("check", "true");
+        node.env = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        node
+    }
+
+    #[test]
+    fn env_check_flags_defaulted_input_missing_from_inputs() {
+        let decls = [decl(
+            "auto_rereview",
+            false,
+            Some("true"),
+            InputType::String,
+        )];
+        let node = env_node(&[("AUTO_REREVIEW", "{{auto_rereview}}")]);
+        let found = check_script_env(&node, &decls, &HashMap::new());
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0].to_string(),
+            "unresolved variable {{auto_rereview}} in env AUTO_REREVIEW of step check"
+        );
+    }
+
+    #[test]
+    fn env_check_allows_optional_undeclared_present_and_engine_vars() {
+        let decls = [
+            decl("opt", false, None, InputType::String),
+            decl("d", false, Some("x"), InputType::String),
+        ];
+        let node = env_node(&[
+            ("A", "{{opt}}"),
+            ("B", "{{whatever}}"),
+            ("C", "{{prior_output}}"),
+            ("D", "{{d}}"),
+        ]);
+        let inputs = HashMap::from([("d".to_string(), String::new())]);
+        assert!(check_script_env(&node, &decls, &inputs).is_empty());
+    }
+
+    #[test]
+    fn env_check_flags_required_and_boolean_inputs() {
+        let decls = [
+            decl("req", true, None, InputType::String),
+            decl("flag", false, None, InputType::Boolean),
+        ];
+        let node = env_node(&[("A", "{{req}}"), ("B", "{{ flag }}")]);
+        let found = check_script_env(&node, &decls, &HashMap::new());
+        let vars: Vec<&str> = found.iter().map(|f| f.variable.as_str()).collect();
+        assert_eq!(vars, vec!["req", "flag"]);
+    }
+
+    #[test]
+    fn workflow_env_check_finds_body_and_always_steps() {
+        let mut def = crate::test_helpers::make_def(
+            "w",
+            vec![WorkflowNode::Script(env_node(&[("X", "{{x}}")]))],
+        );
+        def.inputs = vec![decl("x", false, Some("1"), InputType::String)];
+        let mut always = env_node(&[("X", "{{x}}")]);
+        always.name = "cleanup".to_string();
+        def.always = vec![WorkflowNode::Script(always)];
+        let found = check_workflow_script_env(&def, &HashMap::new());
+        let steps: Vec<&str> = found.iter().map(|f| f.step.as_str()).collect();
+        assert_eq!(steps, vec!["check", "cleanup"]);
+        let supplied = HashMap::from([("x".to_string(), "1".to_string())]);
+        assert!(check_workflow_script_env(&def, &supplied).is_empty());
     }
 
     /// When the script emits a valid FLOW_OUTPUT block, markers and context

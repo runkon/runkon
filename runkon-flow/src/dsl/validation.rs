@@ -562,7 +562,7 @@ fn check_script_unix_permissions(
     }
 }
 
-fn collect_script_nodes(nodes: &[WorkflowNode]) -> Vec<&ScriptNode> {
+pub(crate) fn collect_script_nodes(nodes: &[WorkflowNode]) -> Vec<&ScriptNode> {
     let mut out = Vec::new();
     for node in nodes {
         match node {
