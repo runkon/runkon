@@ -3623,14 +3623,11 @@ mod tests {
             )
             .unwrap();
 
-        let engine = FlowEngineBuilder::new()
-            .action(Box::new(AlphaExecutor))
-            .build()
-            .unwrap();
+        // resume() dispatches through the state's registry, not the builder's.
+        let (_alpha_count, _beta_count, mut state) =
+            make_counting_state(Arc::clone(&persistence), run.id.clone());
+        let engine = FlowEngineBuilder::new().build().unwrap();
         let def = make_def("wf", vec![call_node("alpha")]);
-        let mut state = make_bare_state("wf");
-        state.persistence = Arc::clone(&persistence) as Arc<dyn WorkflowPersistence>;
-        state.workflow_run_id = run.id.clone();
 
         engine.resume(&def, &mut state).unwrap();
         let got = persistence.get_run(&run.id).unwrap().unwrap();
