@@ -1065,6 +1065,65 @@ mod tests {
         );
     }
 
+    /// #209: an external cancel that lands while a branch runs ends the block
+    /// `Err(Cancelled)`, not a min_success failure. The branch's next attempt sees the
+    /// cancelled scope (a child of `state.cancellation`) and returns `Cancelled`.
+    #[test]
+    fn parallel_external_cancel_during_branch_cancels_run() {
+        struct SlowFailExec;
+        impl ActionExecutor for SlowFailExec {
+            fn name(&self) -> &str {
+                "slow_fail_exec"
+            }
+            fn execute(
+                &self,
+                _ctx: &dyn crate::traits::run_context::RunContext,
+                _info: &crate::traits::action_executor::StepInfo,
+                _params: &ActionParams,
+            ) -> Result<ActionOutput, EngineError> {
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                Err(EngineError::Workflow("flaky".to_string()))
+            }
+        }
+
+        let mut named = HashMap::new();
+        named.insert(
+            "slow_fail_exec".to_string(),
+            Box::new(SlowFailExec) as Box<dyn ActionExecutor>,
+        );
+        let registry = crate::traits::action_executor::ActionRegistry::new(named, None);
+        let (persistence, run_id) = make_persistence_with_run();
+        let mut state = make_state(Arc::clone(&persistence), run_id, registry);
+
+        let mut node = user_cancel_node(&["slow_fail_exec"], false);
+        node.call_retries.insert("0".to_string(), 2);
+
+        let token = state.cancellation.clone();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            token.cancel(CancellationReason::UserRequested(Some(
+                "external".to_string(),
+            )));
+        });
+        let result = execute_parallel(&mut state, &node, 0);
+        canceller.join().unwrap();
+
+        assert!(
+            matches!(
+                &result,
+                Err(EngineError::Cancelled(CancellationReason::UserRequested(Some(m)))) if m == "external"
+            ),
+            "expected Cancelled(UserRequested(external)); got {result:?}"
+        );
+        assert!(
+            !state
+                .step_results
+                .keys()
+                .any(|k| k.starts_with("parallel:")),
+            "no synthetic parallel result on cancel"
+        );
+    }
+
     /// Regression for #2731: the parallel wait loop must keep polling for
     /// cancellation while branches are running. Prior to the fix, the wait loop
     /// was `for ... in completion_rx { ... }` — blocking on the receiver for the
