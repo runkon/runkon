@@ -2,56 +2,242 @@ use std::collections::{HashMap, HashSet};
 
 use crate::engine::ExecutionState;
 
-fn substitute_variables_impl(
-    template: &str,
-    vars: &HashMap<String, String>,
-    strip_unresolved: bool,
-) -> String {
-    // Single-pass tokeniser: scan the original template once, emitting each
-    // {{key}} replacement exactly once.  This prevents double-substitution —
-    // a replaced value containing {{other}} is written verbatim and never
-    // re-scanned, so injected placeholder text cannot escape shell quoting.
-    let mut out = String::with_capacity(template.len());
-    let mut pos = 0;
-    let bytes = template.as_bytes();
-    while pos < bytes.len() {
-        if bytes[pos..].starts_with(b"{{") {
-            if let Some(end_rel) = template[pos + 2..].find("}}") {
-                let key = &template[pos + 2..pos + 2 + end_rel];
-                if let Some(value) = vars.get(key) {
-                    out.push_str(value);
-                } else if !strip_unresolved {
-                    // Preserve unresolved placeholders literally.
-                    out.push_str(&template[pos..pos + 2 + end_rel + 2]);
-                }
-                pos += 2 + end_rel + 2;
-            } else {
-                // No closing `}}` — copy the rest verbatim.
-                out.push_str(&template[pos..]);
-                pos = bytes.len();
-            }
-        } else {
-            // Find the next `{{` and copy everything before it.
-            let next = template[pos..]
-                .find("{{")
-                .map(|i| pos + i)
-                .unwrap_or(bytes.len());
-            out.push_str(&template[pos..next]);
-            pos = next;
+/// What to do with a well-formed `{{name}}` that has no value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unresolved {
+    /// Drop the placeholder from the output.
+    Strip,
+    /// Keep the placeholder's original text.
+    KeepLiteral,
+}
+
+/// True when `s` is a variable name: `[A-Za-z_][A-Za-z0-9_.-]*`.
+///
+/// This is the only kind of text the substitution functions treat as a placeholder
+/// key (after trimming spaces and tabs). Hosts' validators should use it to decide
+/// whether a `{{…}}` in a prompt is a placeholder or literal text.
+///
+/// Every engine- and host-injected name fits this grammar: input names, `ticket_*`,
+/// `repo_*`, `<gate>.feedback`, `item.*` and `gate_feedback`.
+pub fn is_variable_name(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Tag<'a> {
+    Var(&'a str),
+    If(&'a str),
+    Else,
+    EndIf,
+}
+
+fn skip_blank(s: &str) -> &str {
+    s.trim_start_matches([' ', '\t'])
+}
+
+/// Split a leading variable name off `s`, if there is one.
+fn take_name(s: &str) -> Option<(&str, &str)> {
+    let end = s
+        .find(|c: char| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-')))
+        .unwrap_or(s.len());
+    let name = &s[..end];
+    if is_variable_name(name) {
+        Some((name, &s[end..]))
+    } else {
+        None
+    }
+}
+
+/// Parse a tag at the start of `s` (which begins with `{{`). Returns the tag and its
+/// byte length, or `None` when the text is not a well-formed tag. Scanning stops at
+/// the first character that cannot belong to a tag, so it never reads past a newline
+/// or an unrelated `}}`.
+fn parse_tag(s: &str) -> Option<(Tag<'_>, usize)> {
+    let rest = skip_blank(&s[2..]);
+    let (tag, rest) = if let Some(after) = rest.strip_prefix("#if") {
+        // Require at least one blank between `#if` and the name.
+        let named = skip_blank(after);
+        if named.len() == after.len() {
+            return None;
         }
+        let (name, rest) = take_name(named)?;
+        (Tag::If(name), rest)
+    } else if let Some(after) = rest.strip_prefix("/if") {
+        (Tag::EndIf, after)
+    } else {
+        let (name, rest) = take_name(rest)?;
+        if name == "else" {
+            (Tag::Else, rest)
+        } else {
+            (Tag::Var(name), rest)
+        }
+    };
+    let rest = skip_blank(rest).strip_prefix("}}")?;
+    Some((tag, s.len() - rest.len()))
+}
+
+enum Tok<'a> {
+    Text(&'a str),
+    Tag(Tag<'a>, &'a str),
+}
+
+fn tokenize(template: &str) -> Vec<Tok<'_>> {
+    let mut toks = Vec::new();
+    let mut pos = 0;
+    while pos < template.len() {
+        let Some(rel) = template[pos..].find("{{") else {
+            toks.push(Tok::Text(&template[pos..]));
+            break;
+        };
+        let open = pos + rel;
+        if open > pos {
+            toks.push(Tok::Text(&template[pos..open]));
+        }
+        match parse_tag(&template[open..]) {
+            Some((tag, len)) => {
+                toks.push(Tok::Tag(tag, &template[open..open + len]));
+                pos = open + len;
+            }
+            None => {
+                // Not a placeholder: emit one `{` literally and resume one byte later,
+                // so `{{{x}}}` still finds `{{x}}` and a stray `{{` swallows nothing.
+                toks.push(Tok::Text(&template[open..open + 1]));
+                pos = open + 1;
+            }
+        }
+    }
+    toks
+}
+
+/// Single-pass substitution of `{{name}}` placeholders and `{{#if name}}` blocks.
+///
+/// * `lookup` returns the raw value of a variable. `{{#if name}}` is true when the
+///   value is set and non-empty.
+/// * `render` writes a value into the output. Use `|v, out| out.push_str(v)` for
+///   verbatim output, or a quoting function for shell contexts.
+/// * `unresolved` decides what happens to a well-formed `{{name}}` with no value.
+///
+/// A `{{` is a placeholder only when the text up to the next `}}`, with spaces and
+/// tabs trimmed, is a variable name (see [`is_variable_name`]) or a conditional tag.
+/// Anything else (`{{...}}`, `{{<gate>.feedback}}`, a lone `{{`) is kept literally.
+/// Unbalanced conditional tags are also kept literally. The template is scanned once
+/// and substituted values are never re-scanned.
+pub fn substitute_with<'v>(
+    template: &str,
+    lookup: impl Fn(&str) -> Option<&'v str>,
+    render: impl Fn(&str, &mut String),
+    unresolved: Unresolved,
+) -> String {
+    let toks = tokenize(template);
+
+    // Pair up conditional tags; unbalanced ones are rendered literally.
+    let mut literal = vec![false; toks.len()];
+    let mut stack: Vec<(usize, Option<usize>)> = Vec::new();
+    for (i, tok) in toks.iter().enumerate() {
+        match tok {
+            Tok::Tag(Tag::If(_), _) => stack.push((i, None)),
+            Tok::Tag(Tag::Else, _) => match stack.last_mut() {
+                Some((_, e @ None)) => *e = Some(i),
+                _ => literal[i] = true,
+            },
+            Tok::Tag(Tag::EndIf, _) => literal[i] = stack.pop().is_none(),
+            _ => {}
+        }
+    }
+    for (if_idx, else_idx) in stack {
+        literal[if_idx] = true;
+        if let Some(e) = else_idx {
+            literal[e] = true;
+        }
+    }
+
+    let mut out = String::with_capacity(template.len());
+    let mut stripped: Vec<&str> = Vec::new();
+    // (emitting before the block, condition value)
+    let mut blocks: Vec<(bool, bool)> = Vec::new();
+    let mut emit = true;
+    for (i, tok) in toks.iter().enumerate() {
+        match tok {
+            Tok::Text(t) => {
+                if emit {
+                    out.push_str(t);
+                }
+            }
+            Tok::Tag(_, raw) if literal[i] => {
+                if emit {
+                    out.push_str(raw);
+                }
+            }
+            Tok::Tag(Tag::If(name), _) => {
+                let cond = lookup(name).is_some_and(|v| !v.is_empty());
+                blocks.push((emit, cond));
+                emit = emit && cond;
+            }
+            Tok::Tag(Tag::Else, _) => {
+                if let Some(&(parent, cond)) = blocks.last() {
+                    emit = parent && !cond;
+                }
+            }
+            Tok::Tag(Tag::EndIf, _) => {
+                if let Some((parent, _)) = blocks.pop() {
+                    emit = parent;
+                }
+            }
+            Tok::Tag(Tag::Var(name), raw) => {
+                if !emit {
+                    continue;
+                }
+                match lookup(name) {
+                    Some(v) => render(v, &mut out),
+                    None => match unresolved {
+                        Unresolved::Strip => stripped.push(name),
+                        Unresolved::KeepLiteral => out.push_str(raw),
+                    },
+                }
+            }
+        }
+    }
+    if !stripped.is_empty() {
+        tracing::debug!(names = ?stripped, "stripped unresolved placeholders");
     }
     out
 }
 
-/// For agent prompts: substitutes variables AND strips unresolved `{{…}}` placeholders.
+fn substitute_variables_impl(
+    template: &str,
+    vars: &HashMap<String, String>,
+    unresolved: Unresolved,
+) -> String {
+    substitute_with(
+        template,
+        |k| vars.get(k).map(String::as_str),
+        |v, out| out.push_str(v),
+        unresolved,
+    )
+}
+
+/// For agent prompts: substitutes variables AND strips unresolved `{{name}}`
+/// placeholders.
+///
+/// Only `{{ name }}` (a variable name, spaces trimmed) is a placeholder; other `{{`
+/// text such as `{{...}}` is kept literally. `{{#if name}} … {{else}} … {{/if}}`
+/// blocks are supported. See [`substitute_with`].
 pub fn substitute_variables(prompt: &str, vars: &HashMap<String, String>) -> String {
-    substitute_variables_impl(prompt, vars, true)
+    substitute_variables_impl(prompt, vars, Unresolved::Strip)
 }
 
 /// For data contexts (env vars, sub-workflow inputs): substitutes variables but
-/// preserves any `{{…}}` text that was not a template variable.
+/// preserves any `{{…}}` text that was not a resolvable template variable.
+///
+/// Follows the same name rule and `{{#if}}` support as [`substitute_variables`]; an
+/// unknown `{{name}}` is kept verbatim, and counts as false in `{{#if name}}`.
 pub fn substitute_variables_keep_literal(template: &str, vars: &HashMap<String, String>) -> String {
-    substitute_variables_impl(template, vars, false)
+    substitute_variables_impl(template, vars, Unresolved::KeepLiteral)
 }
 
 /// POSIX sh single-quote escape a value so it cannot break out of a shell command.
@@ -264,6 +450,176 @@ mod tests {
         let result = substitute_variables_keep_literal("{{a}}", &vars);
         // Should emit the literal value of a, not expand {{b}} inside it.
         assert_eq!(result, "{{b}}");
+    }
+
+    fn vmap(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn literal_open_braces_do_not_swallow_text_in_either_mode() {
+        let vars = vmap(&[("x", "1")]);
+        let t = "a literal {{ here\nthen {{x}}";
+        let want = "a literal {{ here\nthen 1";
+        assert_eq!(substitute_variables(t, &vars), want);
+        assert_eq!(substitute_variables_keep_literal(t, &vars), want);
+    }
+
+    #[test]
+    fn non_name_braces_stay_literal() {
+        let vars = vmap(&[("x", "1")]);
+        for lit in [
+            "{{...}}",
+            "{{<gate>.feedback}}",
+            "{{item.*}}",
+            "{{}}",
+            "{{ }}",
+        ] {
+            assert_eq!(substitute_variables(lit, &vars), lit);
+            let before = format!("{lit} then {{{{x}}}}");
+            assert_eq!(
+                substitute_variables(&before, &vars),
+                format!("{lit} then 1")
+            );
+            assert_eq!(
+                substitute_variables_keep_literal(&before, &vars),
+                format!("{lit} then 1")
+            );
+        }
+    }
+
+    #[test]
+    fn open_braces_at_end_or_unclosed() {
+        let vars = vmap(&[("x", "1")]);
+        assert_eq!(substitute_variables("end {{", &vars), "end {{");
+        assert_eq!(substitute_variables("{{x", &vars), "{{x");
+        assert_eq!(substitute_variables("{{x}", &vars), "{{x}");
+    }
+
+    #[test]
+    fn literal_open_braces_several_lines_before_placeholder() {
+        let vars = vmap(&[("feature_base_branch", "release/1")]);
+        let t = "line 1 {{ literal\nline 2\nline 3\nbase {{feature_base_branch}}";
+        assert_eq!(
+            substitute_variables(t, &vars),
+            "line 1 {{ literal\nline 2\nline 3\nbase release/1"
+        );
+    }
+
+    #[test]
+    fn spaces_and_brace_runs() {
+        let vars = vmap(&[("x", "1"), ("a.b-c_d", "2")]);
+        assert_eq!(substitute_variables("{{ x }}", &vars), "1");
+        assert_eq!(substitute_variables("{{\tx\t}}", &vars), "1");
+        assert_eq!(substitute_variables("{{{{x}}", &vars), "{{1");
+        assert_eq!(substitute_variables("{{{x}}}", &vars), "{1}");
+        assert_eq!(substitute_variables("{{a.b-c_d}}", &vars), "2");
+        assert_eq!(
+            substitute_variables_keep_literal("{{ nope }}", &vars),
+            "{{ nope }}"
+        );
+    }
+
+    #[test]
+    fn variable_name_grammar() {
+        for ok in ["a", "_a", "a1", "a.b", "a-b", "gate.feedback"] {
+            assert!(is_variable_name(ok), "{ok}");
+        }
+        for bad in ["", "1a", ".a", "-a", "a b", "a*", "<g>.f", "..."] {
+            assert!(!is_variable_name(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn if_blocks_set_empty_missing() {
+        let set = vmap(&[("x", "v")]);
+        let empty = vmap(&[("x", "")]);
+        let none = vmap(&[]);
+        let t = "[{{#if x}}A{{/if}}]";
+        for f in [substitute_variables, substitute_variables_keep_literal] {
+            assert_eq!(f(t, &set), "[A]");
+            assert_eq!(f(t, &empty), "[]");
+            assert_eq!(f(t, &none), "[]");
+        }
+    }
+
+    #[test]
+    fn if_else_nesting_and_body_placeholders() {
+        let vars = vmap(&[("x", "v"), ("y", "")]);
+        let t = "{{#if x}}x={{x}}{{#if y}}Y{{else}}noY{{/if}}{{else}}no x{{/if}}";
+        assert_eq!(substitute_variables(t, &vars), "x=vnoY");
+        let t2 = "{{ #if y }}a{{ else }}b{{ /if }}";
+        // `#if` needs no space handling between `{{` and `#`: spaces are trimmed.
+        assert_eq!(substitute_variables(t2, &vars), "b");
+        // Unknown placeholders in a skipped branch are dropped, not kept.
+        assert_eq!(
+            substitute_variables_keep_literal("{{#if y}}{{zz}}{{/if}}", &vars),
+            ""
+        );
+    }
+
+    #[test]
+    fn else_nested_in_false_parent_stays_suppressed() {
+        let t = "{{#if y}}{{#if x}}A{{else}}B{{/if}}{{else}}C{{/if}}";
+        // Outer false: neither inner arm may leak, only the outer else shows.
+        let outer_false = vmap(&[("x", "v"), ("y", "")]);
+        assert_eq!(substitute_variables(t, &outer_false), "C");
+        let both_false = vmap(&[("x", ""), ("y", "")]);
+        assert_eq!(substitute_variables(t, &both_false), "C");
+        // Outer true: the inner conditional picks its own arm.
+        let inner_false = vmap(&[("x", ""), ("y", "v")]);
+        assert_eq!(substitute_variables(t, &inner_false), "B");
+        let both_true = vmap(&[("x", "v"), ("y", "v")]);
+        assert_eq!(substitute_variables(t, &both_true), "A");
+    }
+
+    #[test]
+    fn unbalanced_conditionals_stay_literal() {
+        let vars = vmap(&[("x", "v")]);
+        assert_eq!(substitute_variables("{{#if x}}A", &vars), "{{#if x}}A");
+        assert_eq!(substitute_variables("A{{/if}}", &vars), "A{{/if}}");
+        assert_eq!(substitute_variables("A{{else}}B", &vars), "A{{else}}B");
+        assert_eq!(
+            substitute_variables("{{#if}}A{{/if}}", &vars),
+            "{{#if}}A{{/if}}"
+        );
+        assert_eq!(
+            substitute_variables("{{#each x}}{{x}}{{/each}}", &vars),
+            "{{#each x}}v{{/each}}"
+        );
+        // A second `{{else}}` in one block is literal text, here inside the skipped branch.
+        assert_eq!(
+            substitute_variables("{{#if x}}A{{else}}B{{else}}C{{/if}}", &vars),
+            "A"
+        );
+        assert_eq!(
+            substitute_variables("{{#if y}}A{{else}}B{{else}}C{{/if}}", &vars),
+            "B{{else}}C"
+        );
+    }
+
+    #[test]
+    fn if_does_not_rescan_values() {
+        let vars = vmap(&[("a", "{{#if b}}X{{/if}}{{b}}"), ("b", "B")]);
+        assert_eq!(
+            substitute_variables("{{a}}", &vars),
+            "{{#if b}}X{{/if}}{{b}}"
+        );
+    }
+
+    #[test]
+    fn render_hook_quotes_but_if_sees_raw_value() {
+        let vars = vmap(&[("e", ""), ("v", "it's")]);
+        let out = substitute_with(
+            "{{#if e}}empty-set{{else}}empty-falsy{{/if}} {{e}} {{v}}",
+            |k| vars.get(k).map(String::as_str),
+            |v, out| out.push_str(&shell_quote(v)),
+            Unresolved::Strip,
+        );
+        assert_eq!(out, "empty-falsy '' 'it'\\''s'");
     }
 
     #[test]

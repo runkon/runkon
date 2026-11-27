@@ -555,12 +555,14 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
 
     // Build variable map for substitution, shell-quoting all values to prevent
     // injection when they are interpolated into the sh -c command string.
+    // `{{#if}}` sees the raw values; only rendered placeholders are quoted.
     let vars = build_variable_map(state);
-    let shell_safe_vars: std::collections::HashMap<String, String> = vars
-        .iter()
-        .map(|(k, v)| (k.clone(), crate::prompt_builder::shell_quote(v)))
-        .collect();
-    let script_cmd = crate::prompt_builder::substitute_variables(&node.run, &shell_safe_vars);
+    let script_cmd = crate::prompt_builder::substitute_with(
+        &node.run,
+        |k| vars.get(k).map(String::as_str),
+        |v, out| out.push_str(&crate::prompt_builder::shell_quote(v)),
+        crate::prompt_builder::Unresolved::Strip,
+    );
 
     tracing::info!("script '{}': executing command", node.name);
 
@@ -891,6 +893,30 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(markers, vec!["test_passed"]);
         assert_eq!(step.context_out.as_deref(), Some("step ctx"));
+    }
+
+    /// `{{#if}}` sees the raw value while a rendered `{{var}}` is shell-quoted.
+    #[test]
+    fn script_if_branch_and_quoted_value() {
+        let (persistence, run_id) = make_persistence();
+        let mut state = make_state(Arc::clone(&persistence), run_id.clone());
+        state
+            .inputs
+            .insert("greeting".to_string(), "it's a $HOME `x`".to_string());
+        state.inputs.insert("empty".to_string(), String::new());
+        let node = make_node(
+            "quote",
+            "printf '%s|' {{#if greeting}}{{greeting}}{{else}}none{{/if}} {{#if empty}}E{{else}}empty-branch{{/if}}",
+        );
+        execute_script(&mut state, &node, 0).unwrap();
+
+        let steps = persistence.get_steps(&run_id).unwrap();
+        assert_eq!(steps[0].status, WorkflowStepStatus::Completed);
+        let ctx = steps[0].context_out.as_deref().unwrap_or("");
+        assert!(
+            ctx.contains("it's a $HOME `x`|empty-branch|"),
+            "value must arrive as one literal argument, correct branches taken: {ctx:?}"
+        );
     }
 
     /// When the script produces no FLOW_OUTPUT block, context falls back to
