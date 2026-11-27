@@ -555,12 +555,14 @@ pub fn execute_script(state: &mut ExecutionState, node: &ScriptNode, iteration: 
 
     // Build variable map for substitution, shell-quoting all values to prevent
     // injection when they are interpolated into the sh -c command string.
+    // `{{#if}}` sees the raw values; only rendered placeholders are quoted.
     let vars = build_variable_map(state);
-    let shell_safe_vars: std::collections::HashMap<String, String> = vars
-        .iter()
-        .map(|(k, v)| (k.clone(), crate::prompt_builder::shell_quote(v)))
-        .collect();
-    let script_cmd = crate::prompt_builder::substitute_variables(&node.run, &shell_safe_vars);
+    let script_cmd = crate::prompt_builder::substitute_with(
+        &node.run,
+        |k| vars.get(k).map(String::as_str),
+        |v, out| out.push_str(&crate::prompt_builder::shell_quote(v)),
+        crate::prompt_builder::Unresolved::Strip,
+    );
 
     tracing::info!("script '{}': executing command", node.name);
 
